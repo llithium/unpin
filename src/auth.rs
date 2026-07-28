@@ -1,0 +1,218 @@
+use std::collections::HashMap;
+#[cfg(unix)]
+use std::path::{Path, PathBuf};
+use std::time::{SystemTime, UNIX_EPOCH};
+
+use thiserror::Error;
+
+use crate::cli::CookieBrowser;
+
+#[derive(Debug, Clone, Eq, PartialEq)]
+pub struct BrowserCookie {
+    pub name: String,
+    pub value: String,
+}
+
+#[derive(Debug, Error)]
+pub enum AuthError {
+    #[error(
+        "could not read Pinterest cookies from {browser}; make sure the browser is installed and has a signed-in Pinterest profile"
+    )]
+    Read { browser: CookieBrowser },
+
+    #[error(
+        "no usable Pinterest cookies were found in {browser}; sign in to Pinterest there, then try again"
+    )]
+    NoCookies { browser: CookieBrowser },
+}
+
+pub async fn load_pinterest_cookies(
+    browser: CookieBrowser,
+) -> Result<Vec<BrowserCookie>, AuthError> {
+    tokio::task::spawn_blocking(move || load_pinterest_cookies_blocking(browser))
+        .await
+        .map_err(|_| AuthError::Read { browser })?
+}
+
+fn load_pinterest_cookies_blocking(
+    browser: CookieBrowser,
+) -> Result<Vec<BrowserCookie>, AuthError> {
+    let domains = Some(vec!["pinterest.com".to_owned()]);
+    let cookies = match browser {
+        CookieBrowser::Chrome => load_chrome_cookies(domains),
+        CookieBrowser::Chromium => rookie::chromium(domains),
+        CookieBrowser::Brave => rookie::brave(domains),
+        CookieBrowser::Edge => rookie::edge(domains),
+        CookieBrowser::Firefox => rookie::firefox(domains),
+        CookieBrowser::Arc => rookie::arc(domains),
+        CookieBrowser::Vivaldi => rookie::vivaldi(domains),
+    }
+    .map_err(|_| AuthError::Read { browser })?;
+
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs();
+    let mut by_name: HashMap<String, (usize, BrowserCookie)> = HashMap::new();
+
+    for cookie in cookies {
+        if cookie.name.is_empty()
+            || cookie.value.is_empty()
+            || cookie.expires.is_some_and(|expires| expires <= now)
+            || !domain_matches_pinterest(&cookie.domain)
+        {
+            continue;
+        }
+
+        // When both `.pinterest.com` and `www.pinterest.com` define the same
+        // cookie, use the more specific domain just as a browser would.
+        let specificity = cookie.domain.trim_start_matches('.').len();
+        let candidate = BrowserCookie {
+            name: cookie.name.clone(),
+            value: cookie.value,
+        };
+        match by_name.get(&cookie.name) {
+            Some((current_specificity, _)) if *current_specificity > specificity => {}
+            _ => {
+                by_name.insert(cookie.name, (specificity, candidate));
+            }
+        }
+    }
+
+    let mut cookies = by_name
+        .into_values()
+        .map(|(_, cookie)| cookie)
+        .collect::<Vec<_>>();
+    cookies.sort_by(|left, right| left.name.cmp(&right.name));
+    if cookies.is_empty() {
+        return Err(AuthError::NoCookies { browser });
+    }
+    Ok(cookies)
+}
+
+fn load_chrome_cookies(domains: Option<Vec<String>>) -> rookie::Result<Vec<rookie::enums::Cookie>> {
+    #[cfg(unix)]
+    if let Some(cookies) = load_chrome_profile_cookies(domains.clone()) {
+        return Ok(cookies);
+    }
+
+    rookie::chrome(domains)
+}
+
+#[cfg(unix)]
+fn load_chrome_profile_cookies(domains: Option<Vec<String>>) -> Option<Vec<rookie::enums::Cookie>> {
+    let mut first_pinterest_profile = None;
+
+    for base in chrome_profile_bases() {
+        for profile in ordered_profile_directories(&base) {
+            for relative_db in ["Network/Cookies", "Cookies"] {
+                let database = profile.join(relative_db);
+                if !database.is_file() {
+                    continue;
+                }
+                let Some(database) = database.to_str() else {
+                    continue;
+                };
+                let Ok(cookies) = rookie::any_browser(database, domains.clone(), None) else {
+                    continue;
+                };
+                if cookies.is_empty() {
+                    continue;
+                }
+                if cookies
+                    .iter()
+                    .any(|cookie| cookie.name == "_pinterest_sess")
+                {
+                    return Some(cookies);
+                }
+                first_pinterest_profile.get_or_insert(cookies);
+            }
+        }
+    }
+
+    first_pinterest_profile
+}
+
+#[cfg(target_os = "macos")]
+fn chrome_profile_bases() -> Vec<PathBuf> {
+    let Some(home) = std::env::var_os("HOME") else {
+        return Vec::new();
+    };
+    ["Chrome", "Chrome-beta", "Chrome-dev", "Chrome-nightly"]
+        .into_iter()
+        .map(|channel| {
+            PathBuf::from(&home)
+                .join("Library/Application Support/Google")
+                .join(channel)
+        })
+        .collect()
+}
+
+#[cfg(all(unix, not(target_os = "macos")))]
+fn chrome_profile_bases() -> Vec<PathBuf> {
+    let Some(home) = std::env::var_os("HOME") else {
+        return Vec::new();
+    };
+    [
+        "google-chrome",
+        "google-chrome-beta",
+        "google-chrome-unstable",
+    ]
+    .into_iter()
+    .map(|channel| PathBuf::from(&home).join(".config").join(channel))
+    .collect()
+}
+
+#[cfg(unix)]
+fn ordered_profile_directories(base: &Path) -> Vec<PathBuf> {
+    let mut profiles = std::fs::read_dir(base)
+        .ok()
+        .into_iter()
+        .flatten()
+        .filter_map(Result::ok)
+        .filter(|entry| entry.file_type().is_ok_and(|kind| kind.is_dir()))
+        .filter(|entry| {
+            let name = entry.file_name();
+            let name = name.to_string_lossy();
+            name == "Default" || name.starts_with("Profile ")
+        })
+        .map(|entry| entry.path())
+        .collect::<Vec<_>>();
+    profiles.sort();
+
+    let last_used = std::fs::read_to_string(base.join("Local State"))
+        .ok()
+        .and_then(|content| serde_json::from_str::<serde_json::Value>(&content).ok())
+        .and_then(|state| {
+            state
+                .pointer("/profile/last_used")
+                .and_then(serde_json::Value::as_str)
+                .map(str::to_owned)
+        });
+    if let Some(last_used) = last_used
+        && let Some(index) = profiles.iter().position(|profile| {
+            profile.file_name().and_then(|name| name.to_str()) == Some(last_used.as_str())
+        })
+    {
+        profiles.swap(0, index);
+    }
+    profiles
+}
+
+fn domain_matches_pinterest(domain: &str) -> bool {
+    let domain = domain.trim_start_matches('.').to_ascii_lowercase();
+    domain == "pinterest.com" || domain.ends_with(".pinterest.com")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn accepts_only_pinterest_cookie_domains() {
+        assert!(domain_matches_pinterest(".pinterest.com"));
+        assert!(domain_matches_pinterest("www.pinterest.com"));
+        assert!(!domain_matches_pinterest("notpinterest.com"));
+        assert!(!domain_matches_pinterest("example.com"));
+    }
+}
