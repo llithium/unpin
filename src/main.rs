@@ -9,6 +9,7 @@ use unpin::progress::{ProgressEvent, ProgressSink, TerminalProgress};
 async fn main() -> ExitCode {
     let cli = Cli::parse();
     let progress = TerminalProgress::new(!cli.no_progress && std::io::stderr().is_terminal());
+    unpin::progress::restore_cursor_on_interrupt();
     let mut report = match unpin::run_with_api_root_and_progress(&cli, None, &progress).await {
         Ok(report) => report,
         Err(error) => {

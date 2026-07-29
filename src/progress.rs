@@ -1,5 +1,7 @@
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
+use console::Term;
 use indicatif::{ProgressBar, ProgressDrawTarget, ProgressStyle};
 
 #[derive(Debug, Clone, Eq, PartialEq)]
@@ -65,6 +67,7 @@ impl ProgressSink for NoProgress {
 pub struct TerminalProgress {
     bar: ProgressBar,
     visible: bool,
+    cursor_hidden: AtomicBool,
 }
 
 impl TerminalProgress {
@@ -74,13 +77,54 @@ impl TerminalProgress {
         } else {
             ProgressBar::hidden()
         };
+        let progress = Self {
+            bar,
+            visible,
+            cursor_hidden: AtomicBool::new(false),
+        };
         if visible {
-            bar.set_draw_target(ProgressDrawTarget::stderr());
-            bar.set_style(spinner_style());
-            bar.enable_steady_tick(Duration::from_millis(90));
+            progress.bar.set_draw_target(ProgressDrawTarget::stderr());
+            progress.bar.set_style(spinner_style());
+            progress.bar.enable_steady_tick(Duration::from_millis(90));
+            // indicatif leaves the caret parked at the end of the bar, where it
+            // blinks over the output for the whole scan.
+            progress.hide_cursor();
         }
-        Self { bar, visible }
+        progress
     }
+
+    fn hide_cursor(&self) {
+        if self.visible && !self.cursor_hidden.swap(true, Ordering::Relaxed) {
+            let _ = Term::stderr().hide_cursor();
+        }
+    }
+
+    /// Always safe to call, and called from every path that ends the bar.
+    fn show_cursor(&self) {
+        if self.cursor_hidden.swap(false, Ordering::Relaxed) {
+            let _ = Term::stderr().show_cursor();
+        }
+    }
+}
+
+impl Drop for TerminalProgress {
+    /// Backstop for early returns and panics; a terminal left without a caret
+    /// needs a manual `reset` to recover.
+    fn drop(&mut self) {
+        self.show_cursor();
+    }
+}
+
+/// Restores the caret when the process is interrupted, which skips `Drop`.
+///
+/// Returns whether the handler was installed; a second call is a no-op.
+pub fn restore_cursor_on_interrupt() -> bool {
+    ctrlc::set_handler(|| {
+        let _ = Term::stderr().show_cursor();
+        // 128 + SIGINT, the shell convention for death by interrupt.
+        std::process::exit(130);
+    })
+    .is_ok()
 }
 
 impl ProgressSink for TerminalProgress {
@@ -117,8 +161,10 @@ impl ProgressSink for TerminalProgress {
             ProgressEvent::SelectionStarted => {
                 self.bar.disable_steady_tick();
                 self.bar.set_draw_target(ProgressDrawTarget::hidden());
+                self.show_cursor();
             }
             ProgressEvent::SelectionFinished => {
+                self.hide_cursor();
                 self.bar.set_draw_target(ProgressDrawTarget::stderr());
                 self.bar.set_style(spinner_style());
                 self.bar.enable_steady_tick(Duration::from_millis(90));
@@ -173,6 +219,7 @@ impl ProgressSink for TerminalProgress {
             ProgressEvent::Finished | ProgressEvent::Failed => {
                 self.bar.disable_steady_tick();
                 self.bar.finish_and_clear();
+                self.show_cursor();
             }
         }
     }
@@ -213,5 +260,33 @@ pub mod tests {
         fn emit(&self, event: ProgressEvent) {
             self.events.lock().unwrap().push(event);
         }
+    }
+
+    #[test]
+    fn non_interactive_runs_never_touch_the_cursor() {
+        // Piped or --no-progress runs must not emit terminal escapes at all.
+        let progress = TerminalProgress::new(false);
+        for event in [
+            ProgressEvent::FetchingBoard,
+            ProgressEvent::SelectionStarted,
+            ProgressEvent::SelectionFinished,
+            ProgressEvent::Finished,
+        ] {
+            progress.emit(event);
+            assert!(!progress.cursor_hidden.load(Ordering::Relaxed));
+        }
+    }
+
+    #[test]
+    fn finishing_restores_a_hidden_cursor() {
+        let progress = TerminalProgress::new(false);
+        // Force the hidden state a visible run would be in.
+        progress.cursor_hidden.store(true, Ordering::Relaxed);
+
+        progress.show_cursor();
+        assert!(!progress.cursor_hidden.load(Ordering::Relaxed));
+        // Restoring twice is harmless, which is what makes Drop a safe backstop.
+        progress.show_cursor();
+        assert!(!progress.cursor_hidden.load(Ordering::Relaxed));
     }
 }
