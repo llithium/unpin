@@ -159,7 +159,7 @@ footer { margin-top: 52px; padding-top: 18px; border-top: 1px solid var(--line);
 "#,
     );
 
-    let show_boards = report.summary.boards.len() > 1;
+    let show_boards = report.shows_board_labels();
     let _ = writeln!(html, "<h1>{}</h1>", escape_html(&report.title()));
     html.push_str(
         "<p class=\"lede\">Compare likely duplicate pins visually. Recommendations favor pixel area, longest edge, and file size. Review every candidate before deleting anything.</p>\n",
@@ -180,17 +180,22 @@ footer { margin-top: 52px; padding-top: 18px; border-top: 1px solid var(--line);
         report.summary.exact_groups,
         report.summary.visual_candidates
     );
-    if report.summary.boards.len() > 1 {
+    if show_boards {
         html.push_str("<p class=\"boards\">Scanned ");
         for (index, board) in report.summary.boards.iter().enumerate() {
             let separator = if index == 0 { "" } else { " · " };
-            let _ = write!(
-                html,
-                "{separator}<a href=\"{}\" target=\"_blank\" rel=\"noopener noreferrer\">{}</a> ({} pins)",
-                escape_html(&board.url),
-                escape_html(&board.name),
-                board.pins_found
-            );
+            let name = escape_html(&board.name);
+            // Pinterest does not always supply a board URL. An empty href would
+            // link back to the report file itself, so render plain text instead.
+            let named = if board.url.is_empty() {
+                name
+            } else {
+                format!(
+                    "<a href=\"{}\" target=\"_blank\" rel=\"noopener noreferrer\">{name}</a>",
+                    escape_html(&board.url)
+                )
+            };
+            let _ = write!(html, "{separator}{named} ({} pins)", board.pins_found);
         }
         html.push_str("</p>\n");
     }

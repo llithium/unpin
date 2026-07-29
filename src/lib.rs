@@ -40,8 +40,21 @@ pub enum AppError {
     #[error("--boards and --all-boards only apply to a username or profile URL")]
     BoardFlagsWithBoardUrl,
 
-    #[error("the board contained no analyzable static image pins")]
-    NoAnalyzablePins,
+    /// Every selected board failed to fetch, so the per-board reasons are the
+    /// only useful thing to report.
+    #[error("no board could be scanned{}", listed(reasons))]
+    AllBoardsFailed { reasons: Vec<String> },
+
+    #[error("no analyzable static image pins were found{}", listed(reasons))]
+    NoAnalyzablePins { reasons: Vec<String> },
+}
+
+/// Renders collected reasons as an indented list under an error message.
+fn listed(reasons: &[String]) -> String {
+    if reasons.is_empty() {
+        return String::new();
+    }
+    format!("\n  {}", reasons.join("\n  "))
 }
 
 pub async fn run(cli: &Cli) -> Result<Report, AppError> {
@@ -121,8 +134,14 @@ pub async fn run_with_api_root_and_progress(
         }));
     }
 
+    // Distinguish "nothing could be fetched" from "fetched, but nothing was
+    // analyzable": only the first carries the per-board failure reasons, and
+    // reporting it as the second would be both wrong and unactionable.
+    if scanned_boards.is_empty() {
+        return Err(AppError::AllBoardsFailed { reasons: warnings });
+    }
     if pins.is_empty() {
-        return Err(AppError::NoAnalyzablePins);
+        return Err(AppError::NoAnalyzablePins { reasons: warnings });
     }
 
     let mut analysis = analysis::analyze_pins_with_progress(
@@ -134,7 +153,7 @@ pub async fn run_with_api_root_and_progress(
     .await?;
     skipped.append(&mut analysis.skipped);
     if analysis.analyzed == 0 {
-        return Err(AppError::NoAnalyzablePins);
+        return Err(AppError::NoAnalyzablePins { reasons: warnings });
     }
 
     let pins_reported = scanned_boards

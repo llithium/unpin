@@ -154,6 +154,42 @@ pub struct UserTarget {
     pub username: String,
 }
 
+/// Builds a board's web URL from its owner and slug.
+///
+/// Both come from percent-decoded path segments, so they are pushed back through
+/// `path_segments_mut`, which re-encodes them. Formatting them into a string
+/// instead would emit raw spaces and `?`/`#` into the URL.
+fn board_url(root: &Url, username: &str, slug: &str) -> String {
+    let mut url = root.clone();
+    match url.path_segments_mut() {
+        Ok(mut segments) => {
+            segments.clear().push(username).push(slug).push("");
+        }
+        // Only reachable for a cannot-be-a-base root, which `Target::parse`
+        // rejects before this point.
+        Err(()) => return String::new(),
+    }
+    url.into()
+}
+
+/// Resolves a Pinterest-supplied path against the site root, keeping only
+/// ordinary web URLs.
+///
+/// The result is written into an `href` in the generated report, and joining is
+/// not a scheme filter: `javascript:` and `data:` values pass straight through,
+/// and an empty path silently resolves to the site root. This mirrors the check
+/// [`parse_pin`] already applies to image URLs.
+fn absolute_web_url(root: &Url, path: &str) -> String {
+    if path.is_empty() {
+        return String::new();
+    }
+    root.join(path)
+        .ok()
+        .filter(|url| matches!(url.scheme(), "http" | "https"))
+        .map(String::from)
+        .unwrap_or_default()
+}
+
 /// Pinterest usernames are ASCII alphanumerics and underscores.
 fn is_username(candidate: &str) -> bool {
     !candidate.is_empty()
@@ -350,7 +386,7 @@ impl PinterestClient {
             id,
             name,
             slug: target.board_slug.clone(),
-            url: format!("{}{}/{}/", target.root, target.username, target.board_slug),
+            url: board_url(&target.root, &target.username, &target.board_slug),
             pins_reported: ["pin_count", "pins_count"]
                 .iter()
                 .find_map(|field| value_usize(board.get(*field))),
@@ -429,7 +465,7 @@ impl PinterestClient {
                 id,
                 name,
                 slug,
-                url: target.root.join(url).map(String::from).unwrap_or_default(),
+                url: absolute_web_url(&target.root, url),
                 pins_reported: value_usize(raw_board.get("pin_count")),
                 section_count: raw_board
                     .get("section_count")
@@ -903,6 +939,49 @@ mod tests {
         assert!(BoardTarget::parse("https://www.pinterest.com/alice/").is_err());
         assert!(BoardTarget::parse("alice").is_err());
         assert!(BoardTarget::parse("https://www.pinterest.com/alice/ideas/").is_ok());
+    }
+
+    #[test]
+    fn board_urls_re_encode_decoded_segments() {
+        let root = Url::parse("https://uk.pinterest.com/").unwrap();
+
+        assert_eq!(
+            board_url(&root, "alice", "interiors"),
+            "https://uk.pinterest.com/alice/interiors/"
+        );
+        // These come from percent-decoded path segments, so they must go back in
+        // encoded rather than being formatted into the string raw.
+        assert_eq!(
+            board_url(&root, "alice", "home ideas"),
+            "https://uk.pinterest.com/alice/home%20ideas/"
+        );
+        for (slug, encoded) in [("a?b", "a%3Fb"), ("a#b", "a%23b"), ("a/b", "a%2Fb")] {
+            assert_eq!(
+                board_url(&root, "alice", slug),
+                format!("https://uk.pinterest.com/alice/{encoded}/"),
+                "{slug}"
+            );
+        }
+    }
+
+    #[test]
+    fn listed_board_urls_keep_only_web_schemes() {
+        let root = Url::parse("https://www.pinterest.com/").unwrap();
+
+        assert_eq!(
+            absolute_web_url(&root, "/alice/interiors/"),
+            "https://www.pinterest.com/alice/interiors/"
+        );
+
+        // Joining is not a scheme filter, and this value lands in an href in the
+        // generated report.
+        for hostile in ["javascript:alert(1)", "data:text/html,<b>x", "vbscript:x"] {
+            assert_eq!(absolute_web_url(&root, hostile), "", "{hostile}");
+        }
+
+        // An empty path resolves to the site root, which would silently link a
+        // board to the Pinterest homepage.
+        assert_eq!(absolute_web_url(&root, ""), "");
     }
 
     #[test]

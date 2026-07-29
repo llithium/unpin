@@ -253,6 +253,224 @@ async fn scans_paginated_board_and_sections_end_to_end() {
     std::fs::remove_file(visual_path).unwrap();
 }
 
+/// Mounts a `Boards` listing for `alice` with the given board entries.
+async fn mount_board_listing(server: &MockServer, boards: serde_json::Value) {
+    mount_resource(
+        server,
+        "Boards",
+        json!({
+            "username": "alice",
+            "field_set_key": "profile_grid_item",
+            "sort": "last_pinned_to",
+            "filter_stories": false,
+            "page_size": 25,
+            "include_archived": true,
+            "bookmarks": null
+        }),
+        page(boards, "-end-"),
+    )
+    .await;
+}
+
+fn board_entry(id: &str, name: &str, slug: &str, pins: usize) -> serde_json::Value {
+    json!({
+        "id": id,
+        "type": "board",
+        "name": name,
+        "url": format!("/alice/{slug}/"),
+        "pin_count": pins,
+        "section_count": 0,
+        "privacy": "public"
+    })
+}
+
+async fn mount_board_feed(server: &MockServer, board_id: &str, pin_id: &str, image: &str) {
+    mount_resource(
+        server,
+        "BoardFeed",
+        json!({
+            "board_id": board_id,
+            "field_set_key": "react_grid_pin",
+            "prepend": false,
+            "bookmarks": null
+        }),
+        page(
+            json!([{
+                "id": pin_id,
+                "images": {"orig": {"url": image, "width": 20, "height": 20}}
+            }]),
+            "-end-",
+        ),
+    )
+    .await;
+}
+
+#[tokio::test]
+async fn one_failing_board_does_not_discard_the_others() {
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/shared.png"))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .insert_header("content-type", "image/png")
+                .set_body_bytes(image_bytes(24, 24)),
+        )
+        .mount(&server)
+        .await;
+
+    mount_board_listing(
+        &server,
+        json!([
+            board_entry("board-1", "Interiors", "interiors", 1),
+            board_entry("board-2", "Mood board", "mood-board", 1),
+        ]),
+    )
+    .await;
+    // Only the first board's feed resolves; the second returns 403, standing in
+    // for a session that expired part-way through a scan.
+    mount_board_feed(
+        &server,
+        "board-1",
+        "301",
+        &format!("{}/shared.png", server.uri()),
+    )
+    .await;
+    Mock::given(method("GET"))
+        .and(path("/resource/BoardFeedResource/get/"))
+        .respond_with(ResponseTemplate::new(403))
+        .mount(&server)
+        .await;
+
+    let cli = Cli::try_parse_from(["unpin", "alice", "--all-boards"]).unwrap();
+    let report = unpin::run_with_api_root(&cli, Some(Url::parse(&server.uri()).unwrap()))
+        .await
+        .unwrap();
+
+    // The reachable board still produced a report.
+    assert_eq!(report.summary.boards.len(), 1);
+    assert_eq!(report.summary.boards[0].name, "Interiors");
+    assert_eq!(report.summary.analyzed, 1);
+
+    // The failure survives as a board-prefixed warning rather than vanishing.
+    let warning = report
+        .warnings
+        .iter()
+        .find(|warning| warning.contains("skipped"))
+        .expect("the failing board should be reported");
+    assert!(warning.starts_with("Mood board: "), "{warning}");
+    assert!(warning.contains("403"), "{warning}");
+}
+
+#[tokio::test]
+async fn total_failure_reports_the_reason_not_an_empty_board() {
+    let server = MockServer::start().await;
+    mount_board_listing(
+        &server,
+        json!([
+            board_entry("board-1", "Interiors", "interiors", 1),
+            board_entry("board-2", "Mood board", "mood-board", 1),
+        ]),
+    )
+    .await;
+    Mock::given(method("GET"))
+        .and(path("/resource/BoardFeedResource/get/"))
+        .respond_with(ResponseTemplate::new(403))
+        .mount(&server)
+        .await;
+
+    let cli = Cli::try_parse_from(["unpin", "alice", "--all-boards"]).unwrap();
+    let error = unpin::run_with_api_root(&cli, Some(Url::parse(&server.uri()).unwrap()))
+        .await
+        .unwrap_err();
+    let message = error.to_string();
+
+    // Reporting this as "no analyzable pins" would be both wrong and
+    // unactionable: nothing was fetched at all.
+    assert!(message.contains("no board could be scanned"), "{message}");
+    assert!(!message.contains("no analyzable"), "{message}");
+    // Every board's reason is carried through as an indented list, so the cause
+    // is visible instead of being dropped with the report that never got built.
+    for board in ["Interiors", "Mood board"] {
+        assert!(
+            message.contains(&format!("\n  {board}: skipped,")),
+            "{message} missing an indented reason for {board}"
+        );
+    }
+    assert!(message.contains("403"), "{message}");
+    assert_eq!(message.lines().count(), 3, "{message}");
+}
+
+#[tokio::test]
+async fn board_urls_in_the_report_are_encoded_and_http() {
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/shared.png"))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .insert_header("content-type", "image/png")
+                .set_body_bytes(image_bytes(24, 24)),
+        )
+        .mount(&server)
+        .await;
+
+    mount_board_listing(
+        &server,
+        json!([
+            // A hostile URL, and a board with none at all.
+            {
+                "id": "board-1",
+                "type": "board",
+                "name": "Hostile",
+                "url": "javascript:alert(1)",
+                "pin_count": 1,
+                "section_count": 0,
+                "privacy": "public"
+            },
+            {
+                "id": "board-2",
+                "type": "board",
+                "name": "No URL",
+                "pin_count": 1,
+                "section_count": 0,
+                "privacy": "public"
+            }
+        ]),
+    )
+    .await;
+    mount_board_feed(
+        &server,
+        "board-1",
+        "401",
+        &format!("{}/shared.png", server.uri()),
+    )
+    .await;
+    mount_board_feed(
+        &server,
+        "board-2",
+        "402",
+        &format!("{}/shared.png", server.uri()),
+    )
+    .await;
+
+    let cli = Cli::try_parse_from(["unpin", "alice", "--all-boards"]).unwrap();
+    let report = unpin::run_with_api_root(&cli, Some(Url::parse(&server.uri()).unwrap()))
+        .await
+        .unwrap();
+
+    for board in &report.summary.boards {
+        assert_eq!(
+            board.url, "",
+            "{:?} kept a bad URL: {}",
+            board.name, board.url
+        );
+    }
+
+    // Neither an empty href nor a javascript: one reaches the report.
+    let html = unpin::visual::render_html(&report);
+    assert!(!html.contains("javascript:"));
+    assert!(!html.contains("href=\"\""));
+}
+
 #[tokio::test]
 async fn scans_selected_profile_boards_as_one_pooled_report() {
     let server = MockServer::start().await;

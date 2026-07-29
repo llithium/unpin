@@ -84,13 +84,18 @@ impl TerminalProgress {
         };
         if visible {
             progress.bar.set_draw_target(ProgressDrawTarget::stderr());
-            progress.bar.set_style(spinner_style());
-            progress.bar.enable_steady_tick(Duration::from_millis(90));
+            progress.resume_spinner();
             // indicatif leaves the caret parked at the end of the bar, where it
             // blinks over the output for the whole scan.
             progress.hide_cursor();
         }
         progress
+    }
+
+    /// Restores the spinner style and tick after the bar switched away from it.
+    fn resume_spinner(&self) {
+        self.bar.set_style(spinner_style());
+        self.bar.enable_steady_tick(Duration::from_millis(90));
     }
 
     fn hide_cursor(&self) {
@@ -117,14 +122,14 @@ impl Drop for TerminalProgress {
 
 /// Restores the caret when the process is interrupted, which skips `Drop`.
 ///
-/// Returns whether the handler was installed; a second call is a no-op.
-pub fn restore_cursor_on_interrupt() -> bool {
-    ctrlc::set_handler(|| {
+/// A failed install is not worth reporting: the worst case is the pre-existing
+/// behavior of an interrupted run leaving the caret hidden.
+pub fn restore_cursor_on_interrupt() {
+    let _ = ctrlc::set_handler(|| {
         let _ = Term::stderr().show_cursor();
         // 128 + SIGINT, the shell convention for death by interrupt.
         std::process::exit(130);
-    })
-    .is_ok()
+    });
 }
 
 impl ProgressSink for TerminalProgress {
@@ -134,22 +139,19 @@ impl ProgressSink for TerminalProgress {
         }
         match event {
             ProgressEvent::LoadingBrowserCookies { browser } => {
-                self.bar.set_style(spinner_style());
-                self.bar.enable_steady_tick(Duration::from_millis(90));
+                self.resume_spinner();
                 self.bar
                     .set_message(format!("Reading Pinterest cookies from {browser}"));
             }
             ProgressEvent::FetchingBoard => {
-                self.bar.set_style(spinner_style());
-                self.bar.enable_steady_tick(Duration::from_millis(90));
+                self.resume_spinner();
                 self.bar.set_message("Fetching board metadata");
             }
             ProgressEvent::BoardResolved { name } => {
                 self.bar.set_message(format!("Found board “{name}”"));
             }
             ProgressEvent::FetchingUserBoards { username } => {
-                self.bar.set_style(spinner_style());
-                self.bar.enable_steady_tick(Duration::from_millis(90));
+                self.resume_spinner();
                 self.bar
                     .set_message(format!("Listing boards for {username}"));
             }
@@ -166,16 +168,14 @@ impl ProgressSink for TerminalProgress {
             ProgressEvent::SelectionFinished => {
                 self.hide_cursor();
                 self.bar.set_draw_target(ProgressDrawTarget::stderr());
-                self.bar.set_style(spinner_style());
-                self.bar.enable_steady_tick(Duration::from_millis(90));
+                self.resume_spinner();
             }
             ProgressEvent::BoardStarted {
                 name,
                 current,
                 total,
             } => {
-                self.bar.set_style(spinner_style());
-                self.bar.enable_steady_tick(Duration::from_millis(90));
+                self.resume_spinner();
                 self.bar
                     .set_message(format!("Board {current}/{total}: “{name}”"));
             }
@@ -207,13 +207,11 @@ impl ProgressSink for TerminalProgress {
                 self.bar.set_position(completed as u64);
             }
             ProgressEvent::MatchingStarted => {
-                self.bar.set_style(spinner_style());
-                self.bar.enable_steady_tick(Duration::from_millis(90));
+                self.resume_spinner();
                 self.bar.set_message("Comparing image fingerprints");
             }
             ProgressEvent::ReportStarted => {
-                self.bar.set_style(spinner_style());
-                self.bar.enable_steady_tick(Duration::from_millis(90));
+                self.resume_spinner();
                 self.bar.set_message("Creating temporary visual report");
             }
             ProgressEvent::Finished | ProgressEvent::Failed => {

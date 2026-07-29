@@ -148,6 +148,14 @@ pub fn resolve_requested(
 
     for value in requested {
         let wanted = value.trim().to_lowercase();
+        // A board whose slug Pinterest omitted has an empty one, which an empty
+        // request would otherwise match by accident.
+        if wanted.is_empty() {
+            return Err(SelectError::UnknownBoard {
+                requested: value.clone(),
+                available: available_boards(boards),
+            });
+        }
         let found = boards
             .iter()
             .position(|board| board.slug.to_lowercase() == wanted)
@@ -225,6 +233,36 @@ mod tests {
             resolve_requested(&["  interiors  ".into()], &boards).unwrap(),
             [0]
         );
+    }
+
+    #[test]
+    fn a_slug_match_wins_over_a_name_match() {
+        // "recipes" is the second board's slug and the first board's name, which
+        // the doc comment resolves in favour of the slug.
+        let boards = vec![board("recipes", "food"), board("Dinners", "recipes")];
+
+        assert_eq!(
+            resolve_requested(&["recipes".into()], &boards).unwrap(),
+            [1]
+        );
+        assert_eq!(resolve_requested(&["food".into()], &boards).unwrap(), [0]);
+    }
+
+    #[test]
+    fn an_empty_request_never_matches_a_slugless_board() {
+        // Pinterest sometimes omits a board's URL, leaving its slug empty; an
+        // empty --boards value must not match it by accident.
+        let mut boards = boards();
+        boards[0].slug = String::new();
+
+        assert!(matches!(
+            resolve_requested(&["".into()], &boards).unwrap_err(),
+            SelectError::UnknownBoard { .. }
+        ));
+        assert!(matches!(
+            resolve_requested(&["   ".into()], &boards).unwrap_err(),
+            SelectError::UnknownBoard { .. }
+        ));
     }
 
     #[test]

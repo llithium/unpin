@@ -165,8 +165,9 @@ impl Report {
         }
     }
 
-    /// Board labels are noise when everything came from the same board.
-    fn shows_board_labels(&self) -> bool {
+    /// Board labels and scope tags are noise when everything came from the same
+    /// board, so both renderers gate on this.
+    pub(crate) fn shows_board_labels(&self) -> bool {
         self.summary.boards.len() > 1
     }
 
