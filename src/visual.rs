@@ -5,7 +5,7 @@ use std::path::{Path, PathBuf};
 use tempfile::Builder;
 use thiserror::Error;
 
-use crate::report::{Report, ReportItem, human_bytes};
+use crate::report::{MatchScope, Report, ReportItem, human_bytes};
 
 #[derive(Debug, Error)]
 pub enum VisualError {
@@ -82,6 +82,7 @@ h1 { max-width: 1100px; margin: 0; font-family: "Avenir Next Condensed", "Arial 
 .stat span { color: var(--muted); font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: .7rem; font-weight: 700; letter-spacing: .06em; text-transform: uppercase; }
 .match { margin-top: 48px; }
 .match-heading { display: flex; align-items: end; justify-content: space-between; gap: 20px; padding-bottom: 12px; border-bottom: 1px solid var(--line); }
+.match-title { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; }
 .match-heading h2 { margin: 0; font-family: "Avenir Next Condensed", "Arial Narrow", sans-serif; font-size: clamp(1.55rem, 3vw, 2.35rem); font-weight: 800; letter-spacing: -.02em; text-transform: uppercase; }
 .match-heading p { margin: 0; color: var(--muted); font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: .76rem; text-align: right; text-transform: uppercase; }
 .comparison { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 310px), 1fr)); gap: 18px; margin-top: 18px; }
@@ -96,6 +97,8 @@ h1 { max-width: 1100px; margin: 0; font-family: "Avenir Next Condensed", "Arial 
 .badge.keep { color: var(--green); background: var(--green-soft); }
 .badge.tie { color: var(--gold); background: var(--gold-soft); }
 .badge.delete { color: var(--red); background: var(--red-soft); }
+.badge.cross-board { color: var(--gold); background: var(--gold-soft); }
+.badge.same-board { color: var(--muted); border: 1px solid var(--line); }
 .pin-id { overflow: hidden; color: var(--muted); font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: .76rem; text-overflow: ellipsis; }
 .board { justify-self: start; max-width: 100%; overflow: hidden; padding: 2px 9px; border: 1px solid var(--line); border-radius: 999px; color: var(--muted); font-size: .74rem; text-overflow: ellipsis; white-space: nowrap; }
 .boards { margin: 14px 0 0; color: var(--muted); font-size: .9rem; line-height: 1.7; }
@@ -170,8 +173,9 @@ footer { margin-top: 52px; padding-top: 18px; border-top: 1px solid var(--line);
     for (index, group) in report.exact_groups.iter().enumerate() {
         let _ = writeln!(
             html,
-            "<section class=\"match\"><div class=\"match-heading\"><h2>Exact group {}</h2><p>Byte-identical image files</p></div><div class=\"comparison\">",
-            index + 1
+            "<section class=\"match\"><div class=\"match-heading\"><div class=\"match-title\"><h2>Exact group {}</h2>{}</div><p>Byte-identical image files</p></div><div class=\"comparison\">",
+            index + 1,
+            scope_badge(group.scope, show_boards)
         );
         for item in &group.items {
             render_item(&mut html, item, show_boards);
@@ -182,8 +186,9 @@ footer { margin-top: 52px; padding-top: 18px; border-top: 1px solid var(--line);
     for (index, candidate) in report.visual_candidates.iter().enumerate() {
         let _ = writeln!(
             html,
-            "<section class=\"match\"><div class=\"match-heading\"><h2>Visual candidate {}</h2><p>{}% similar · hash distance {}/64</p></div><div class=\"comparison\">",
+            "<section class=\"match\"><div class=\"match-heading\"><div class=\"match-title\"><h2>Visual candidate {}</h2>{}</div><p>{}% similar · hash distance {}/64</p></div><div class=\"comparison\">",
             index + 1,
+            scope_badge(candidate.scope, show_boards),
             candidate.similarity_percent,
             candidate.hash_distance
         );
@@ -198,6 +203,19 @@ footer { margin-top: 52px; padding-top: 18px; border-top: 1px solid var(--line);
         "<footer>This temporary report loads images from Pinterest and remains available until your operating system cleans its temporary files.</footer>\n</main>\n</body>\n</html>\n",
     );
     html
+}
+
+/// Badges a match as same-board or cross-board, or renders nothing when only
+/// one board was scanned and the distinction cannot arise.
+fn scope_badge(scope: MatchScope, show_boards: bool) -> String {
+    if !show_boards {
+        return String::new();
+    }
+    format!(
+        "<span class=\"badge {}\">{}</span>",
+        scope.css_class(),
+        scope.html_label()
+    )
 }
 
 fn render_item(html: &mut String, item: &ReportItem, show_board: bool) {
@@ -299,11 +317,13 @@ mod tests {
                 visual_candidates: 1,
             },
             exact_groups: vec![DuplicateGroup {
+                scope: MatchScope::SameBoard,
                 items: vec![item("101", Recommendation::Keep)],
             }],
             visual_candidates: vec![VisualCandidate {
                 hash_distance: 2,
                 similarity_percent: 96,
+                scope: MatchScope::SameBoard,
                 items: [
                     item("101", Recommendation::Keep),
                     item("102", Recommendation::DeleteCandidate),
@@ -350,6 +370,31 @@ mod tests {
         assert!(html.contains("overflow: hidden"));
         assert!(html.contains("width: 100%; height: auto"));
         assert!(!html.contains("object-fit: contain"));
+    }
+
+    #[test]
+    fn scope_badges_appear_only_for_multi_board_scans() {
+        let mut report = sample_report();
+        // The single-board sample must not claim a scope at all.
+        let single = render_html(&report);
+        assert!(!single.contains("badge same-board"));
+        assert!(!single.contains("badge cross-board"));
+        assert!(!single.contains("Across boards"));
+
+        report.summary.boards.push(ScannedBoard {
+            name: "Mood board".into(),
+            url: "https://www.pinterest.com/alice/mood-board/".into(),
+            pins_reported: Some(1),
+            pins_found: 1,
+        });
+        report.exact_groups[0].scope = MatchScope::CrossBoard;
+        let multi = render_html(&report);
+
+        assert!(multi.contains("<span class=\"badge cross-board\">Across boards</span>"));
+        assert!(multi.contains("<span class=\"badge same-board\">Same board</span>"));
+        // The badge sits beside the heading inside the wrapper that keeps
+        // .match-heading a two-child flexbox.
+        assert!(multi.contains("<div class=\"match-title\"><h2>Exact group 1</h2><span"));
     }
 
     #[test]

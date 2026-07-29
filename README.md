@@ -118,6 +118,13 @@ Run `unpin --help` for the complete interface.
 - When several boards are selected, their pins are pooled into a single
   analysis, so duplicates spanning two boards are found. Each reported pin
   carries its board name, and pin counts are also broken down per board.
+- Each match is then tagged `SAME BOARD` or `ACROSS BOARDS`. The distinction
+  matters when deciding what to delete: the same image saved twice into one
+  board is a redundant double-save, while the same image in two boards is often
+  deliberate and worth a second look. JSON carries this as `scope`
+  (`same_board` or `cross_board`) on every exact group and visual candidate.
+  The tag is omitted when only one board was scanned, since every match is
+  then same-board by definition.
 - When Pinterest's reported total is larger than the number returned by its web
   API, text, JSON, and HTML output show both counts and include an incomplete
   scan warning.

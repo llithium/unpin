@@ -8,6 +8,7 @@ use unpin::auth::BrowserCookie;
 use unpin::cli::Cli;
 use unpin::pinterest::{BoardTarget, PinterestClient, PinterestError};
 use unpin::progress::{ProgressEvent, ProgressSink};
+use unpin::report::MatchScope;
 use url::Url;
 use wiremock::matchers::{header, header_regex, method, path, query_param};
 use wiremock::{Mock, MockServer, ResponseTemplate};
@@ -390,6 +391,7 @@ async fn scans_selected_profile_boards_as_one_pooled_report() {
         .collect::<Vec<_>>();
     boards.sort();
     assert_eq!(boards, ["Interiors", "Mood board"]);
+    assert_eq!(report.exact_groups[0].scope, MatchScope::CrossBoard);
 
     assert!(
         progress
@@ -412,10 +414,12 @@ async fn scans_selected_profile_boards_as_one_pooled_report() {
     let text = report.render_text();
     assert!(text.contains("[Interiors]"));
     assert!(text.contains("[Mood board]"));
+    assert!(text.contains("ACROSS BOARDS"));
     let html =
         std::fs::read_to_string(unpin::visual::create_temporary_report(&report).unwrap()).unwrap();
     assert!(html.contains("alice — 2 boards"));
     assert!(html.contains("class=\"board\">Interiors<"));
+    assert!(html.contains("badge cross-board"));
 }
 
 #[tokio::test]

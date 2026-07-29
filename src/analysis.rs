@@ -12,7 +12,9 @@ use thiserror::Error;
 
 use crate::pinterest::{Pin, SkippedPin};
 use crate::progress::{NoProgress, ProgressEvent, ProgressSink};
-use crate::report::{DuplicateGroup, Recommendation, ReportItem, VisualCandidate, rank_tuple};
+use crate::report::{
+    DuplicateGroup, MatchScope, Recommendation, ReportItem, VisualCandidate, rank_tuple,
+};
 
 const DOWNLOAD_CONCURRENCY: usize = 8;
 const MAX_IMAGE_BYTES: u64 = 100 * 1024 * 1024;
@@ -320,8 +322,12 @@ fn build_exact_groups(images: &[AnalyzedImage]) -> Vec<DuplicateGroup> {
     let mut groups = hashes
         .into_values()
         .filter(|members| members.len() > 1)
-        .map(|members| DuplicateGroup {
-            items: ranked_items(images, &members),
+        .map(|members| {
+            let items = ranked_items(images, &members);
+            DuplicateGroup {
+                scope: MatchScope::of(&items),
+                items,
+            }
         })
         .collect::<Vec<_>>();
     groups.sort_by(|left, right| {
@@ -354,6 +360,7 @@ fn build_visual_candidates(images: &[AnalyzedImage], threshold: u8) -> Vec<Visua
             candidates.push(VisualCandidate {
                 hash_distance: distance,
                 similarity_percent: (structural_similarity * 100.0).floor() as u8,
+                scope: MatchScope::of(&ranked),
                 items: [ranked[0].clone(), ranked[1].clone()],
             });
         }
@@ -536,6 +543,31 @@ mod tests {
             groups[0].items[1].recommendation,
             Recommendation::DeleteCandidate
         );
+    }
+
+    #[test]
+    fn groups_and_candidates_record_their_board_scope() {
+        let mut first = analyzed("1", 800, 600, 1_000, 0);
+        let mut second = analyzed("2", 1600, 1200, 2_000, 0);
+        first.sha256 = "same".into();
+        second.sha256 = "same".into();
+        first.board = Some("Interiors".into());
+        second.board = Some("Interiors".into());
+
+        let same = build_exact_groups(&[first.clone(), second.clone()]);
+        assert_eq!(same[0].scope, MatchScope::SameBoard);
+
+        second.board = Some("Mood board".into());
+        let cross = build_exact_groups(&[first, second]);
+        assert_eq!(cross[0].scope, MatchScope::CrossBoard);
+
+        // Visual candidates are classified the same way.
+        let mut left = analyzed("1", 1000, 1000, 500, 0);
+        let mut right = analyzed("2", 500, 500, 400, 0b11);
+        left.board = Some("Interiors".into());
+        right.board = Some("Mood board".into());
+        let candidates = build_visual_candidates(&[left, right], 2);
+        assert_eq!(candidates[0].scope, MatchScope::CrossBoard);
     }
 
     #[test]

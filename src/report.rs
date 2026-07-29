@@ -46,8 +46,60 @@ pub struct ReportItem {
     pub recommendation: Recommendation,
 }
 
+/// Whether a match sits inside one board or spans several.
+///
+/// The difference matters when deciding what to delete: the same image saved
+/// twice into one board is a redundant double-save, while the same image in two
+/// boards is often deliberate.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, Eq, PartialEq)]
+#[serde(rename_all = "snake_case")]
+pub enum MatchScope {
+    SameBoard,
+    CrossBoard,
+}
+
+impl MatchScope {
+    /// Classifies a match by the boards its pins came from.
+    ///
+    /// Items without a board—every item in a single-board scan—count as being
+    /// on the same board, so the quiet case is the default.
+    pub(crate) fn of(items: &[ReportItem]) -> Self {
+        let mut boards = items.iter().filter_map(|item| item.board.as_deref());
+        let Some(first) = boards.next() else {
+            return Self::SameBoard;
+        };
+        if boards.any(|board| board != first) {
+            Self::CrossBoard
+        } else {
+            Self::SameBoard
+        }
+    }
+
+    pub(crate) fn label(&self) -> &'static str {
+        match self {
+            Self::SameBoard => "SAME BOARD",
+            Self::CrossBoard => "ACROSS BOARDS",
+        }
+    }
+
+    pub(crate) fn html_label(&self) -> &'static str {
+        match self {
+            Self::SameBoard => "Same board",
+            Self::CrossBoard => "Across boards",
+        }
+    }
+
+    pub(crate) fn css_class(&self) -> &'static str {
+        match self {
+            Self::SameBoard => "same-board",
+            Self::CrossBoard => "cross-board",
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, Eq, PartialEq)]
 pub struct DuplicateGroup {
+    pub scope: MatchScope,
     pub items: Vec<ReportItem>,
 }
 
@@ -55,6 +107,7 @@ pub struct DuplicateGroup {
 pub struct VisualCandidate {
     pub hash_distance: u8,
     pub similarity_percent: u8,
+    pub scope: MatchScope,
     pub items: [ReportItem; 2],
 }
 
@@ -117,6 +170,36 @@ impl Report {
         self.summary.boards.len() > 1
     }
 
+    /// Renders the scope tag appended to a match heading.
+    ///
+    /// Empty for a single-board scan, where every match is same-board by
+    /// definition and the tag would say nothing.
+    fn scope_suffix(&self, scope: MatchScope, theme: &TextTheme) -> String {
+        if !self.shows_board_labels() {
+            return String::new();
+        }
+        let tag = match scope {
+            // Yellow is already the report's "a human must decide" color.
+            MatchScope::CrossBoard => theme.warning(scope.label()),
+            MatchScope::SameBoard => theme.dim(scope.label()),
+        };
+        format!(" {} {tag}", theme.dim("·"))
+    }
+
+    fn cross_board_matches(&self) -> usize {
+        let groups = self
+            .exact_groups
+            .iter()
+            .filter(|group| group.scope == MatchScope::CrossBoard)
+            .count();
+        let candidates = self
+            .visual_candidates
+            .iter()
+            .filter(|candidate| candidate.scope == MatchScope::CrossBoard)
+            .count();
+        groups + candidates
+    }
+
     pub fn render_text(&self) -> String {
         self.render_text_with_color(false)
     }
@@ -145,12 +228,22 @@ impl Report {
             theme.success(summary.analyzed),
             theme.warning(summary.skipped)
         );
+        let cross_board = self.cross_board_matches();
         let _ = writeln!(
             output,
-            "{}  {} exact group(s)  {} visual candidate(s)",
+            "{}  {} exact group(s)  {} visual candidate(s){}",
             theme.label("MATCHES"),
             theme.strong(summary.exact_groups),
-            theme.accent(summary.visual_candidates)
+            theme.accent(summary.visual_candidates),
+            if self.shows_board_labels() && cross_board > 0 {
+                format!(
+                    "  {} {}",
+                    theme.dim("·"),
+                    theme.warning(format!("{cross_board} across boards"))
+                )
+            } else {
+                String::new()
+            }
         );
 
         if self.shows_board_labels() {
@@ -172,9 +265,10 @@ impl Report {
         for (index, group) in self.exact_groups.iter().enumerate() {
             let _ = writeln!(
                 output,
-                "\n{}  {}",
+                "\n{}  {}{}",
                 theme.section(format!("EXACT {:02}", index + 1)),
-                theme.dim("byte-identical files")
+                theme.dim("byte-identical files"),
+                self.scope_suffix(group.scope, &theme)
             );
             render_items(&mut output, &group.items, &theme, self.shows_board_labels());
         }
@@ -182,12 +276,13 @@ impl Report {
         for (index, candidate) in self.visual_candidates.iter().enumerate() {
             let _ = writeln!(
                 output,
-                "\n{}  {}",
+                "\n{}  {}{}",
                 theme.section(format!("VISUAL {:02}", index + 1)),
                 theme.dim(format!(
                     "{}% similarity  •  hash distance {}/64",
                     candidate.similarity_percent, candidate.hash_distance
-                ))
+                )),
+                self.scope_suffix(candidate.scope, &theme)
             );
             render_items(
                 &mut output,
@@ -404,6 +499,7 @@ mod tests {
                 visual_candidates: 0,
             },
             exact_groups: vec![DuplicateGroup {
+                scope: MatchScope::SameBoard,
                 items: vec![ReportItem {
                     pin_id: "123".into(),
                     pin_url: "https://www.pinterest.com/pin/123/".into(),
@@ -467,6 +563,113 @@ mod tests {
     }
 
     #[test]
+    fn scope_follows_the_boards_the_items_came_from() {
+        let interiors = item("1", "Interiors", 1200);
+        let mood = item("2", "Mood board", 600);
+
+        assert_eq!(
+            MatchScope::of(&[interiors.clone(), interiors.clone()]),
+            MatchScope::SameBoard
+        );
+        assert_eq!(
+            MatchScope::of(&[interiors.clone(), mood]),
+            MatchScope::CrossBoard
+        );
+        assert_eq!(
+            MatchScope::of(std::slice::from_ref(&interiors)),
+            MatchScope::SameBoard
+        );
+        assert_eq!(MatchScope::of(&[]), MatchScope::SameBoard);
+
+        // A single-board scan leaves every board unset, which is not "cross".
+        let mut unlabeled = interiors;
+        unlabeled.board = None;
+        assert_eq!(
+            MatchScope::of(&[unlabeled.clone(), unlabeled]),
+            MatchScope::SameBoard
+        );
+    }
+
+    #[test]
+    fn scope_tags_appear_only_for_multi_board_scans() {
+        let mut report = Report {
+            summary: Summary {
+                username: Some("alice".into()),
+                boards: vec![scanned("Interiors", 3), scanned("Mood board", 1)],
+                pins_reported: Some(4),
+                pins_found: 4,
+                analyzed: 4,
+                skipped: 0,
+                exact_groups: 2,
+                visual_candidates: 0,
+            },
+            exact_groups: vec![
+                DuplicateGroup {
+                    scope: MatchScope::CrossBoard,
+                    items: vec![item("1", "Interiors", 1200), item("2", "Mood board", 600)],
+                },
+                DuplicateGroup {
+                    scope: MatchScope::SameBoard,
+                    items: vec![item("3", "Interiors", 800), item("4", "Interiors", 800)],
+                },
+            ],
+            visual_candidates: vec![],
+            skipped: vec![],
+            warnings: vec![],
+            visual_report: None,
+        };
+
+        let multi = report.render_text();
+        assert!(multi.contains("byte-identical files · ACROSS BOARDS"));
+        assert!(multi.contains("byte-identical files · SAME BOARD"));
+        // The summary counts only the cross-board matches.
+        assert!(multi.contains("1 across boards"));
+
+        // With one board the distinction cannot arise, so it is not mentioned.
+        report.summary.boards.truncate(1);
+        let single = report.render_text();
+        assert!(!single.contains("ACROSS BOARDS"));
+        assert!(!single.contains("SAME BOARD"));
+        assert!(!single.contains("across boards"));
+
+        // Color reinforces the tag but is never the only carrier of meaning.
+        report.summary.boards.push(scanned("Mood board", 1));
+        assert!(
+            report
+                .render_text_with_color(true)
+                .contains("ACROSS BOARDS")
+        );
+    }
+
+    #[test]
+    fn json_reports_the_match_scope() {
+        let report = Report {
+            summary: Summary {
+                username: Some("alice".into()),
+                boards: vec![scanned("Interiors", 1), scanned("Mood board", 1)],
+                pins_reported: Some(2),
+                pins_found: 2,
+                analyzed: 2,
+                skipped: 0,
+                exact_groups: 1,
+                visual_candidates: 0,
+            },
+            exact_groups: vec![DuplicateGroup {
+                scope: MatchScope::CrossBoard,
+                items: vec![item("1", "Interiors", 1200), item("2", "Mood board", 600)],
+            }],
+            visual_candidates: vec![],
+            skipped: vec![],
+            warnings: vec![],
+            visual_report: None,
+        };
+
+        let value: serde_json::Value =
+            serde_json::from_str(&report.render_json().unwrap()).unwrap();
+        assert_eq!(value["exact_groups"][0]["scope"], "cross_board");
+    }
+
+    #[test]
     fn board_labels_appear_only_for_multi_board_scans() {
         let mut report = Report {
             summary: Summary {
@@ -480,6 +683,7 @@ mod tests {
                 visual_candidates: 0,
             },
             exact_groups: vec![DuplicateGroup {
+                scope: MatchScope::SameBoard,
                 items: vec![item("1", "Interiors", 1200), item("2", "Mood board", 600)],
             }],
             visual_candidates: vec![],
