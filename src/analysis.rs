@@ -37,6 +37,7 @@ pub enum AnalysisError {
 struct AnalyzedImage {
     pin_id: String,
     pin_url: String,
+    board: Option<String>,
     image_url: String,
     width: u32,
     height: u32,
@@ -61,6 +62,7 @@ impl AnalyzedImage {
         ReportItem {
             pin_id: self.pin_id.clone(),
             pin_url: self.pin_url.clone(),
+            board: self.board.clone(),
             image_url: self.image_url.clone(),
             width: self.width,
             height: self.height,
@@ -111,6 +113,7 @@ pub async fn analyze_pins_with_progress(
                     .map(|pin| AnalyzedImage {
                         pin_url: pin.pin_url(),
                         pin_id: pin.id,
+                        board: pin.board,
                         image_url: media_url.clone(),
                         width: fingerprint.width,
                         height: fingerprint.height,
@@ -126,6 +129,7 @@ pub async fn analyze_pins_with_progress(
                         pin_url: Some(pin.pin_url()),
                         pin_id: Some(pin.id),
                         reason: reason.clone(),
+                        board: pin.board,
                     })
                     .collect::<Vec<_>>()),
             }
@@ -494,6 +498,7 @@ mod tests {
         AnalyzedImage {
             pin_id: id.into(),
             pin_url: format!("https://www.pinterest.com/pin/{id}/"),
+            board: None,
             image_url: format!("https://i.pinimg.com/originals/{id}.jpg"),
             width,
             height,

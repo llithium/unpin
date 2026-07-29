@@ -11,6 +11,20 @@ pub enum ProgressEvent {
     BoardResolved {
         name: String,
     },
+    FetchingUserBoards {
+        username: String,
+    },
+    UserBoardsResolved {
+        total: usize,
+    },
+    /// The board picker is about to take over the terminal.
+    SelectionStarted,
+    SelectionFinished,
+    BoardStarted {
+        name: String,
+        current: usize,
+        total: usize,
+    },
     PageFetched {
         resource: &'static str,
         page: usize,
@@ -88,6 +102,36 @@ impl ProgressSink for TerminalProgress {
             }
             ProgressEvent::BoardResolved { name } => {
                 self.bar.set_message(format!("Found board “{name}”"));
+            }
+            ProgressEvent::FetchingUserBoards { username } => {
+                self.bar.set_style(spinner_style());
+                self.bar.enable_steady_tick(Duration::from_millis(90));
+                self.bar
+                    .set_message(format!("Listing boards for {username}"));
+            }
+            ProgressEvent::UserBoardsResolved { total } => {
+                self.bar.set_message(format!("Found {total} board(s)"));
+            }
+            // Hide rather than finish the bar: a finished bar never redraws,
+            // and the scan continues after the picker closes.
+            ProgressEvent::SelectionStarted => {
+                self.bar.disable_steady_tick();
+                self.bar.set_draw_target(ProgressDrawTarget::hidden());
+            }
+            ProgressEvent::SelectionFinished => {
+                self.bar.set_draw_target(ProgressDrawTarget::stderr());
+                self.bar.set_style(spinner_style());
+                self.bar.enable_steady_tick(Duration::from_millis(90));
+            }
+            ProgressEvent::BoardStarted {
+                name,
+                current,
+                total,
+            } => {
+                self.bar.set_style(spinner_style());
+                self.bar.enable_steady_tick(Duration::from_millis(90));
+                self.bar
+                    .set_message(format!("Board {current}/{total}: “{name}”"));
             }
             ProgressEvent::PageFetched {
                 resource,

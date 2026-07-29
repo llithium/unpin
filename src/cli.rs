@@ -1,11 +1,25 @@
 use clap::{Parser, ValueEnum};
 
-/// Find duplicate image pins in a Pinterest board.
+/// Find duplicate image pins in a Pinterest board or profile.
 #[derive(Debug, Clone, Parser)]
 #[command(name = "unpin", version, about)]
 pub struct Cli {
-    /// URL of the Pinterest board to inspect.
-    pub board_url: String,
+    /// Board URL, profile URL, or username to inspect.
+    #[arg(value_name = "TARGET")]
+    pub target: String,
+
+    /// Boards to scan for a profile target, by slug or name (repeatable, comma-separated).
+    #[arg(
+        long,
+        value_name = "BOARD",
+        value_delimiter = ',',
+        conflicts_with = "all_boards"
+    )]
+    pub boards: Vec<String>,
+
+    /// Scan every board on a profile without prompting.
+    #[arg(long)]
+    pub all_boards: bool,
 
     /// Report format.
     #[arg(long, value_enum, default_value_t = OutputFormat::Text)]
@@ -97,7 +111,7 @@ mod tests {
         ])
         .unwrap();
 
-        assert_eq!(cli.board_url, "https://www.pinterest.com/alice/interiors/");
+        assert_eq!(cli.target, "https://www.pinterest.com/alice/interiors/");
         assert_eq!(cli.format, OutputFormat::Json);
         assert!(cli.exact_only);
         assert_eq!(cli.similarity_threshold, 8);
@@ -130,5 +144,30 @@ mod tests {
         assert!(!cli.no_progress);
         assert!(!cli.no_color);
         assert_eq!(cli.cookies_from_browser, None);
+        assert!(cli.boards.is_empty());
+        assert!(!cli.all_boards);
+    }
+
+    #[test]
+    fn parses_username_targets_and_board_selection() {
+        let cli =
+            Cli::try_parse_from(["unpin", "alice", "--boards", "interiors,mood board"]).unwrap();
+        assert_eq!(cli.target, "alice");
+        assert_eq!(cli.boards, ["interiors", "mood board"]);
+
+        // `--boards` is repeatable as well as comma-separated.
+        let cli =
+            Cli::try_parse_from(["unpin", "alice", "--boards", "a", "--boards", "b"]).unwrap();
+        assert_eq!(cli.boards, ["a", "b"]);
+
+        assert!(Cli::try_parse_from(["unpin", "alice", "--all-boards"]).is_ok());
+    }
+
+    #[test]
+    fn rejects_board_selection_flags_together() {
+        let result =
+            Cli::try_parse_from(["unpin", "alice", "--all-boards", "--boards", "interiors"]);
+
+        assert!(result.is_err());
     }
 }

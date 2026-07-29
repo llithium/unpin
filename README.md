@@ -1,6 +1,6 @@
 # unpin
 
-`unpin` finds duplicate static-image pins in a public Pinterest board, compares
+`unpin` finds duplicate static-image pins in public Pinterest boards, compares
 their resolutions, and prints direct pin links so you can decide what to delete.
 It never changes your Pinterest account.
 
@@ -23,6 +23,31 @@ Pass a board URL directly:
 ```console
 unpin https://www.pinterest.com/username/board-name/
 ```
+
+Pass a username or profile URL to work across a whole account. `unpin` lists the
+profile's boards and asks which ones to scan:
+
+```console
+unpin username
+unpin https://www.pinterest.com/username/
+```
+
+Arrow keys move, space toggles, and enter confirms. The first row selects every
+board at once, and typing filters the list by name. The selected boards are
+analyzed **together**, so a photo saved to two different boards is reported as a
+duplicate—something a board-at-a-time scan cannot find. Every match then shows
+which board each pin came from.
+
+Skip the prompt with either flag. `--boards` accepts board slugs or names,
+comma-separated or repeated:
+
+```console
+unpin username --boards board-name,Another Board
+unpin username --all-boards
+```
+
+One of those flags is required when `unpin` is not attached to an interactive
+terminal, such as in a script or CI. Rather than guess, it stops and says so.
 
 Pinterest may return only part of a large board to anonymous web requests. For
 a complete view, import the Pinterest session from the browser where you are
@@ -79,6 +104,9 @@ unpin https://www.pinterest.com/username/board-name/ --no-color
 
 # Use a signed-in browser session when Pinterest truncates anonymous results
 unpin https://www.pinterest.com/username/board-name/ --cookies-from-browser chrome
+
+# Scan a whole profile without the picker
+unpin username --all-boards
 ```
 
 Run `unpin --help` for the complete interface.
@@ -87,6 +115,9 @@ Run `unpin --help` for the complete interface.
 
 - Pinterest board metadata is fetched page by page, including board sections.
   Pins repeated in the main feed and a section are counted once.
+- When several boards are selected, their pins are pooled into a single
+  analysis, so duplicates spanning two boards are found. Each reported pin
+  carries its board name, and pin counts are also broken down per board.
 - When Pinterest's reported total is larger than the number returned by its web
   API, text, JSON, and HTML output show both counts and include an incomplete
   scan warning.
@@ -108,8 +139,10 @@ individual skipped-pin record.
 
 ## Limitations
 
-- Anonymous scans work with public boards. Signed-in scans can use an explicitly
-  selected local browser session; browser cookie values are never persisted.
+- Anonymous scans work with public boards and public profiles. Secret boards
+  and secret profiles need `--cookies-from-browser`; the board picker marks
+  secret boards. Signed-in scans can use an explicitly selected local browser
+  session; browser cookie values are never persisted.
 - Pinterest's web resources are undocumented and may change without notice.
 - Visual matches are candidates for human review, not proof that two images are
   interchangeable.

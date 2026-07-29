@@ -97,6 +97,8 @@ h1 { max-width: 1100px; margin: 0; font-family: "Avenir Next Condensed", "Arial 
 .badge.tie { color: var(--gold); background: var(--gold-soft); }
 .badge.delete { color: var(--red); background: var(--red-soft); }
 .pin-id { overflow: hidden; color: var(--muted); font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: .76rem; text-overflow: ellipsis; }
+.board { justify-self: start; max-width: 100%; overflow: hidden; padding: 2px 9px; border: 1px solid var(--line); border-radius: 999px; color: var(--muted); font-size: .74rem; text-overflow: ellipsis; white-space: nowrap; }
+.boards { margin: 14px 0 0; color: var(--muted); font-size: .9rem; line-height: 1.7; }
 .dimensions { margin: 0; font-family: "Avenir Next Condensed", "Arial Narrow", sans-serif; font-size: 1.5rem; font-weight: 750; }
 .dimensions span { color: var(--muted); font-family: ui-sans-serif, sans-serif; font-size: .82rem; }
 .actions { display: flex; flex-wrap: wrap; gap: 8px; }
@@ -124,7 +126,8 @@ footer { margin-top: 52px; padding-top: 18px; border-top: 1px solid var(--line);
 "#,
     );
 
-    let _ = writeln!(html, "<h1>{}</h1>", escape_html(&report.summary.board_name));
+    let show_boards = report.summary.boards.len() > 1;
+    let _ = writeln!(html, "<h1>{}</h1>", escape_html(&report.title()));
     html.push_str(
         "<p class=\"lede\">Compare likely duplicate pins visually. Recommendations favor pixel area, longest edge, and file size. Review every candidate before deleting anything.</p>\n",
     );
@@ -144,6 +147,20 @@ footer { margin-top: 52px; padding-top: 18px; border-top: 1px solid var(--line);
         report.summary.exact_groups,
         report.summary.visual_candidates
     );
+    if report.summary.boards.len() > 1 {
+        html.push_str("<p class=\"boards\">Scanned ");
+        for (index, board) in report.summary.boards.iter().enumerate() {
+            let separator = if index == 0 { "" } else { " · " };
+            let _ = write!(
+                html,
+                "{separator}<a href=\"{}\" target=\"_blank\" rel=\"noopener noreferrer\">{}</a> ({} pins)",
+                escape_html(&board.url),
+                escape_html(&board.name),
+                board.pins_found
+            );
+        }
+        html.push_str("</p>\n");
+    }
     html.push_str("</header>\n");
 
     if report.exact_groups.is_empty() && report.visual_candidates.is_empty() {
@@ -157,7 +174,7 @@ footer { margin-top: 52px; padding-top: 18px; border-top: 1px solid var(--line);
             index + 1
         );
         for item in &group.items {
-            render_item(&mut html, item);
+            render_item(&mut html, item, show_boards);
         }
         html.push_str("</div></section>\n");
     }
@@ -171,7 +188,7 @@ footer { margin-top: 52px; padding-top: 18px; border-top: 1px solid var(--line);
             candidate.hash_distance
         );
         for item in &candidate.items {
-            render_item(&mut html, item);
+            render_item(&mut html, item, show_boards);
         }
         html.push_str("</div></section>\n");
     }
@@ -183,13 +200,17 @@ footer { margin-top: 52px; padding-top: 18px; border-top: 1px solid var(--line);
     html
 }
 
-fn render_item(html: &mut String, item: &ReportItem) {
+fn render_item(html: &mut String, item: &ReportItem, show_board: bool) {
     let image_url = escape_html(&item.image_url);
     let pin_url = escape_html(&item.pin_url);
     let pin_id = escape_html(&item.pin_id);
+    let board = match (show_board, &item.board) {
+        (true, Some(board)) => format!("<span class=\"board\">{}</span>", escape_html(board)),
+        _ => String::new(),
+    };
     let _ = writeln!(
         html,
-        "<article class=\"pin-card\"><a class=\"image-stage\" href=\"{image_url}\" target=\"_blank\" rel=\"noopener noreferrer\"><img src=\"{image_url}\" alt=\"Pinterest pin {pin_id}\" loading=\"lazy\" decoding=\"async\" referrerpolicy=\"no-referrer\"></a><div class=\"card-body\"><div class=\"card-top\"><span class=\"badge {}\">{}</span><span class=\"pin-id\">Pin {pin_id}</span></div><p class=\"dimensions\">{} × {} <span>· {}</span></p><div class=\"actions\"><a class=\"button primary\" href=\"{pin_url}\" target=\"_blank\" rel=\"noopener noreferrer\">Open pin</a><a class=\"button\" href=\"{image_url}\" target=\"_blank\" rel=\"noopener noreferrer\">Open image</a></div></div></article>",
+        "<article class=\"pin-card\"><a class=\"image-stage\" href=\"{image_url}\" target=\"_blank\" rel=\"noopener noreferrer\"><img src=\"{image_url}\" alt=\"Pinterest pin {pin_id}\" loading=\"lazy\" decoding=\"async\" referrerpolicy=\"no-referrer\"></a><div class=\"card-body\"><div class=\"card-top\"><span class=\"badge {}\">{}</span><span class=\"pin-id\">Pin {pin_id}</span></div>{board}<p class=\"dimensions\">{} × {} <span>· {}</span></p><div class=\"actions\"><a class=\"button primary\" href=\"{pin_url}\" target=\"_blank\" rel=\"noopener noreferrer\">Open pin</a><a class=\"button\" href=\"{image_url}\" target=\"_blank\" rel=\"noopener noreferrer\">Open image</a></div></div></article>",
         item.recommendation.css_class(),
         item.recommendation.label(),
         item.width,
@@ -256,12 +277,20 @@ mod tests {
 
     use super::*;
     use crate::pinterest::SkippedPin;
-    use crate::report::{DuplicateGroup, Recommendation, ReportItem, Summary, VisualCandidate};
+    use crate::report::{
+        DuplicateGroup, Recommendation, ReportItem, ScannedBoard, Summary, VisualCandidate,
+    };
 
     fn sample_report() -> Report {
         Report {
             summary: Summary {
-                board_name: "Ideas <script>alert('x')</script>".into(),
+                username: None,
+                boards: vec![ScannedBoard {
+                    name: "Ideas <script>alert('x')</script>".into(),
+                    url: "https://www.pinterest.com/alice/ideas/".into(),
+                    pins_reported: Some(3),
+                    pins_found: 3,
+                }],
                 pins_reported: Some(3),
                 pins_found: 3,
                 analyzed: 2,
@@ -284,6 +313,7 @@ mod tests {
                 pin_id: Some("103".into()),
                 pin_url: Some("https://www.pinterest.com/pin/103/".into()),
                 reason: "video <unsupported>".into(),
+                board: Some("Ideas".into()),
             }],
             warnings: vec!["schema changed & recovered".into()],
             visual_report: None,
@@ -294,6 +324,7 @@ mod tests {
         ReportItem {
             pin_id: id.into(),
             pin_url: format!("https://www.pinterest.com/pin/{id}/"),
+            board: Some("Ideas".into()),
             image_url: format!("https://i.pinimg.com/originals/{id}.jpg?x=1&y=2"),
             width: 1200,
             height: 800,

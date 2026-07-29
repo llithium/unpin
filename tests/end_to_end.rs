@@ -197,7 +197,10 @@ async fn scans_paginated_board_and_sections_end_to_end() {
     .await
     .unwrap();
 
-    assert_eq!(report.summary.board_name, "Ideas");
+    assert_eq!(report.summary.username, None);
+    assert_eq!(report.summary.boards.len(), 1);
+    assert_eq!(report.summary.boards[0].name, "Ideas");
+    assert_eq!(report.title(), "Ideas");
     assert_eq!(report.summary.pins_reported, Some(4));
     assert_eq!(report.summary.pins_found, 3);
     assert_eq!(report.summary.analyzed, 2);
@@ -250,6 +253,202 @@ async fn scans_paginated_board_and_sections_end_to_end() {
 }
 
 #[tokio::test]
+async fn scans_selected_profile_boards_as_one_pooled_report() {
+    let server = MockServer::start().await;
+    // Both boards hold the same image, so the duplicate only exists across them.
+    Mock::given(method("GET"))
+        .and(path("/shared.png"))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .insert_header("content-type", "image/png")
+                .set_body_bytes(image_bytes(20, 20)),
+        )
+        .mount(&server)
+        .await;
+
+    mount_resource(
+        &server,
+        "Boards",
+        json!({
+            "username": "alice",
+            "field_set_key": "profile_grid_item",
+            "sort": "last_pinned_to",
+            "filter_stories": false,
+            "page_size": 25,
+            "include_archived": true,
+            "bookmarks": null
+        }),
+        page(
+            json!([
+                {
+                    "id": "board-1",
+                    "type": "board",
+                    "name": "Interiors",
+                    "url": "/alice/interiors/",
+                    "pin_count": 1,
+                    "section_count": 0,
+                    "privacy": "public"
+                },
+                {
+                    "id": "board-2",
+                    "type": "board",
+                    "name": "Mood board",
+                    "url": "/alice/mood-board/",
+                    "pin_count": 1,
+                    "section_count": 0,
+                    "privacy": "secret"
+                },
+                {
+                    "id": "6862930149517574268",
+                    "type": "userdiditreminder"
+                },
+                {
+                    "id": "board-3",
+                    "type": "board",
+                    "name": "Recipes",
+                    "url": "/alice/recipes/",
+                    "pin_count": 9,
+                    "section_count": 0,
+                    "privacy": "public"
+                }
+            ]),
+            "-end-",
+        ),
+    )
+    .await;
+
+    for (board_id, pin_id) in [("board-1", "201"), ("board-2", "202")] {
+        mount_resource(
+            &server,
+            "BoardFeed",
+            json!({
+                "board_id": board_id,
+                "field_set_key": "react_grid_pin",
+                "prepend": false,
+                "bookmarks": null
+            }),
+            page(
+                json!([{
+                    "id": pin_id,
+                    "images": {"orig": {
+                        "url": format!("{}/shared.png", server.uri()),
+                        "width": 20,
+                        "height": 20
+                    }}
+                }]),
+                "-end-",
+            ),
+        )
+        .await;
+    }
+
+    // `--boards` picks two of the three boards, by slug and by name.
+    let cli = Cli::try_parse_from([
+        "unpin",
+        "https://www.pinterest.com/alice/",
+        "--boards",
+        "interiors,Mood board",
+    ])
+    .unwrap();
+    let progress = RecordingProgress::default();
+    let report = unpin::run_with_api_root_and_progress(
+        &cli,
+        Some(Url::parse(&server.uri()).unwrap()),
+        &progress,
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(report.summary.username.as_deref(), Some("alice"));
+    assert_eq!(report.summary.boards.len(), 2, "Recipes was not selected");
+    // The non-board grid entry must never reach BoardFeed; wiremock has no
+    // stub for it, so scanning it would have failed this run outright.
+    assert!(
+        progress
+            .events()
+            .contains(&ProgressEvent::UserBoardsResolved { total: 3 })
+    );
+    assert_eq!(report.summary.boards[0].name, "Interiors");
+    assert_eq!(report.summary.boards[1].name, "Mood board");
+    // Board links point at Pinterest itself, never at the API root in use.
+    assert_eq!(
+        report.summary.boards[0].url,
+        "https://www.pinterest.com/alice/interiors/"
+    );
+    assert_eq!(report.summary.pins_found, 2);
+    assert_eq!(report.summary.pins_reported, Some(2));
+    assert_eq!(report.summary.analyzed, 2);
+    assert_eq!(report.title(), "alice — 2 boards");
+
+    // The duplicate spans the two boards, which a per-board scan could not find.
+    assert_eq!(report.summary.exact_groups, 1);
+    let items = &report.exact_groups[0].items;
+    assert_eq!(items.len(), 2);
+    let mut boards = items
+        .iter()
+        .map(|item| item.board.clone().unwrap())
+        .collect::<Vec<_>>();
+    boards.sort();
+    assert_eq!(boards, ["Interiors", "Mood board"]);
+
+    assert!(
+        progress
+            .events()
+            .contains(&ProgressEvent::FetchingUserBoards {
+                username: "alice".into(),
+            })
+    );
+    assert!(
+        progress
+            .events()
+            .contains(&ProgressEvent::UserBoardsResolved { total: 3 })
+    );
+    assert!(progress.events().contains(&ProgressEvent::BoardStarted {
+        name: "Mood board".into(),
+        current: 2,
+        total: 2,
+    }));
+
+    let text = report.render_text();
+    assert!(text.contains("[Interiors]"));
+    assert!(text.contains("[Mood board]"));
+    let html =
+        std::fs::read_to_string(unpin::visual::create_temporary_report(&report).unwrap()).unwrap();
+    assert!(html.contains("alice — 2 boards"));
+    assert!(html.contains("class=\"board\">Interiors<"));
+}
+
+#[tokio::test]
+async fn profile_targets_refuse_to_guess_boards_without_a_terminal() {
+    let cli = Cli::try_parse_from(["unpin", "alice"]).unwrap();
+
+    // The test harness has no terminal, so the picker cannot run.
+    let error = unpin::run_with_api_root(&cli, Some(Url::parse("http://127.0.0.1:1/").unwrap()))
+        .await
+        .unwrap_err();
+
+    let message = error.to_string();
+    assert!(message.contains("--boards"), "{message}");
+    assert!(message.contains("--all-boards"), "{message}");
+}
+
+#[tokio::test]
+async fn board_selection_flags_are_rejected_for_a_board_url() {
+    let cli = Cli::try_parse_from([
+        "unpin",
+        "https://www.pinterest.com/alice/ideas/",
+        "--all-boards",
+    ])
+    .unwrap();
+
+    let error = unpin::run_with_api_root(&cli, Some(Url::parse("http://127.0.0.1:1/").unwrap()))
+        .await
+        .unwrap_err();
+
+    assert!(error.to_string().contains("only apply to a username"));
+}
+
+#[tokio::test]
 async fn pinterest_http_errors_do_not_echo_response_bodies() {
     let server = MockServer::start().await;
     Mock::given(method("GET"))
@@ -260,8 +459,9 @@ async fn pinterest_http_errors_do_not_echo_response_bodies() {
 
     let target = BoardTarget::parse("https://www.pinterest.com/alice/ideas/").unwrap();
     let client =
-        PinterestClient::with_api_root(target, Url::parse(&server.uri()).unwrap()).unwrap();
-    let error = client.fetch_board().await.unwrap_err();
+        PinterestClient::with_api_root(target.root.clone(), Url::parse(&server.uri()).unwrap())
+            .unwrap();
+    let error = client.fetch_board(&target).await.unwrap_err();
 
     assert!(matches!(
         error,
@@ -284,8 +484,9 @@ async fn malformed_pinterest_json_is_a_clean_error() {
 
     let target = BoardTarget::parse("https://www.pinterest.com/alice/ideas/").unwrap();
     let client =
-        PinterestClient::with_api_root(target, Url::parse(&server.uri()).unwrap()).unwrap();
-    let error = client.fetch_board().await.unwrap_err();
+        PinterestClient::with_api_root(target.root.clone(), Url::parse(&server.uri()).unwrap())
+            .unwrap();
+    let error = client.fetch_board(&target).await.unwrap_err();
 
     assert!(matches!(
         error,
@@ -310,7 +511,7 @@ async fn authenticated_pinterest_requests_send_imported_cookies_and_csrf() {
 
     let target = BoardTarget::parse("https://www.pinterest.com/alice/ideas/").unwrap();
     let client = PinterestClient::with_api_root_and_cookies(
-        target,
+        target.root.clone(),
         Url::parse(&server.uri()).unwrap(),
         vec![
             BrowserCookie {
@@ -324,7 +525,7 @@ async fn authenticated_pinterest_requests_send_imported_cookies_and_csrf() {
         ],
     )
     .unwrap();
-    let error = client.fetch_board().await.unwrap_err();
+    let error = client.fetch_board(&target).await.unwrap_err();
 
     assert!(matches!(
         error,

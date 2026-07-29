@@ -36,6 +36,9 @@ impl Recommendation {
 pub struct ReportItem {
     pub pin_id: String,
     pub pin_url: String,
+    /// Board this pin lives in; shown only when several boards were scanned.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub board: Option<String>,
     pub image_url: String,
     pub width: u32,
     pub height: u32,
@@ -55,9 +58,22 @@ pub struct VisualCandidate {
     pub items: [ReportItem; 2],
 }
 
+/// One board that contributed pins to this report.
+#[derive(Debug, Clone, Serialize, Deserialize, Eq, PartialEq)]
+pub struct ScannedBoard {
+    pub name: String,
+    pub url: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub pins_reported: Option<usize>,
+    pub pins_found: usize,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, Eq, PartialEq)]
 pub struct Summary {
-    pub board_name: String,
+    /// Set when the scan started from a profile rather than a single board.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub username: Option<String>,
+    pub boards: Vec<ScannedBoard>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub pins_reported: Option<usize>,
     pub pins_found: usize,
@@ -79,6 +95,28 @@ pub struct Report {
 }
 
 impl Report {
+    /// Title shared by the text and HTML renderers.
+    ///
+    /// A single board keeps its own name; several boards are titled by the
+    /// profile they came from.
+    pub fn title(&self) -> String {
+        match self.summary.boards.as_slice() {
+            [board] => board.name.clone(),
+            boards => {
+                let count = format!("{} boards", boards.len());
+                match &self.summary.username {
+                    Some(username) => format!("{username} — {count}"),
+                    None => count,
+                }
+            }
+        }
+    }
+
+    /// Board labels are noise when everything came from the same board.
+    fn shows_board_labels(&self) -> bool {
+        self.summary.boards.len() > 1
+    }
+
     pub fn render_text(&self) -> String {
         self.render_text_with_color(false)
     }
@@ -91,7 +129,7 @@ impl Report {
             output,
             "{}  {}",
             theme.heading("UNPIN"),
-            theme.strong(&summary.board_name)
+            theme.strong(self.title())
         );
         let _ = writeln!(output, "{}", theme.dim("Pinterest duplicate review"));
         let _ = writeln!(output);
@@ -115,6 +153,18 @@ impl Report {
             theme.accent(summary.visual_candidates)
         );
 
+        if self.shows_board_labels() {
+            let _ = writeln!(output, "\n{}", theme.label("BOARDS"));
+            for board in &summary.boards {
+                let _ = writeln!(
+                    output,
+                    "  {:>5}  {}",
+                    theme.strong(board.pins_found),
+                    board.name
+                );
+            }
+        }
+
         if self.exact_groups.is_empty() && self.visual_candidates.is_empty() {
             let _ = writeln!(output, "\n{}", theme.dim("No duplicate image pins found."));
         }
@@ -126,7 +176,7 @@ impl Report {
                 theme.section(format!("EXACT {:02}", index + 1)),
                 theme.dim("byte-identical files")
             );
-            render_items(&mut output, &group.items, &theme);
+            render_items(&mut output, &group.items, &theme, self.shows_board_labels());
         }
 
         for (index, candidate) in self.visual_candidates.iter().enumerate() {
@@ -139,7 +189,12 @@ impl Report {
                     candidate.similarity_percent, candidate.hash_distance
                 ))
             );
-            render_items(&mut output, &candidate.items, &theme);
+            render_items(
+                &mut output,
+                &candidate.items,
+                &theme,
+                self.shows_board_labels(),
+            );
         }
 
         if !self.skipped.is_empty() {
@@ -209,7 +264,7 @@ impl Report {
     }
 }
 
-fn render_items(output: &mut String, items: &[ReportItem], theme: &TextTheme) {
+fn render_items(output: &mut String, items: &[ReportItem], theme: &TextTheme, show_boards: bool) {
     for item in items {
         let status = format!("{:<8}", item.recommendation.label());
         let status = match item.recommendation {
@@ -217,13 +272,18 @@ fn render_items(output: &mut String, items: &[ReportItem], theme: &TextTheme) {
             Recommendation::Tie => theme.warning(status),
             Recommendation::DeleteCandidate => theme.danger(status),
         };
+        let board = match (show_boards, &item.board) {
+            (true, Some(board)) => format!("  {}", theme.dim(format!("[{board}]"))),
+            _ => String::new(),
+        };
         let _ = writeln!(
             output,
-            "  {}  {:>5} × {:<5}  {:>10}",
+            "  {}  {:>5} × {:<5}  {:>10}{}",
             status,
             item.width,
             item.height,
-            human_bytes(item.byte_size)
+            human_bytes(item.byte_size),
+            board
         );
         let _ = writeln!(output, "            {}", theme.link(&item.pin_url));
     }
@@ -308,11 +368,34 @@ pub(crate) fn rank_tuple(width: u32, height: u32, bytes: u64) -> (u64, u32, u64)
 mod tests {
     use super::*;
 
+    fn scanned(name: &str, pins_found: usize) -> ScannedBoard {
+        ScannedBoard {
+            name: name.into(),
+            url: format!("https://www.pinterest.com/alice/{name}/"),
+            pins_reported: Some(pins_found),
+            pins_found,
+        }
+    }
+
+    fn item(pin_id: &str, board: &str, width: u32) -> ReportItem {
+        ReportItem {
+            pin_id: pin_id.into(),
+            pin_url: format!("https://www.pinterest.com/pin/{pin_id}/"),
+            board: Some(board.into()),
+            image_url: format!("https://i.pinimg.com/originals/{pin_id}.jpg"),
+            width,
+            height: width,
+            byte_size: u64::from(width) * 10,
+            recommendation: Recommendation::Keep,
+        }
+    }
+
     #[test]
     fn text_report_contains_links_and_recommendations() {
         let report = Report {
             summary: Summary {
-                board_name: "Ideas".into(),
+                username: None,
+                boards: vec![scanned("Ideas", 2)],
                 pins_reported: Some(2),
                 pins_found: 2,
                 analyzed: 2,
@@ -324,6 +407,7 @@ mod tests {
                 items: vec![ReportItem {
                     pin_id: "123".into(),
                     pin_url: "https://www.pinterest.com/pin/123/".into(),
+                    board: Some("Ideas".into()),
                     image_url: "https://i.pinimg.com/originals/example.jpg".into(),
                     width: 1200,
                     height: 800,
@@ -354,7 +438,8 @@ mod tests {
     fn json_report_has_required_top_level_keys() {
         let report = Report {
             summary: Summary {
-                board_name: "Empty".into(),
+                username: None,
+                boards: vec![scanned("Empty", 0)],
                 pins_reported: None,
                 pins_found: 0,
                 analyzed: 0,
@@ -382,17 +467,57 @@ mod tests {
     }
 
     #[test]
+    fn board_labels_appear_only_for_multi_board_scans() {
+        let mut report = Report {
+            summary: Summary {
+                username: Some("alice".into()),
+                boards: vec![scanned("Interiors", 1), scanned("Mood board", 1)],
+                pins_reported: Some(2),
+                pins_found: 2,
+                analyzed: 2,
+                skipped: 0,
+                exact_groups: 1,
+                visual_candidates: 0,
+            },
+            exact_groups: vec![DuplicateGroup {
+                items: vec![item("1", "Interiors", 1200), item("2", "Mood board", 600)],
+            }],
+            visual_candidates: vec![],
+            skipped: vec![],
+            warnings: vec![],
+            visual_report: None,
+        };
+
+        let multi = report.render_text();
+        assert_eq!(report.title(), "alice — 2 boards");
+        assert!(multi.contains("alice — 2 boards"));
+        assert!(multi.contains("[Interiors]"));
+        assert!(multi.contains("[Mood board]"));
+        assert!(multi.contains("BOARDS"));
+
+        // The same items scanned from one board carry no label at all.
+        report.summary.boards.truncate(1);
+        report.summary.username = None;
+        let single = report.render_text();
+        assert_eq!(report.title(), "Interiors");
+        assert!(!single.contains("[Interiors]"));
+        assert!(!single.contains("BOARDS"));
+    }
+
+    #[test]
     fn text_report_groups_large_skipped_sets() {
         let skipped = (0..13)
             .map(|index| SkippedPin {
                 pin_id: Some(index.to_string()),
                 pin_url: Some(format!("https://www.pinterest.com/pin/{index}/")),
                 reason: "video pin".into(),
+                board: Some("Videos".into()),
             })
             .collect();
         let report = Report {
             summary: Summary {
-                board_name: "Videos".into(),
+                username: None,
+                boards: vec![scanned("Videos", 13)],
                 pins_reported: Some(13),
                 pins_found: 13,
                 analyzed: 0,
