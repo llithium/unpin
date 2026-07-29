@@ -110,11 +110,37 @@ h1 { max-width: 1100px; margin: 0; font-family: "Avenir Next Condensed", "Arial 
 .button:hover { transform: translateY(-1px); }
 .button:focus-visible, .image-stage:focus-visible, summary:focus-visible { outline: 3px solid #00a6b2; outline-offset: 3px; }
 .empty { margin-top: 42px; padding: 32px; border: 1px dashed var(--line); border-radius: 3px; color: var(--muted); text-align: center; background: var(--card); }
+.filter-input { position: absolute; width: 1px; height: 1px; margin: 0; padding: 0; overflow: hidden; opacity: 0; }
+.filters { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 38px; }
+.filters label { display: inline-flex; align-items: center; gap: 8px; padding: 9px 15px; border: 1px solid var(--line); border-radius: 2px; background: var(--card); color: var(--muted); cursor: pointer; font-size: .85rem; font-weight: 750; }
+.filters label span { padding: 1px 7px; border-radius: 999px; background: var(--paper); font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: .74rem; }
+.filters label:hover { border-color: var(--signal); color: var(--ink); }
+/* Checked and focus styling forward from the hidden input to its own label. */
+#filter-all:checked ~ .filters label[for="filter-all"],
+#filter-same:checked ~ .filters label[for="filter-same"],
+#filter-cross:checked ~ .filters label[for="filter-cross"] { border-color: var(--ink); background: var(--ink); color: white; }
+#filter-all:checked ~ .filters label[for="filter-all"] span,
+#filter-same:checked ~ .filters label[for="filter-same"] span,
+#filter-cross:checked ~ .filters label[for="filter-cross"] span { background: rgb(255 255 255 / 22%); }
+#filter-all:focus-visible ~ .filters label[for="filter-all"],
+#filter-same:focus-visible ~ .filters label[for="filter-same"],
+#filter-cross:focus-visible ~ .filters label[for="filter-cross"] { outline: 3px solid #00a6b2; outline-offset: 3px; }
+#filter-same:checked ~ .match.cross-board,
+#filter-cross:checked ~ .match.same-board { display: none; }
+.filter-empty { display: none; }
+#filter-same:checked ~ .filter-empty.same-board,
+#filter-cross:checked ~ .filter-empty.cross-board { display: block; }
 details { margin-top: 30px; padding: 16px 18px; border: 1px solid var(--line); border-radius: 3px; background: var(--card); }
 summary { cursor: pointer; font-weight: 750; }
 details ul { margin-bottom: 0; padding-left: 20px; color: var(--muted); line-height: 1.6; }
 footer { margin-top: 52px; padding-top: 18px; border-top: 1px solid var(--line); color: var(--muted); font-size: .8rem; }
 @media (prefers-reduced-motion: reduce) { .button:hover { transform: none; } }
+/* Print every match: a filtered printout would silently drop the hidden ones. */
+@media print {
+  .filters, .filter-empty { display: none !important; }
+  #filter-same:checked ~ .match.cross-board,
+  #filter-cross:checked ~ .match.same-board { display: block !important; }
+}
 @media (max-width: 620px) {
   main { width: min(100% - 20px, 1440px); padding-top: 30px; }
   .match-heading { align-items: start; flex-direction: column; }
@@ -170,10 +196,13 @@ footer { margin-top: 52px; padding-top: 18px; border-top: 1px solid var(--line);
         html.push_str("<div class=\"empty\"><strong>No duplicate image pins found.</strong><br>The scan completed without producing comparison candidates.</div>\n");
     }
 
+    render_filters(&mut html, report, show_boards);
+
     for (index, group) in report.exact_groups.iter().enumerate() {
         let _ = writeln!(
             html,
-            "<section class=\"match\"><div class=\"match-heading\"><div class=\"match-title\"><h2>Exact group {}</h2>{}</div><p>Byte-identical image files</p></div><div class=\"comparison\">",
+            "<section class=\"match {}\"><div class=\"match-heading\"><div class=\"match-title\"><h2>Exact group {}</h2>{}</div><p>Byte-identical image files</p></div><div class=\"comparison\">",
+            group.scope.css_class(),
             index + 1,
             scope_badge(group.scope, show_boards)
         );
@@ -186,7 +215,8 @@ footer { margin-top: 52px; padding-top: 18px; border-top: 1px solid var(--line);
     for (index, candidate) in report.visual_candidates.iter().enumerate() {
         let _ = writeln!(
             html,
-            "<section class=\"match\"><div class=\"match-heading\"><div class=\"match-title\"><h2>Visual candidate {}</h2>{}</div><p>{}% similar · hash distance {}/64</p></div><div class=\"comparison\">",
+            "<section class=\"match {}\"><div class=\"match-heading\"><div class=\"match-title\"><h2>Visual candidate {}</h2>{}</div><p>{}% similar · hash distance {}/64</p></div><div class=\"comparison\">",
+            candidate.scope.css_class(),
             index + 1,
             scope_badge(candidate.scope, show_boards),
             candidate.similarity_percent,
@@ -203,6 +233,68 @@ footer { margin-top: 52px; padding-top: 18px; border-top: 1px solid var(--line);
         "<footer>This temporary report loads images from Pinterest and remains available until your operating system cleans its temporary files.</footer>\n</main>\n</body>\n</html>\n",
     );
     html
+}
+
+/// Renders the scope filter tabs, or nothing when they would be dead controls.
+///
+/// The radio inputs are emitted as siblings of the match sections rather than
+/// inside `.filters`, because the filtering CSS reaches the sections with `~`,
+/// which only matches *later* siblings. The visible labels sit in `.filters` and
+/// reach the inputs by `for=`.
+fn render_filters(html: &mut String, report: &Report, show_boards: bool) {
+    let (same, cross) = report.scope_counts();
+    if !show_boards || same + cross == 0 {
+        return;
+    }
+
+    for id in ["filter-all", "filter-same", "filter-cross"] {
+        let checked = if id == "filter-all" { " checked" } else { "" };
+        let _ = writeln!(
+            html,
+            "<input type=\"radio\" name=\"scope-filter\" id=\"{id}\" class=\"filter-input\"{checked}>"
+        );
+    }
+
+    // A group of radios, not an ARIA tablist: real tab semantics need script to
+    // manage focus and aria-selected, and announcing them without it would
+    // describe behavior that is not there.
+    html.push_str(
+        "<div class=\"filters\" role=\"group\" aria-label=\"Filter matches by board scope\">\n",
+    );
+    for (id, label, count) in [
+        ("filter-all", "All", same + cross),
+        ("filter-same", "Same board", same),
+        ("filter-cross", "Across boards", cross),
+    ] {
+        let _ = writeln!(
+            html,
+            "<label for=\"{id}\">{label} <span>{count}</span></label>"
+        );
+    }
+    html.push_str("</div>\n");
+
+    // Rust knows the counts, so an empty tab can explain itself without CSS
+    // having to count anything.
+    for (scope, count, message) in [
+        (
+            MatchScope::SameBoard,
+            same,
+            "No duplicates within a single board.",
+        ),
+        (
+            MatchScope::CrossBoard,
+            cross,
+            "No duplicates spanning two boards.",
+        ),
+    ] {
+        if count == 0 {
+            let _ = writeln!(
+                html,
+                "<div class=\"empty filter-empty {}\">{message}</div>",
+                scope.css_class()
+            );
+        }
+    }
 }
 
 /// Badges a match as same-board or cross-board, or renders nothing when only
@@ -395,6 +487,92 @@ mod tests {
         // The badge sits beside the heading inside the wrapper that keeps
         // .match-heading a two-child flexbox.
         assert!(multi.contains("<div class=\"match-title\"><h2>Exact group 1</h2><span"));
+    }
+
+    /// The single-board `sample_report` plus a second board and a cross-board
+    /// group, which is the state the tabs exist for.
+    fn multi_board_report() -> Report {
+        let mut report = sample_report();
+        report.summary.boards.push(ScannedBoard {
+            name: "Mood board".into(),
+            url: "https://www.pinterest.com/alice/mood-board/".into(),
+            pins_reported: Some(1),
+            pins_found: 1,
+        });
+        report.exact_groups[0].scope = MatchScope::CrossBoard;
+        report
+    }
+
+    #[test]
+    fn filter_tabs_appear_only_for_multi_board_scans() {
+        let single = render_html(&sample_report());
+        assert!(!single.contains("class=\"filters\""));
+        assert!(!single.contains("scope-filter"));
+
+        let multi = render_html(&multi_board_report());
+        assert!(multi.contains("role=\"group\""));
+        // One exact group (cross) and one visual candidate (same).
+        assert!(multi.contains("<label for=\"filter-all\">All <span>2</span></label>"));
+        assert!(multi.contains("<label for=\"filter-same\">Same board <span>1</span></label>"));
+        assert!(multi.contains("<label for=\"filter-cross\">Across boards <span>1</span></label>"));
+        assert!(multi.contains("id=\"filter-all\" class=\"filter-input\" checked"));
+    }
+
+    #[test]
+    fn match_sections_carry_their_scope_class() {
+        let multi = render_html(&multi_board_report());
+
+        assert!(multi.contains("<section class=\"match cross-board\">"));
+        assert!(multi.contains("<section class=\"match same-board\">"));
+    }
+
+    #[test]
+    fn filter_inputs_precede_every_match_section() {
+        let multi = render_html(&multi_board_report());
+        let first_input = multi.find("id=\"filter-all\"").unwrap();
+        let first_match = multi.find("<section class=\"match").unwrap();
+
+        // The filtering CSS uses `~`, which only reaches later siblings, so this
+        // ordering is load-bearing rather than cosmetic.
+        assert!(
+            first_input < first_match,
+            "inputs must come before the matches they filter"
+        );
+    }
+
+    #[test]
+    fn an_empty_scope_explains_itself() {
+        // Both scopes present, so neither tab needs an empty state. Match the
+        // div, not the bare class name, which also occurs in the stylesheet.
+        let both = render_html(&multi_board_report());
+        assert!(!both.contains("<div class=\"empty filter-empty"));
+
+        // Make every match cross-board; the same-board tab then has nothing.
+        let mut report = multi_board_report();
+        report.visual_candidates[0].scope = MatchScope::CrossBoard;
+        let cross_only = render_html(&report);
+
+        assert!(cross_only.contains("<div class=\"empty filter-empty same-board\">"));
+        assert!(!cross_only.contains("<div class=\"empty filter-empty cross-board"));
+        assert!(cross_only.contains("No duplicates within a single board."));
+        assert!(
+            cross_only.contains("<label for=\"filter-same\">Same board <span>0</span></label>")
+        );
+    }
+
+    #[test]
+    fn filtering_never_hides_the_details_or_footer() {
+        let multi = render_html(&multi_board_report());
+
+        // Only `.match` and `.filter-empty` may be hidden by a checked filter.
+        for rule in [
+            "#filter-same:checked ~ .match.cross-board",
+            "#filter-cross:checked ~ .match.same-board",
+        ] {
+            assert!(multi.contains(rule), "{rule}");
+        }
+        assert!(!multi.contains(":checked ~ details"));
+        assert!(!multi.contains(":checked ~ footer"));
     }
 
     #[test]

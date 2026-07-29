@@ -186,18 +186,28 @@ impl Report {
         format!(" {} {tag}", theme.dim("·"))
     }
 
+    /// Counts matches by scope as `(same board, across boards)`, over exact
+    /// groups and visual candidates together.
+    pub fn scope_counts(&self) -> (usize, usize) {
+        let scopes = self.exact_groups.iter().map(|group| group.scope).chain(
+            self.visual_candidates
+                .iter()
+                .map(|candidate| candidate.scope),
+        );
+
+        let mut same = 0;
+        let mut cross = 0;
+        for scope in scopes {
+            match scope {
+                MatchScope::SameBoard => same += 1,
+                MatchScope::CrossBoard => cross += 1,
+            }
+        }
+        (same, cross)
+    }
+
     fn cross_board_matches(&self) -> usize {
-        let groups = self
-            .exact_groups
-            .iter()
-            .filter(|group| group.scope == MatchScope::CrossBoard)
-            .count();
-        let candidates = self
-            .visual_candidates
-            .iter()
-            .filter(|candidate| candidate.scope == MatchScope::CrossBoard)
-            .count();
-        groups + candidates
+        self.scope_counts().1
     }
 
     pub fn render_text(&self) -> String {
@@ -639,6 +649,50 @@ mod tests {
                 .render_text_with_color(true)
                 .contains("ACROSS BOARDS")
         );
+    }
+
+    #[test]
+    fn scope_counts_span_groups_and_candidates() {
+        let mut report = Report {
+            summary: Summary {
+                username: Some("alice".into()),
+                boards: vec![scanned("Interiors", 2), scanned("Mood board", 2)],
+                pins_reported: Some(4),
+                pins_found: 4,
+                analyzed: 4,
+                skipped: 0,
+                exact_groups: 2,
+                visual_candidates: 1,
+            },
+            exact_groups: vec![
+                DuplicateGroup {
+                    scope: MatchScope::CrossBoard,
+                    items: vec![item("1", "Interiors", 1200)],
+                },
+                DuplicateGroup {
+                    scope: MatchScope::SameBoard,
+                    items: vec![item("2", "Interiors", 800)],
+                },
+            ],
+            visual_candidates: vec![VisualCandidate {
+                hash_distance: 1,
+                similarity_percent: 98,
+                scope: MatchScope::SameBoard,
+                items: [item("3", "Interiors", 700), item("4", "Interiors", 600)],
+            }],
+            skipped: vec![],
+            warnings: vec![],
+            visual_report: None,
+        };
+
+        // Two same-board (one group, one candidate) and one cross-board group.
+        assert_eq!(report.scope_counts(), (2, 1));
+        // The summary line and the HTML tabs must never disagree.
+        assert_eq!(report.cross_board_matches(), report.scope_counts().1);
+
+        report.exact_groups.clear();
+        report.visual_candidates.clear();
+        assert_eq!(report.scope_counts(), (0, 0));
     }
 
     #[test]
