@@ -13,6 +13,124 @@ use crate::auth::BrowserCookie;
 use crate::progress::{NoProgress, ProgressEvent, ProgressSink};
 
 const MAX_PAGES: usize = 10_000;
+const DEFAULT_ROOT: &str = "https://www.pinterest.com/";
+const BOARD_PAGE_SIZE: usize = 25;
+
+/// Path segments that never name a Pinterest user.
+const RESERVED_SEGMENTS: [&str; 4] = ["pin", "search", "ideas", "today"];
+
+/// Profile tabs that follow a username and still identify a user, not a board.
+const PROFILE_TABS: [&str; 3] = ["_saved", "_created", "_shop"];
+
+/// What the user asked `unpin` to inspect.
+#[derive(Debug, Clone, Eq, PartialEq)]
+pub enum Target {
+    /// A single board, named directly.
+    Board(BoardTarget),
+    /// A whole profile, whose boards still need to be chosen.
+    User(UserTarget),
+}
+
+impl Target {
+    /// Accepts a board URL, a profile URL, or a bare `username` / `@username`.
+    pub fn parse(input: &str) -> Result<Self, PinterestError> {
+        let input = input.trim();
+        if input.is_empty() {
+            return Err(PinterestError::InvalidTarget("the target is empty".into()));
+        }
+
+        // Anything URL-shaped is parsed as one; everything else is a username.
+        // A URL always carries a scheme or a path separator, so free text falls
+        // through to the clearer username error rather than a URL parse error.
+        if input.contains(['/', ':']) {
+            return Self::parse_url(input);
+        }
+
+        let username = input.strip_prefix('@').unwrap_or(input);
+        if !is_username(username) {
+            return Err(PinterestError::InvalidTarget(format!(
+                "{input:?} is neither a Pinterest URL nor a valid username"
+            )));
+        }
+
+        Ok(Self::User(UserTarget {
+            root: Url::parse(DEFAULT_ROOT).expect("the default root is a valid URL"),
+            username: username.to_owned(),
+        }))
+    }
+
+    fn parse_url(input: &str) -> Result<Self, PinterestError> {
+        let url = Url::parse(input)
+            .map_err(|_| PinterestError::InvalidTarget("not a valid absolute URL".into()))?;
+
+        if url.scheme() != "https" && url.scheme() != "http" {
+            return Err(PinterestError::InvalidTarget(
+                "the URL must use http or https".into(),
+            ));
+        }
+
+        let host = url
+            .host_str()
+            .ok_or_else(|| PinterestError::InvalidTarget("the URL has no host".into()))?
+            .to_ascii_lowercase();
+        if !is_pinterest_host(&host) {
+            return Err(PinterestError::InvalidTarget(
+                "the host is not a Pinterest domain".into(),
+            ));
+        }
+
+        let segments = url
+            .path_segments()
+            .ok_or_else(|| PinterestError::InvalidTarget("the URL has no path".into()))?
+            .filter(|part| !part.is_empty())
+            .map(decode_segment)
+            .collect::<Result<Vec<_>, _>>()?;
+
+        let reserved = segments
+            .first()
+            .is_some_and(|first| RESERVED_SEGMENTS.contains(&first.to_ascii_lowercase().as_str()));
+        if segments.is_empty() || reserved {
+            return Err(PinterestError::InvalidTarget(INVALID_TARGET_HELP.into()));
+        }
+
+        let mut root = url;
+        root.set_path("/");
+        root.set_query(None);
+        root.set_fragment(None);
+
+        // `/USER/`, `/USER/_saved/`, and `/USER/_created/` all name a profile.
+        let is_profile = segments.len() == 1
+            || (segments.len() == 2
+                && PROFILE_TABS.contains(&segments[1].to_ascii_lowercase().as_str()));
+        if is_profile {
+            return Ok(Self::User(UserTarget {
+                root,
+                username: segments[0].clone(),
+            }));
+        }
+
+        if segments.len() != 2 {
+            return Err(PinterestError::InvalidTarget(INVALID_TARGET_HELP.into()));
+        }
+
+        Ok(Self::Board(BoardTarget {
+            root,
+            username: segments[0].clone(),
+            board_slug: segments[1].clone(),
+        }))
+    }
+
+    pub fn root(&self) -> &Url {
+        match self {
+            Self::Board(target) => &target.root,
+            Self::User(target) => &target.root,
+        }
+    }
+}
+
+const INVALID_TARGET_HELP: &str = "expected a board URL \
+     (https://www.pinterest.com/USER/BOARD/), a profile URL \
+     (https://www.pinterest.com/USER/), or a username";
 
 #[derive(Debug, Clone, Eq, PartialEq)]
 pub struct BoardTarget {
@@ -23,61 +141,69 @@ pub struct BoardTarget {
 
 impl BoardTarget {
     pub fn parse(input: &str) -> Result<Self, PinterestError> {
-        let url = Url::parse(input)
-            .map_err(|_| PinterestError::InvalidBoardUrl("not a valid absolute URL".into()))?;
-
-        if url.scheme() != "https" && url.scheme() != "http" {
-            return Err(PinterestError::InvalidBoardUrl(
-                "the URL must use http or https".into(),
-            ));
+        match Target::parse(input)? {
+            Target::Board(target) => Ok(target),
+            Target::User(_) => Err(PinterestError::InvalidTarget(INVALID_TARGET_HELP.into())),
         }
-
-        let host = url
-            .host_str()
-            .ok_or_else(|| PinterestError::InvalidBoardUrl("the URL has no host".into()))?
-            .to_ascii_lowercase();
-        if !is_pinterest_host(&host) {
-            return Err(PinterestError::InvalidBoardUrl(
-                "the host is not a Pinterest domain".into(),
-            ));
-        }
-
-        let segments = url
-            .path_segments()
-            .ok_or_else(|| PinterestError::InvalidBoardUrl("the URL has no path".into()))?
-            .filter(|part| !part.is_empty())
-            .map(decode_segment)
-            .collect::<Result<Vec<_>, _>>()?;
-
-        if segments.len() != 2
-            || matches!(
-                segments[0].to_ascii_lowercase().as_str(),
-                "pin" | "search" | "ideas" | "today"
-            )
-        {
-            return Err(PinterestError::InvalidBoardUrl(
-                "expected a board URL in the form https://www.pinterest.com/USER/BOARD/".into(),
-            ));
-        }
-
-        let mut root = url;
-        root.set_path("/");
-        root.set_query(None);
-        root.set_fragment(None);
-
-        Ok(Self {
-            root,
-            username: segments[0].clone(),
-            board_slug: segments[1].clone(),
-        })
     }
+}
+
+#[derive(Debug, Clone, Eq, PartialEq)]
+pub struct UserTarget {
+    pub root: Url,
+    pub username: String,
+}
+
+/// Builds a board's web URL from its owner and slug.
+///
+/// Both come from percent-decoded path segments, so they are pushed back through
+/// `path_segments_mut`, which re-encodes them. Formatting them into a string
+/// instead would emit raw spaces and `?`/`#` into the URL.
+fn board_url(root: &Url, username: &str, slug: &str) -> String {
+    let mut url = root.clone();
+    match url.path_segments_mut() {
+        Ok(mut segments) => {
+            segments.clear().push(username).push(slug).push("");
+        }
+        // Only reachable for a cannot-be-a-base root, which `Target::parse`
+        // rejects before this point.
+        Err(()) => return String::new(),
+    }
+    url.into()
+}
+
+/// Resolves a Pinterest-supplied path against the site root, keeping only
+/// ordinary web URLs.
+///
+/// The result is written into an `href` in the generated report, and joining is
+/// not a scheme filter: `javascript:` and `data:` values pass straight through,
+/// and an empty path silently resolves to the site root. This mirrors the check
+/// [`parse_pin`] already applies to image URLs.
+fn absolute_web_url(root: &Url, path: &str) -> String {
+    if path.is_empty() {
+        return String::new();
+    }
+    root.join(path)
+        .ok()
+        .filter(|url| matches!(url.scheme(), "http" | "https"))
+        .map(String::from)
+        .unwrap_or_default()
+}
+
+/// Pinterest usernames are ASCII alphanumerics and underscores.
+fn is_username(candidate: &str) -> bool {
+    !candidate.is_empty()
+        && candidate.len() <= 30
+        && candidate
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || byte == b'_')
 }
 
 fn decode_segment(segment: &str) -> Result<String, PinterestError> {
     percent_decode_str(segment)
         .decode_utf8()
         .map(|decoded| decoded.into_owned())
-        .map_err(|_| PinterestError::InvalidBoardUrl("the path is not valid UTF-8".into()))
+        .map_err(|_| PinterestError::InvalidTarget("the path is not valid UTF-8".into()))
 }
 
 fn is_pinterest_host(host: &str) -> bool {
@@ -90,6 +216,9 @@ pub struct Pin {
     pub media_url: String,
     pub metadata_width: Option<u32>,
     pub metadata_height: Option<u32>,
+    /// Name of the board this pin was found in, for multi-board scans.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub board: Option<String>,
 }
 
 impl Pin {
@@ -105,6 +234,21 @@ pub struct SkippedPin {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub pin_url: Option<String>,
     pub reason: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub board: Option<String>,
+}
+
+/// A board that is known well enough to fetch its pins, from either a direct
+/// board URL or a profile's board listing.
+#[derive(Debug, Clone, Eq, PartialEq)]
+pub struct BoardRef {
+    pub id: String,
+    pub name: String,
+    pub slug: String,
+    pub url: String,
+    pub pins_reported: Option<usize>,
+    pub section_count: u64,
+    pub is_secret: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -119,8 +263,8 @@ pub struct BoardPins {
 
 #[derive(Debug, Error)]
 pub enum PinterestError {
-    #[error("invalid Pinterest board URL: {0}")]
-    InvalidBoardUrl(String),
+    #[error("invalid Pinterest target: {0}")]
+    InvalidTarget(String),
 
     #[error("failed to build the Pinterest HTTP client")]
     Client(#[source] reqwest::Error),
@@ -148,36 +292,32 @@ pub enum PinterestError {
 #[derive(Clone)]
 pub struct PinterestClient {
     http: reqwest::Client,
-    target: BoardTarget,
     api_root: Url,
     cookie_header: HeaderValue,
     authenticated: bool,
 }
 
 impl PinterestClient {
-    pub fn new(target: BoardTarget) -> Result<Self, PinterestError> {
-        Self::with_cookies(target, Vec::new())
+    pub fn new(root: Url) -> Result<Self, PinterestError> {
+        Self::with_cookies(root, Vec::new())
     }
 
-    pub fn with_cookies(
-        target: BoardTarget,
-        cookies: Vec<BrowserCookie>,
-    ) -> Result<Self, PinterestError> {
-        let api_root = target.root.clone();
-        Self::with_api_root_and_cookies(target, api_root, cookies)
+    pub fn with_cookies(root: Url, cookies: Vec<BrowserCookie>) -> Result<Self, PinterestError> {
+        let api_root = root.clone();
+        Self::with_api_root_and_cookies(root, api_root, cookies)
     }
 
-    pub fn with_api_root(target: BoardTarget, api_root: Url) -> Result<Self, PinterestError> {
-        Self::with_api_root_and_cookies(target, api_root, Vec::new())
+    pub fn with_api_root(root: Url, api_root: Url) -> Result<Self, PinterestError> {
+        Self::with_api_root_and_cookies(root, api_root, Vec::new())
     }
 
     pub fn with_api_root_and_cookies(
-        target: BoardTarget,
+        root: Url,
         api_root: Url,
         cookies: Vec<BrowserCookie>,
     ) -> Result<Self, PinterestError> {
         let (csrf_token, cookie_header, authenticated) = build_cookie_header(cookies)?;
-        let headers = build_headers(&target, &csrf_token)?;
+        let headers = build_headers(&root, &csrf_token)?;
         let http = reqwest::Client::builder()
             .default_headers(headers)
             .timeout(Duration::from_secs(30))
@@ -191,7 +331,6 @@ impl PinterestClient {
 
         Ok(Self {
             http,
-            target,
             api_root,
             cookie_header,
             authenticated,
@@ -202,49 +341,161 @@ impl PinterestClient {
         self.http.clone()
     }
 
-    pub async fn fetch_board(&self) -> Result<BoardPins, PinterestError> {
-        self.fetch_board_with_progress(&NoProgress).await
+    pub async fn fetch_board(&self, target: &BoardTarget) -> Result<BoardPins, PinterestError> {
+        self.fetch_board_with_progress(target, &NoProgress).await
     }
 
     pub async fn fetch_board_with_progress(
         &self,
+        target: &BoardTarget,
         progress: &dyn ProgressSink,
     ) -> Result<BoardPins, PinterestError> {
+        let board = self.resolve_board(target, progress).await?;
+        self.fetch_board_pins(&board, &mut HashSet::new(), progress)
+            .await
+    }
+
+    /// Looks up a board named by URL, which is the only way to learn its ID.
+    pub async fn resolve_board(
+        &self,
+        target: &BoardTarget,
+        progress: &dyn ProgressSink,
+    ) -> Result<BoardRef, PinterestError> {
         progress.emit(ProgressEvent::FetchingBoard);
         let board_response = self
             .call(
                 "Board",
                 json!({
-                    "slug": self.target.board_slug,
-                    "username": self.target.username,
+                    "slug": target.board_slug,
+                    "username": target.username,
                     "field_set_key": "detailed"
                 }),
             )
             .await?;
         let board = response_data(&board_response, "Board")?;
-        let board_id = value_string(board.get("id"))
+        let id = value_string(board.get("id"))
             .ok_or_else(|| invalid_response("Board", "resource_response.data.id is missing"))?;
-        let board_name = board
+        let name = board
             .get("name")
             .and_then(Value::as_str)
-            .unwrap_or(&self.target.board_slug)
+            .unwrap_or(&target.board_slug)
             .to_owned();
-        let pins_reported = ["pin_count", "pins_count"]
-            .iter()
-            .find_map(|field| value_usize(board.get(*field)));
-        progress.emit(ProgressEvent::BoardResolved {
-            name: board_name.clone(),
-        });
-        let section_count = board
-            .get("section_count")
-            .and_then(Value::as_u64)
-            .unwrap_or(0);
+        progress.emit(ProgressEvent::BoardResolved { name: name.clone() });
 
+        Ok(BoardRef {
+            id,
+            name,
+            slug: target.board_slug.clone(),
+            url: board_url(&target.root, &target.username, &target.board_slug),
+            pins_reported: ["pin_count", "pins_count"]
+                .iter()
+                .find_map(|field| value_usize(board.get(*field))),
+            section_count: board
+                .get("section_count")
+                .and_then(Value::as_u64)
+                .unwrap_or(0),
+            is_secret: board.get("privacy").and_then(Value::as_str) == Some("secret"),
+        })
+    }
+
+    /// Lists the boards on a profile so the caller can choose among them.
+    pub async fn fetch_user_boards(
+        &self,
+        target: &UserTarget,
+        progress: &dyn ProgressSink,
+    ) -> Result<Vec<BoardRef>, PinterestError> {
+        progress.emit(ProgressEvent::FetchingUserBoards {
+            username: target.username.clone(),
+        });
+        let raw_boards = self
+            .paginate(
+                "Boards",
+                json!({
+                    "username": target.username,
+                    "field_set_key": "profile_grid_item",
+                    "sort": "last_pinned_to",
+                    "filter_stories": false,
+                    "page_size": BOARD_PAGE_SIZE,
+                    "include_archived": true,
+                    "bookmarks": null
+                }),
+                progress,
+            )
+            .await?;
+
+        let mut boards = Vec::new();
+        for raw_board in raw_boards {
+            // The profile grid mixes in non-board entries that have an ID but
+            // no feed behind it; fetching one returns HTTP 404.
+            if raw_board.get("type").and_then(Value::as_str) != Some("board") {
+                continue;
+            }
+            let Some(id) = value_string(raw_board.get("id")) else {
+                continue;
+            };
+            // Pinterest returns the path, not a slug; collaborative boards are
+            // listed under their owner's username rather than this profile's.
+            let url = raw_board
+                .get("url")
+                .and_then(Value::as_str)
+                .unwrap_or_default();
+            let slug = url
+                .trim_matches('/')
+                .rsplit('/')
+                .next()
+                .unwrap_or_default()
+                .to_owned();
+            // Fall back through slug to ID so a board is never unlabeled in
+            // the picker; Pinterest occasionally returns neither for a board.
+            let name = raw_board
+                .get("name")
+                .and_then(Value::as_str)
+                .map(str::trim)
+                .filter(|name| !name.is_empty())
+                .map(str::to_owned)
+                .unwrap_or_else(|| {
+                    if slug.is_empty() {
+                        format!("Board {id}")
+                    } else {
+                        slug.clone()
+                    }
+                });
+
+            boards.push(BoardRef {
+                id,
+                name,
+                slug,
+                url: absolute_web_url(&target.root, url),
+                pins_reported: value_usize(raw_board.get("pin_count")),
+                section_count: raw_board
+                    .get("section_count")
+                    .and_then(Value::as_u64)
+                    .unwrap_or(0),
+                is_secret: raw_board.get("privacy").and_then(Value::as_str) == Some("secret"),
+            });
+        }
+
+        progress.emit(ProgressEvent::UserBoardsResolved {
+            total: boards.len(),
+        });
+        Ok(boards)
+    }
+
+    /// Fetches every pin in a board, including its sections.
+    ///
+    /// `seen_pin_ids` is shared across boards so a pin repeated in a board's
+    /// main feed and one of its sections is counted once.
+    pub async fn fetch_board_pins(
+        &self,
+        board: &BoardRef,
+        seen_pin_ids: &mut HashSet<String>,
+        progress: &dyn ProgressSink,
+    ) -> Result<BoardPins, PinterestError> {
         let mut raw_pins = self
             .paginate(
                 "BoardFeed",
                 json!({
-                    "board_id": board_id,
+                    "board_id": board.id,
                     "field_set_key": "react_grid_pin",
                     "prepend": false,
                     "bookmarks": null
@@ -254,9 +505,9 @@ impl PinterestClient {
             .await?;
         let mut warnings = Vec::new();
 
-        if section_count > 0 {
+        if board.section_count > 0 {
             let sections = self
-                .paginate("BoardSections", json!({ "board_id": board_id }), progress)
+                .paginate("BoardSections", json!({ "board_id": board.id }), progress)
                 .await?;
             progress.emit(ProgressEvent::SectionsStarted {
                 total: sections.len(),
@@ -285,19 +536,20 @@ impl PinterestClient {
             }
         }
 
-        let mut unique_ids = HashSet::new();
         let mut pins = Vec::new();
         let mut skipped = Vec::new();
+        let mut pins_found = 0;
 
         for raw_pin in raw_pins {
             let id = value_string(raw_pin.get("id"));
             if let Some(id) = &id
-                && !unique_ids.insert(id.clone())
+                && !seen_pin_ids.insert(id.clone())
             {
                 continue;
             }
+            pins_found += 1;
 
-            match parse_pin(&raw_pin) {
+            match parse_pin(&raw_pin, &board.name) {
                 Ok(pin) => pins.push(pin),
                 Err(reason) => skipped.push(SkippedPin {
                     pin_url: id
@@ -305,13 +557,12 @@ impl PinterestClient {
                         .map(|id| format!("https://www.pinterest.com/pin/{id}/")),
                     pin_id: id,
                     reason,
+                    board: Some(board.name.clone()),
                 }),
             }
         }
 
-        let pins_found =
-            unique_ids.len() + skipped.iter().filter(|pin| pin.pin_id.is_none()).count();
-        if let Some(reported) = pins_reported
+        if let Some(reported) = board.pins_reported
             && pins_found < reported
         {
             if self.authenticated {
@@ -326,8 +577,8 @@ impl PinterestClient {
         }
 
         Ok(BoardPins {
-            board_name,
-            pins_reported,
+            board_name: board.name.clone(),
+            pins_reported: board.pins_reported,
             pins_found,
             pins,
             skipped,
@@ -466,10 +717,9 @@ fn is_cookie_name(name: &str) -> bool {
         })
 }
 
-fn build_headers(target: &BoardTarget, csrf_token: &str) -> Result<HeaderMap, PinterestError> {
+fn build_headers(root: &Url, csrf_token: &str) -> Result<HeaderMap, PinterestError> {
     let mut headers = HeaderMap::new();
-    let host = target
-        .root
+    let host = root
         .host_str()
         .ok_or_else(|| invalid_response("headers", "Pinterest root URL had no host"))?;
     let values = [
@@ -542,7 +792,7 @@ fn response_bookmark(response: &Value) -> Option<String> {
     }
 }
 
-fn parse_pin(raw: &Value) -> Result<Pin, String> {
+fn parse_pin(raw: &Value, board_name: &str) -> Result<Pin, String> {
     let id = value_string(raw.get("id")).ok_or_else(|| "pin ID is missing".to_owned())?;
 
     if raw.get("carousel_data").is_some_and(is_present) {
@@ -574,6 +824,7 @@ fn parse_pin(raw: &Value) -> Result<Pin, String> {
         media_url,
         metadata_width: value_u32(image.get("width")),
         metadata_height: value_u32(image.get("height")),
+        board: Some(board_name.to_owned()),
     })
 }
 
@@ -614,47 +865,152 @@ fn invalid_response(resource: &'static str, message: impl Into<String>) -> Pinte
 mod tests {
     use super::*;
 
+    fn board(input: &str) -> BoardTarget {
+        match Target::parse(input).unwrap() {
+            Target::Board(target) => target,
+            Target::User(_) => panic!("{input} should parse as a board"),
+        }
+    }
+
+    fn user(input: &str) -> UserTarget {
+        match Target::parse(input).unwrap() {
+            Target::User(target) => target,
+            Target::Board(_) => panic!("{input} should parse as a user"),
+        }
+    }
+
     #[test]
     fn parses_board_urls_and_localized_domains() {
-        let target =
-            BoardTarget::parse("https://uk.pinterest.com/alice/home%20ideas/?invite=true").unwrap();
+        let target = board("https://uk.pinterest.com/alice/home%20ideas/?invite=true");
         assert_eq!(target.username, "alice");
         assert_eq!(target.board_slug, "home ideas");
         assert_eq!(target.root.as_str(), "https://uk.pinterest.com/");
     }
 
     #[test]
-    fn rejects_non_board_urls() {
-        for url in [
+    fn parses_profile_urls_and_bare_usernames() {
+        assert_eq!(user("https://www.pinterest.com/alice/").username, "alice");
+        assert_eq!(
+            user("https://uk.pinterest.com/alice/_saved/").username,
+            "alice"
+        );
+        assert_eq!(
+            user("https://www.pinterest.com/alice/_created/").username,
+            "alice"
+        );
+
+        for input in ["alice", "@alice", "  alice  "] {
+            let target = user(input);
+            assert_eq!(target.username, "alice", "{input}");
+            assert_eq!(
+                target.root.as_str(),
+                "https://www.pinterest.com/",
+                "{input}"
+            );
+        }
+
+        // A localized profile URL keeps its host for later API calls.
+        assert_eq!(
+            user("https://uk.pinterest.com/alice/").root.as_str(),
+            "https://uk.pinterest.com/"
+        );
+    }
+
+    #[test]
+    fn rejects_unusable_targets() {
+        for input in [
             "https://example.com/alice/board/",
-            "https://www.pinterest.com/alice/",
             "https://www.pinterest.com/pin/123/",
             "https://www.pinterest.com/search/pins/?q=test",
+            "https://www.pinterest.com/alice/board/extra/",
+            "ftp://www.pinterest.com/alice/board/",
+            "",
+            "  ",
+            "not a username",
+            "alice-with-dashes",
+            "alice.com",
         ] {
-            assert!(BoardTarget::parse(url).is_err(), "{url}");
+            assert!(Target::parse(input).is_err(), "{input:?}");
         }
     }
 
     #[test]
+    fn board_target_parse_rejects_profile_targets() {
+        assert!(BoardTarget::parse("https://www.pinterest.com/alice/").is_err());
+        assert!(BoardTarget::parse("alice").is_err());
+        assert!(BoardTarget::parse("https://www.pinterest.com/alice/ideas/").is_ok());
+    }
+
+    #[test]
+    fn board_urls_re_encode_decoded_segments() {
+        let root = Url::parse("https://uk.pinterest.com/").unwrap();
+
+        assert_eq!(
+            board_url(&root, "alice", "interiors"),
+            "https://uk.pinterest.com/alice/interiors/"
+        );
+        // These come from percent-decoded path segments, so they must go back in
+        // encoded rather than being formatted into the string raw.
+        assert_eq!(
+            board_url(&root, "alice", "home ideas"),
+            "https://uk.pinterest.com/alice/home%20ideas/"
+        );
+        for (slug, encoded) in [("a?b", "a%3Fb"), ("a#b", "a%23b"), ("a/b", "a%2Fb")] {
+            assert_eq!(
+                board_url(&root, "alice", slug),
+                format!("https://uk.pinterest.com/alice/{encoded}/"),
+                "{slug}"
+            );
+        }
+    }
+
+    #[test]
+    fn listed_board_urls_keep_only_web_schemes() {
+        let root = Url::parse("https://www.pinterest.com/").unwrap();
+
+        assert_eq!(
+            absolute_web_url(&root, "/alice/interiors/"),
+            "https://www.pinterest.com/alice/interiors/"
+        );
+
+        // Joining is not a scheme filter, and this value lands in an href in the
+        // generated report.
+        for hostile in ["javascript:alert(1)", "data:text/html,<b>x", "vbscript:x"] {
+            assert_eq!(absolute_web_url(&root, hostile), "", "{hostile}");
+        }
+
+        // An empty path resolves to the site root, which would silently link a
+        // board to the Pinterest homepage.
+        assert_eq!(absolute_web_url(&root, ""), "");
+    }
+
+    #[test]
     fn parses_static_image_and_rejects_other_media() {
-        let pin = parse_pin(&json!({
-            "id": "123",
-            "images": { "orig": {
-                "url": "https://i.pinimg.com/originals/a.jpg",
-                "width": 1200,
-                "height": 800
-            }}
-        }))
+        let pin = parse_pin(
+            &json!({
+                "id": "123",
+                "images": { "orig": {
+                    "url": "https://i.pinimg.com/originals/a.jpg",
+                    "width": 1200,
+                    "height": 800
+                }}
+            }),
+            "Ideas",
+        )
         .unwrap();
         assert_eq!(pin.id, "123");
         assert_eq!(pin.metadata_width, Some(1200));
+        assert_eq!(pin.board.as_deref(), Some("Ideas"));
 
         assert!(
-            parse_pin(&json!({
-                "id": "124",
-                "videos": {"video_list": {}},
-                "images": {"orig": {"url": "https://example.com/poster.jpg"}}
-            }))
+            parse_pin(
+                &json!({
+                    "id": "124",
+                    "videos": {"video_list": {}},
+                    "images": {"orig": {"url": "https://example.com/poster.jpg"}}
+                }),
+                "Ideas",
+            )
             .unwrap_err()
             .contains("video")
         );
@@ -662,15 +1018,18 @@ mod tests {
 
     #[test]
     fn analyzes_story_pins_when_they_have_a_static_cover() {
-        let pin = parse_pin(&json!({
-            "id": "125",
-            "story_pin_data": {"pages": [{"blocks": []}]},
-            "images": {"orig": {
-                "url": "https://i.pinimg.com/originals/story-cover.jpg",
-                "width": 900,
-                "height": 1600
-            }}
-        }))
+        let pin = parse_pin(
+            &json!({
+                "id": "125",
+                "story_pin_data": {"pages": [{"blocks": []}]},
+                "images": {"orig": {
+                    "url": "https://i.pinimg.com/originals/story-cover.jpg",
+                    "width": 900,
+                    "height": 1600
+                }}
+            }),
+            "Ideas",
+        )
         .unwrap();
 
         assert_eq!(pin.id, "125");
@@ -679,10 +1038,13 @@ mod tests {
             "https://i.pinimg.com/originals/story-cover.jpg"
         );
 
-        let error = parse_pin(&json!({
-            "id": "126",
-            "story_pin_data": {"pages": [{"blocks": []}]}
-        }))
+        let error = parse_pin(
+            &json!({
+                "id": "126",
+                "story_pin_data": {"pages": [{"blocks": []}]}
+            }),
+            "Ideas",
+        )
         .unwrap_err();
         assert_eq!(error, "story pin has no usable static cover");
     }

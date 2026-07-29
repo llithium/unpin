@@ -36,6 +36,9 @@ impl Recommendation {
 pub struct ReportItem {
     pub pin_id: String,
     pub pin_url: String,
+    /// Board this pin lives in; shown only when several boards were scanned.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub board: Option<String>,
     pub image_url: String,
     pub width: u32,
     pub height: u32,
@@ -43,8 +46,60 @@ pub struct ReportItem {
     pub recommendation: Recommendation,
 }
 
+/// Whether a match sits inside one board or spans several.
+///
+/// The difference matters when deciding what to delete: the same image saved
+/// twice into one board is a redundant double-save, while the same image in two
+/// boards is often deliberate.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, Eq, PartialEq)]
+#[serde(rename_all = "snake_case")]
+pub enum MatchScope {
+    SameBoard,
+    CrossBoard,
+}
+
+impl MatchScope {
+    /// Classifies a match by the boards its pins came from.
+    ///
+    /// Items without a board—every item in a single-board scan—count as being
+    /// on the same board, so the quiet case is the default.
+    pub(crate) fn of(items: &[ReportItem]) -> Self {
+        let mut boards = items.iter().filter_map(|item| item.board.as_deref());
+        let Some(first) = boards.next() else {
+            return Self::SameBoard;
+        };
+        if boards.any(|board| board != first) {
+            Self::CrossBoard
+        } else {
+            Self::SameBoard
+        }
+    }
+
+    pub(crate) fn label(&self) -> &'static str {
+        match self {
+            Self::SameBoard => "SAME BOARD",
+            Self::CrossBoard => "ACROSS BOARDS",
+        }
+    }
+
+    pub(crate) fn html_label(&self) -> &'static str {
+        match self {
+            Self::SameBoard => "Same board",
+            Self::CrossBoard => "Across boards",
+        }
+    }
+
+    pub(crate) fn css_class(&self) -> &'static str {
+        match self {
+            Self::SameBoard => "same-board",
+            Self::CrossBoard => "cross-board",
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, Eq, PartialEq)]
 pub struct DuplicateGroup {
+    pub scope: MatchScope,
     pub items: Vec<ReportItem>,
 }
 
@@ -52,12 +107,26 @@ pub struct DuplicateGroup {
 pub struct VisualCandidate {
     pub hash_distance: u8,
     pub similarity_percent: u8,
+    pub scope: MatchScope,
     pub items: [ReportItem; 2],
+}
+
+/// One board that contributed pins to this report.
+#[derive(Debug, Clone, Serialize, Deserialize, Eq, PartialEq)]
+pub struct ScannedBoard {
+    pub name: String,
+    pub url: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub pins_reported: Option<usize>,
+    pub pins_found: usize,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Eq, PartialEq)]
 pub struct Summary {
-    pub board_name: String,
+    /// Set when the scan started from a profile rather than a single board.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub username: Option<String>,
+    pub boards: Vec<ScannedBoard>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub pins_reported: Option<usize>,
     pub pins_found: usize,
@@ -79,6 +148,69 @@ pub struct Report {
 }
 
 impl Report {
+    /// Title shared by the text and HTML renderers.
+    ///
+    /// A single board keeps its own name; several boards are titled by the
+    /// profile they came from.
+    pub fn title(&self) -> String {
+        match self.summary.boards.as_slice() {
+            [board] => board.name.clone(),
+            boards => {
+                let count = format!("{} boards", boards.len());
+                match &self.summary.username {
+                    Some(username) => format!("{username} — {count}"),
+                    None => count,
+                }
+            }
+        }
+    }
+
+    /// Board labels and scope tags are noise when everything came from the same
+    /// board, so both renderers gate on this.
+    pub(crate) fn shows_board_labels(&self) -> bool {
+        self.summary.boards.len() > 1
+    }
+
+    /// Renders the scope tag appended to a match heading.
+    ///
+    /// Empty for a single-board scan, where every match is same-board by
+    /// definition and the tag would say nothing.
+    fn scope_suffix(&self, scope: MatchScope, theme: &TextTheme) -> String {
+        if !self.shows_board_labels() {
+            return String::new();
+        }
+        let tag = match scope {
+            // Yellow is already the report's "a human must decide" color.
+            MatchScope::CrossBoard => theme.warning(scope.label()),
+            MatchScope::SameBoard => theme.dim(scope.label()),
+        };
+        format!(" {} {tag}", theme.dim("·"))
+    }
+
+    /// Counts matches by scope as `(same board, across boards)`, over exact
+    /// groups and visual candidates together.
+    pub fn scope_counts(&self) -> (usize, usize) {
+        let scopes = self.exact_groups.iter().map(|group| group.scope).chain(
+            self.visual_candidates
+                .iter()
+                .map(|candidate| candidate.scope),
+        );
+
+        let mut same = 0;
+        let mut cross = 0;
+        for scope in scopes {
+            match scope {
+                MatchScope::SameBoard => same += 1,
+                MatchScope::CrossBoard => cross += 1,
+            }
+        }
+        (same, cross)
+    }
+
+    fn cross_board_matches(&self) -> usize {
+        self.scope_counts().1
+    }
+
     pub fn render_text(&self) -> String {
         self.render_text_with_color(false)
     }
@@ -91,7 +223,7 @@ impl Report {
             output,
             "{}  {}",
             theme.heading("UNPIN"),
-            theme.strong(&summary.board_name)
+            theme.strong(self.title())
         );
         let _ = writeln!(output, "{}", theme.dim("Pinterest duplicate review"));
         let _ = writeln!(output);
@@ -107,13 +239,35 @@ impl Report {
             theme.success(summary.analyzed),
             theme.warning(summary.skipped)
         );
+        let cross_board = self.cross_board_matches();
         let _ = writeln!(
             output,
-            "{}  {} exact group(s)  {} visual candidate(s)",
+            "{}  {} exact group(s)  {} visual candidate(s){}",
             theme.label("MATCHES"),
             theme.strong(summary.exact_groups),
-            theme.accent(summary.visual_candidates)
+            theme.accent(summary.visual_candidates),
+            if self.shows_board_labels() && cross_board > 0 {
+                format!(
+                    "  {} {}",
+                    theme.dim("·"),
+                    theme.warning(format!("{cross_board} across boards"))
+                )
+            } else {
+                String::new()
+            }
         );
+
+        if self.shows_board_labels() {
+            let _ = writeln!(output, "\n{}", theme.label("BOARDS"));
+            for board in &summary.boards {
+                let _ = writeln!(
+                    output,
+                    "  {:>5}  {}",
+                    theme.strong(board.pins_found),
+                    board.name
+                );
+            }
+        }
 
         if self.exact_groups.is_empty() && self.visual_candidates.is_empty() {
             let _ = writeln!(output, "\n{}", theme.dim("No duplicate image pins found."));
@@ -122,24 +276,31 @@ impl Report {
         for (index, group) in self.exact_groups.iter().enumerate() {
             let _ = writeln!(
                 output,
-                "\n{}  {}",
+                "\n{}  {}{}",
                 theme.section(format!("EXACT {:02}", index + 1)),
-                theme.dim("byte-identical files")
+                theme.dim("byte-identical files"),
+                self.scope_suffix(group.scope, &theme)
             );
-            render_items(&mut output, &group.items, &theme);
+            render_items(&mut output, &group.items, &theme, self.shows_board_labels());
         }
 
         for (index, candidate) in self.visual_candidates.iter().enumerate() {
             let _ = writeln!(
                 output,
-                "\n{}  {}",
+                "\n{}  {}{}",
                 theme.section(format!("VISUAL {:02}", index + 1)),
                 theme.dim(format!(
                     "{}% similarity  •  hash distance {}/64",
                     candidate.similarity_percent, candidate.hash_distance
-                ))
+                )),
+                self.scope_suffix(candidate.scope, &theme)
             );
-            render_items(&mut output, &candidate.items, &theme);
+            render_items(
+                &mut output,
+                &candidate.items,
+                &theme,
+                self.shows_board_labels(),
+            );
         }
 
         if !self.skipped.is_empty() {
@@ -209,7 +370,7 @@ impl Report {
     }
 }
 
-fn render_items(output: &mut String, items: &[ReportItem], theme: &TextTheme) {
+fn render_items(output: &mut String, items: &[ReportItem], theme: &TextTheme, show_boards: bool) {
     for item in items {
         let status = format!("{:<8}", item.recommendation.label());
         let status = match item.recommendation {
@@ -217,13 +378,18 @@ fn render_items(output: &mut String, items: &[ReportItem], theme: &TextTheme) {
             Recommendation::Tie => theme.warning(status),
             Recommendation::DeleteCandidate => theme.danger(status),
         };
+        let board = match (show_boards, &item.board) {
+            (true, Some(board)) => format!("  {}", theme.dim(format!("[{board}]"))),
+            _ => String::new(),
+        };
         let _ = writeln!(
             output,
-            "  {}  {:>5} × {:<5}  {:>10}",
+            "  {}  {:>5} × {:<5}  {:>10}{}",
             status,
             item.width,
             item.height,
-            human_bytes(item.byte_size)
+            human_bytes(item.byte_size),
+            board
         );
         let _ = writeln!(output, "            {}", theme.link(&item.pin_url));
     }
@@ -308,11 +474,34 @@ pub(crate) fn rank_tuple(width: u32, height: u32, bytes: u64) -> (u64, u32, u64)
 mod tests {
     use super::*;
 
+    fn scanned(name: &str, pins_found: usize) -> ScannedBoard {
+        ScannedBoard {
+            name: name.into(),
+            url: format!("https://www.pinterest.com/alice/{name}/"),
+            pins_reported: Some(pins_found),
+            pins_found,
+        }
+    }
+
+    fn item(pin_id: &str, board: &str, width: u32) -> ReportItem {
+        ReportItem {
+            pin_id: pin_id.into(),
+            pin_url: format!("https://www.pinterest.com/pin/{pin_id}/"),
+            board: Some(board.into()),
+            image_url: format!("https://i.pinimg.com/originals/{pin_id}.jpg"),
+            width,
+            height: width,
+            byte_size: u64::from(width) * 10,
+            recommendation: Recommendation::Keep,
+        }
+    }
+
     #[test]
     fn text_report_contains_links_and_recommendations() {
         let report = Report {
             summary: Summary {
-                board_name: "Ideas".into(),
+                username: None,
+                boards: vec![scanned("Ideas", 2)],
                 pins_reported: Some(2),
                 pins_found: 2,
                 analyzed: 2,
@@ -321,9 +510,11 @@ mod tests {
                 visual_candidates: 0,
             },
             exact_groups: vec![DuplicateGroup {
+                scope: MatchScope::SameBoard,
                 items: vec![ReportItem {
                     pin_id: "123".into(),
                     pin_url: "https://www.pinterest.com/pin/123/".into(),
+                    board: Some("Ideas".into()),
                     image_url: "https://i.pinimg.com/originals/example.jpg".into(),
                     width: 1200,
                     height: 800,
@@ -354,7 +545,8 @@ mod tests {
     fn json_report_has_required_top_level_keys() {
         let report = Report {
             summary: Summary {
-                board_name: "Empty".into(),
+                username: None,
+                boards: vec![scanned("Empty", 0)],
                 pins_reported: None,
                 pins_found: 0,
                 analyzed: 0,
@@ -382,17 +574,209 @@ mod tests {
     }
 
     #[test]
+    fn scope_follows_the_boards_the_items_came_from() {
+        let interiors = item("1", "Interiors", 1200);
+        let mood = item("2", "Mood board", 600);
+
+        assert_eq!(
+            MatchScope::of(&[interiors.clone(), interiors.clone()]),
+            MatchScope::SameBoard
+        );
+        assert_eq!(
+            MatchScope::of(&[interiors.clone(), mood]),
+            MatchScope::CrossBoard
+        );
+        assert_eq!(
+            MatchScope::of(std::slice::from_ref(&interiors)),
+            MatchScope::SameBoard
+        );
+        assert_eq!(MatchScope::of(&[]), MatchScope::SameBoard);
+
+        // A single-board scan leaves every board unset, which is not "cross".
+        let mut unlabeled = interiors;
+        unlabeled.board = None;
+        assert_eq!(
+            MatchScope::of(&[unlabeled.clone(), unlabeled]),
+            MatchScope::SameBoard
+        );
+    }
+
+    #[test]
+    fn scope_tags_appear_only_for_multi_board_scans() {
+        let mut report = Report {
+            summary: Summary {
+                username: Some("alice".into()),
+                boards: vec![scanned("Interiors", 3), scanned("Mood board", 1)],
+                pins_reported: Some(4),
+                pins_found: 4,
+                analyzed: 4,
+                skipped: 0,
+                exact_groups: 2,
+                visual_candidates: 0,
+            },
+            exact_groups: vec![
+                DuplicateGroup {
+                    scope: MatchScope::CrossBoard,
+                    items: vec![item("1", "Interiors", 1200), item("2", "Mood board", 600)],
+                },
+                DuplicateGroup {
+                    scope: MatchScope::SameBoard,
+                    items: vec![item("3", "Interiors", 800), item("4", "Interiors", 800)],
+                },
+            ],
+            visual_candidates: vec![],
+            skipped: vec![],
+            warnings: vec![],
+            visual_report: None,
+        };
+
+        let multi = report.render_text();
+        assert!(multi.contains("byte-identical files · ACROSS BOARDS"));
+        assert!(multi.contains("byte-identical files · SAME BOARD"));
+        // The summary counts only the cross-board matches.
+        assert!(multi.contains("1 across boards"));
+
+        // With one board the distinction cannot arise, so it is not mentioned.
+        report.summary.boards.truncate(1);
+        let single = report.render_text();
+        assert!(!single.contains("ACROSS BOARDS"));
+        assert!(!single.contains("SAME BOARD"));
+        assert!(!single.contains("across boards"));
+
+        // Color reinforces the tag but is never the only carrier of meaning.
+        report.summary.boards.push(scanned("Mood board", 1));
+        assert!(
+            report
+                .render_text_with_color(true)
+                .contains("ACROSS BOARDS")
+        );
+    }
+
+    #[test]
+    fn scope_counts_span_groups_and_candidates() {
+        let mut report = Report {
+            summary: Summary {
+                username: Some("alice".into()),
+                boards: vec![scanned("Interiors", 2), scanned("Mood board", 2)],
+                pins_reported: Some(4),
+                pins_found: 4,
+                analyzed: 4,
+                skipped: 0,
+                exact_groups: 2,
+                visual_candidates: 1,
+            },
+            exact_groups: vec![
+                DuplicateGroup {
+                    scope: MatchScope::CrossBoard,
+                    items: vec![item("1", "Interiors", 1200)],
+                },
+                DuplicateGroup {
+                    scope: MatchScope::SameBoard,
+                    items: vec![item("2", "Interiors", 800)],
+                },
+            ],
+            visual_candidates: vec![VisualCandidate {
+                hash_distance: 1,
+                similarity_percent: 98,
+                scope: MatchScope::SameBoard,
+                items: [item("3", "Interiors", 700), item("4", "Interiors", 600)],
+            }],
+            skipped: vec![],
+            warnings: vec![],
+            visual_report: None,
+        };
+
+        // Two same-board (one group, one candidate) and one cross-board group.
+        assert_eq!(report.scope_counts(), (2, 1));
+        // The summary line and the HTML tabs must never disagree.
+        assert_eq!(report.cross_board_matches(), report.scope_counts().1);
+
+        report.exact_groups.clear();
+        report.visual_candidates.clear();
+        assert_eq!(report.scope_counts(), (0, 0));
+    }
+
+    #[test]
+    fn json_reports_the_match_scope() {
+        let report = Report {
+            summary: Summary {
+                username: Some("alice".into()),
+                boards: vec![scanned("Interiors", 1), scanned("Mood board", 1)],
+                pins_reported: Some(2),
+                pins_found: 2,
+                analyzed: 2,
+                skipped: 0,
+                exact_groups: 1,
+                visual_candidates: 0,
+            },
+            exact_groups: vec![DuplicateGroup {
+                scope: MatchScope::CrossBoard,
+                items: vec![item("1", "Interiors", 1200), item("2", "Mood board", 600)],
+            }],
+            visual_candidates: vec![],
+            skipped: vec![],
+            warnings: vec![],
+            visual_report: None,
+        };
+
+        let value: serde_json::Value =
+            serde_json::from_str(&report.render_json().unwrap()).unwrap();
+        assert_eq!(value["exact_groups"][0]["scope"], "cross_board");
+    }
+
+    #[test]
+    fn board_labels_appear_only_for_multi_board_scans() {
+        let mut report = Report {
+            summary: Summary {
+                username: Some("alice".into()),
+                boards: vec![scanned("Interiors", 1), scanned("Mood board", 1)],
+                pins_reported: Some(2),
+                pins_found: 2,
+                analyzed: 2,
+                skipped: 0,
+                exact_groups: 1,
+                visual_candidates: 0,
+            },
+            exact_groups: vec![DuplicateGroup {
+                scope: MatchScope::SameBoard,
+                items: vec![item("1", "Interiors", 1200), item("2", "Mood board", 600)],
+            }],
+            visual_candidates: vec![],
+            skipped: vec![],
+            warnings: vec![],
+            visual_report: None,
+        };
+
+        let multi = report.render_text();
+        assert_eq!(report.title(), "alice — 2 boards");
+        assert!(multi.contains("alice — 2 boards"));
+        assert!(multi.contains("[Interiors]"));
+        assert!(multi.contains("[Mood board]"));
+        assert!(multi.contains("BOARDS"));
+
+        // The same items scanned from one board carry no label at all.
+        report.summary.boards.truncate(1);
+        report.summary.username = None;
+        let single = report.render_text();
+        assert_eq!(report.title(), "Interiors");
+        assert!(!single.contains("[Interiors]"));
+        assert!(!single.contains("BOARDS"));
+    }
+
+    #[test]
     fn text_report_groups_large_skipped_sets() {
         let skipped = (0..13)
             .map(|index| SkippedPin {
                 pin_id: Some(index.to_string()),
                 pin_url: Some(format!("https://www.pinterest.com/pin/{index}/")),
                 reason: "video pin".into(),
+                board: Some("Videos".into()),
             })
             .collect();
         let report = Report {
             summary: Summary {
-                board_name: "Videos".into(),
+                username: None,
+                boards: vec![scanned("Videos", 13)],
                 pins_reported: Some(13),
                 pins_found: 13,
                 analyzed: 0,

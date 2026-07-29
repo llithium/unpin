@@ -8,6 +8,9 @@ use unpin::progress::{ProgressEvent, ProgressSink, TerminalProgress};
 #[tokio::main]
 async fn main() -> ExitCode {
     let cli = Cli::parse();
+    // Installed before the bar hides the cursor, so a Ctrl-C in between cannot
+    // exit with the cursor still hidden.
+    unpin::progress::restore_cursor_on_interrupt();
     let progress = TerminalProgress::new(!cli.no_progress && std::io::stderr().is_terminal());
     let mut report = match unpin::run_with_api_root_and_progress(&cli, None, &progress).await {
         Ok(report) => report,
