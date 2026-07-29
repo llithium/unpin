@@ -90,7 +90,11 @@ h1 { max-width: 1100px; margin: 0; font-family: "Avenir Next Condensed", "Arial 
 .image-stage { position: relative; display: block; min-width: 0; overflow: hidden; background: #d9e2e8; line-height: 0; }
 .image-stage::before { content: "IMAGE FIELD"; position: absolute; top: 7px; left: 9px; z-index: 1; padding: 2px 5px; color: #344655; background: rgb(249 251 252 / 88%); font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: .58rem; font-weight: 800; letter-spacing: .12em; }
 .image-stage::after { content: ""; position: absolute; inset: 7px; pointer-events: none; background: linear-gradient(var(--signal), var(--signal)) left top / 16px 2px no-repeat, linear-gradient(var(--signal), var(--signal)) left top / 2px 16px no-repeat, linear-gradient(var(--signal), var(--signal)) right bottom / 16px 2px no-repeat, linear-gradient(var(--signal), var(--signal)) right bottom / 2px 16px no-repeat; }
-.image-stage img { display: block; width: 100%; height: auto; }
+/* Bounded by both maxes with no explicit width or height, so a tall pin cannot
+   fill the viewport and the box keeps the image's own aspect ratio. Setting
+   width: 100% alongside max-height would make both axes definite and stretch
+   the image. */
+.image-stage img { display: block; max-width: 100%; max-height: min(60vh, 620px); margin: 0 auto; }
 .card-body { display: grid; gap: 13px; padding: 16px; }
 .card-top { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
 .badge { display: inline-flex; align-items: center; min-height: 27px; padding: 4px 9px; border-radius: 999px; font-size: .72rem; font-weight: 850; letter-spacing: .08em; }
@@ -460,8 +464,12 @@ mod tests {
         assert!(!html.contains("<script>alert"));
         assert!(html.contains("video &lt;unsupported&gt;"));
         assert!(html.contains("overflow: hidden"));
-        assert!(html.contains("width: 100%; height: auto"));
-        assert!(!html.contains("object-fit: contain"));
+        // Images are height-bounded via max-* only. An explicit width alongside
+        // max-height would make both axes definite and stretch the image, and
+        // object-fit would paper over that by letterboxing instead.
+        assert!(html.contains("max-height: min(60vh, 620px)"));
+        assert!(!html.contains("width: 100%; height: auto"));
+        assert!(!html.contains("object-fit"));
     }
 
     #[test]
