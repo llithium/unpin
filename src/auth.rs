@@ -24,6 +24,79 @@ pub enum AuthError {
         "no usable Pinterest cookies were found in {browser}; sign in to Pinterest there, then try again"
     )]
     NoCookies { browser: CookieBrowser },
+
+    #[error("could not read Pinterest cookies from {path}: {source}")]
+    CookieFileRead {
+        path: PathBuf,
+        source: std::io::Error,
+    },
+
+    #[error("no usable Pinterest cookies were found in {path}")]
+    NoCookiesInFile { path: PathBuf },
+
+    #[error("invalid Netscape cookie file {path} at line {line}: expected 7 tab-separated fields")]
+    InvalidCookieFile { path: PathBuf, line: usize },
+}
+
+/// Loads Pinterest cookies from the Netscape/Mozilla cookies.txt format.
+pub fn load_pinterest_cookies_file(path: &Path) -> Result<Vec<BrowserCookie>, AuthError> {
+    let content = std::fs::read_to_string(path).map_err(|source| AuthError::CookieFileRead {
+        path: path.to_owned(),
+        source,
+    })?;
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs();
+    let mut by_name: HashMap<String, (usize, BrowserCookie)> = HashMap::new();
+
+    for (index, raw_line) in content.lines().enumerate() {
+        let line = raw_line.strip_prefix("#HttpOnly_").unwrap_or(raw_line);
+        if line.trim().is_empty() || (line.starts_with('#') && line == raw_line) {
+            continue;
+        }
+        let fields = line.split('\t').collect::<Vec<_>>();
+        if fields.len() != 7 {
+            return Err(AuthError::InvalidCookieFile {
+                path: path.to_owned(),
+                line: index + 1,
+            });
+        }
+        let domain = fields[0];
+        let expires = fields[4].parse::<u64>().unwrap_or(0);
+        let name = fields[5];
+        let value = fields[6];
+        if !domain_matches_pinterest(domain)
+            || name.is_empty()
+            || value.is_empty()
+            || (expires != 0 && expires <= now)
+        {
+            continue;
+        }
+        let specificity = domain.trim_start_matches('.').len();
+        let candidate = BrowserCookie {
+            name: name.to_owned(),
+            value: value.to_owned(),
+        };
+        match by_name.get(name) {
+            Some((current_specificity, _)) if *current_specificity > specificity => {}
+            _ => {
+                by_name.insert(name.to_owned(), (specificity, candidate));
+            }
+        }
+    }
+
+    let mut cookies = by_name
+        .into_values()
+        .map(|(_, cookie)| cookie)
+        .collect::<Vec<_>>();
+    cookies.sort_by(|left, right| left.name.cmp(&right.name));
+    if cookies.is_empty() {
+        return Err(AuthError::NoCookiesInFile {
+            path: path.to_owned(),
+        });
+    }
+    Ok(cookies)
 }
 
 pub async fn load_pinterest_cookies(
@@ -214,5 +287,32 @@ mod tests {
         assert!(domain_matches_pinterest("www.pinterest.com"));
         assert!(!domain_matches_pinterest("notpinterest.com"));
         assert!(!domain_matches_pinterest("example.com"));
+    }
+
+    #[test]
+    fn loads_netscape_cookie_file_and_filters_other_domains() {
+        let file = tempfile::NamedTempFile::new().unwrap();
+        std::fs::write(
+            file.path(),
+            "# Netscape HTTP Cookie File\n\
+             .pinterest.com\tTRUE\t/\tFALSE\t0\t_pinterest_sess\tsecret\n\
+             example.com\tFALSE\t/\tFALSE\t0\tignored\tvalue\n\
+             #HttpOnly_www.pinterest.com\tFALSE\t/\tTRUE\t0\tcsrftoken\ttoken\n",
+        )
+        .unwrap();
+
+        assert_eq!(
+            load_pinterest_cookies_file(file.path()).unwrap(),
+            [
+                BrowserCookie {
+                    name: "_pinterest_sess".into(),
+                    value: "secret".into()
+                },
+                BrowserCookie {
+                    name: "csrftoken".into(),
+                    value: "token".into()
+                }
+            ]
+        );
     }
 }

@@ -9,7 +9,6 @@ pub mod visual;
 
 use std::collections::HashSet;
 use std::io::IsTerminal;
-
 use thiserror::Error;
 use url::Url;
 
@@ -32,12 +31,10 @@ pub enum AppError {
     #[error(transparent)]
     Select(#[from] select::SelectError),
 
-    #[error(
-        "selecting boards for a profile requires an interactive terminal; pass --boards <BOARD,...> or --all-boards"
-    )]
+    #[error("--interactive requires an interactive terminal")]
     BoardSelectionNotInteractive,
 
-    #[error("--boards and --all-boards only apply to a username or profile URL")]
+    #[error("--boards, --all-boards, and --interactive only apply to a username or profile URL")]
     BoardFlagsWithBoardUrl,
 
     /// Every selected board failed to fetch, so the per-board reasons are the
@@ -71,7 +68,9 @@ pub async fn run_with_api_root_and_progress(
     progress: &dyn ProgressSink,
 ) -> Result<Report, AppError> {
     let target = Target::parse(&cli.target)?;
-    let cookies = if let Some(browser) = cli.cookies_from_browser {
+    let cookies = if let Some(path) = &cli.cookies {
+        auth::load_pinterest_cookies_file(path)?
+    } else if let Some(browser) = cli.cookies_from_browser {
         progress.emit(ProgressEvent::LoadingBrowserCookies {
             browser: browser.to_string(),
         });
@@ -188,7 +187,7 @@ async fn resolve_boards(
     client: &PinterestClient,
     progress: &dyn ProgressSink,
 ) -> Result<(Option<String>, Vec<BoardRef>), AppError> {
-    let selecting = !cli.boards.is_empty() || cli.all_boards;
+    let selecting = !cli.boards.is_empty() || cli.all_boards || cli.interactive;
 
     let user = match target {
         Target::Board(board) => {
@@ -203,8 +202,7 @@ async fn resolve_boards(
 
     // Decide how boards will be chosen before fetching them, so a run that
     // cannot prompt fails immediately instead of after a network round trip.
-    let interactive = std::io::stdin().is_terminal() && std::io::stderr().is_terminal();
-    if !cli.all_boards && cli.boards.is_empty() && !interactive {
+    if cli.interactive && !(std::io::stdin().is_terminal() && std::io::stderr().is_terminal()) {
         return Err(AppError::BoardSelectionNotInteractive);
     }
 
@@ -216,15 +214,15 @@ async fn resolve_boards(
         .into());
     }
 
-    let selected = if cli.all_boards {
-        (0..boards.len()).collect()
-    } else if !cli.boards.is_empty() {
+    let selected = if !cli.boards.is_empty() {
         select::resolve_requested(&cli.boards, &boards)?
-    } else {
+    } else if cli.interactive {
         progress.emit(ProgressEvent::SelectionStarted);
         let chosen = select::choose_boards(&user.username, &boards);
         progress.emit(ProgressEvent::SelectionFinished);
         chosen?
+    } else {
+        (0..boards.len()).collect()
     };
 
     let boards = selected

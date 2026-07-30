@@ -341,7 +341,8 @@ async fn one_failing_board_does_not_discard_the_others() {
         .mount(&server)
         .await;
 
-    let cli = Cli::try_parse_from(["unpin", "alice", "--all-boards"]).unwrap();
+    // With no selection option, a profile scans all boards by default.
+    let cli = Cli::try_parse_from(["unpin", "alice"]).unwrap();
     let report = unpin::run_with_api_root(&cli, Some(Url::parse(&server.uri()).unwrap()))
         .await
         .unwrap();
@@ -641,8 +642,8 @@ async fn scans_selected_profile_boards_as_one_pooled_report() {
 }
 
 #[tokio::test]
-async fn profile_targets_refuse_to_guess_boards_without_a_terminal() {
-    let cli = Cli::try_parse_from(["unpin", "alice"]).unwrap();
+async fn interactive_selection_requires_a_terminal() {
+    let cli = Cli::try_parse_from(["unpin", "alice", "--interactive"]).unwrap();
 
     // The test harness has no terminal, so the picker cannot run.
     let error = unpin::run_with_api_root(&cli, Some(Url::parse("http://127.0.0.1:1/").unwrap()))
@@ -650,8 +651,7 @@ async fn profile_targets_refuse_to_guess_boards_without_a_terminal() {
         .unwrap_err();
 
     let message = error.to_string();
-    assert!(message.contains("--boards"), "{message}");
-    assert!(message.contains("--all-boards"), "{message}");
+    assert!(message.contains("--interactive"), "{message}");
 }
 
 #[tokio::test]

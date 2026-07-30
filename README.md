@@ -18,36 +18,35 @@ cargo install --path .
 
 ## Use
 
-Pass a board URL directly:
+Pass a board URL or `username/board` shorthand directly:
 
 ```console
 unpin https://www.pinterest.com/username/board-name/
+unpin username/board-name
 ```
 
-Pass a username or profile URL to work across a whole account. `unpin` lists the
-profile's boards and asks which ones to scan:
+Pass a username or profile URL to scan every board in the account:
 
 ```console
 unpin username
 unpin https://www.pinterest.com/username/
 ```
 
-Arrow keys move, space toggles, and enter confirms. The first row selects every
-board at once, and typing filters the list by name. The selected boards are
-analyzed **together**, so a photo saved to two different boards is reported as a
-duplicate—something a board-at-a-time scan cannot find. Every match then shows
-which board each pin came from.
+The boards are analyzed **together**, so a photo saved to two different boards
+is reported as a duplicate—something a board-at-a-time scan cannot find. Every
+match then shows which board each pin came from.
 
-Skip the prompt with either flag. `--boards` accepts board slugs or names,
-comma-separated or repeated:
+Use `--interactive` to open the board picker, or `--boards` to select board
+slugs or names (comma-separated or repeated):
 
 ```console
 unpin username --boards board-name,Another Board
-unpin username --all-boards
+unpin username --interactive
 ```
 
-One of those flags is required when `unpin` is not attached to an interactive
-terminal, such as in a script or CI. Rather than guess, it stops and says so.
+In the picker, arrow keys move, space toggles, enter confirms, and typing
+filters the list by name. The first row selects every board at once.
+`--all-boards` is still accepted for compatibility, but is no longer necessary.
 
 Pinterest may return only part of a large board to anonymous web requests. For
 a complete view, import the Pinterest session from the browser where you are
@@ -55,13 +54,16 @@ already signed in:
 
 ```console
 unpin https://www.pinterest.com/username/board-name/ --cookies-from-browser chrome
+unpin username/board-name --cookies cookies.txt
 ```
 
 Cookie import is opt-in. `unpin` reads only Pinterest-domain cookies, uses them
 in memory for the scan, and never prints or writes their values. The browser or
 operating system may ask for permission to access its cookie encryption key.
 Chrome, Chromium, Brave, Edge, Firefox, Arc, and Vivaldi are supported. The
-currently active Chrome profile is tried first.
+currently active Chrome profile is tried first. `--cookies` accepts the standard
+Netscape/Mozilla `cookies.txt` format produced by browser cookie exporters and
+curl.
 
 While running in an interactive terminal, `unpin` shows Pinterest acquisition
 status followed by a progress bar for image downloads and analysis. Progress is

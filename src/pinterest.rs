@@ -32,18 +32,30 @@ pub enum Target {
 }
 
 impl Target {
-    /// Accepts a board URL, a profile URL, or a bare `username` / `@username`.
+    /// Accepts a board URL, `username/board`, a profile URL, or a username.
     pub fn parse(input: &str) -> Result<Self, PinterestError> {
         let input = input.trim();
         if input.is_empty() {
             return Err(PinterestError::InvalidTarget("the target is empty".into()));
         }
 
-        // Anything URL-shaped is parsed as one; everything else is a username.
-        // A URL always carries a scheme or a path separator, so free text falls
-        // through to the clearer username error rather than a URL parse error.
-        if input.contains(['/', ':']) {
+        if input.contains(':') {
             return Self::parse_url(input);
+        }
+
+        if input.contains('/') {
+            let segments = input
+                .split('/')
+                .filter(|segment| !segment.is_empty())
+                .collect::<Vec<_>>();
+            if segments.len() == 2 && is_username(segments[0]) && !segments[1].trim().is_empty() {
+                return Ok(Self::Board(BoardTarget {
+                    root: Url::parse(DEFAULT_ROOT).expect("the default root is a valid URL"),
+                    username: segments[0].to_owned(),
+                    board_slug: segments[1].to_owned(),
+                }));
+            }
+            return Err(PinterestError::InvalidTarget(INVALID_TARGET_HELP.into()));
         }
 
         let username = input.strip_prefix('@').unwrap_or(input);
@@ -130,7 +142,7 @@ impl Target {
 
 const INVALID_TARGET_HELP: &str = "expected a board URL \
      (https://www.pinterest.com/USER/BOARD/), a profile URL \
-     (https://www.pinterest.com/USER/), or a username";
+     (https://www.pinterest.com/USER/), USER/BOARD, or a username";
 
 #[derive(Debug, Clone, Eq, PartialEq)]
 pub struct BoardTarget {
@@ -885,6 +897,14 @@ mod tests {
         assert_eq!(target.username, "alice");
         assert_eq!(target.board_slug, "home ideas");
         assert_eq!(target.root.as_str(), "https://uk.pinterest.com/");
+    }
+
+    #[test]
+    fn parses_username_board_shorthand() {
+        let target = board("alice/home-ideas");
+        assert_eq!(target.username, "alice");
+        assert_eq!(target.board_slug, "home-ideas");
+        assert_eq!(target.root.as_str(), DEFAULT_ROOT);
     }
 
     #[test]

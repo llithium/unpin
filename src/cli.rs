@@ -1,10 +1,11 @@
 use clap::{Parser, ValueEnum};
+use std::path::PathBuf;
 
 /// Find duplicate image pins in a Pinterest board or profile.
 #[derive(Debug, Clone, Parser)]
 #[command(name = "unpin", version, about)]
 pub struct Cli {
-    /// Board URL, profile URL, or username to inspect.
+    /// Board URL, USER/BOARD, profile URL, or username to inspect.
     #[arg(value_name = "TARGET")]
     pub target: String,
 
@@ -17,9 +18,13 @@ pub struct Cli {
     )]
     pub boards: Vec<String>,
 
-    /// Scan every board on a profile without prompting.
-    #[arg(long)]
+    /// Scan every board on a profile (the default; retained for compatibility).
+    #[arg(long, conflicts_with_all = ["boards", "interactive"])]
     pub all_boards: bool,
+
+    /// Prompt to choose boards from a profile.
+    #[arg(long, conflicts_with_all = ["boards", "all_boards"])]
+    pub interactive: bool,
 
     /// Report format.
     #[arg(long, value_enum, default_value_t = OutputFormat::Text)]
@@ -52,6 +57,10 @@ pub struct Cli {
     /// Import Pinterest cookies from a signed-in browser.
     #[arg(long, value_enum)]
     pub cookies_from_browser: Option<CookieBrowser>,
+
+    /// Read Pinterest cookies from a Netscape-format cookies.txt file.
+    #[arg(long, value_name = "FILE", conflicts_with = "cookies_from_browser")]
+    pub cookies: Option<PathBuf>,
 }
 
 #[derive(Debug, Clone, Copy, Default, Eq, PartialEq, ValueEnum)]
@@ -144,8 +153,10 @@ mod tests {
         assert!(!cli.no_progress);
         assert!(!cli.no_color);
         assert_eq!(cli.cookies_from_browser, None);
+        assert_eq!(cli.cookies, None);
         assert!(cli.boards.is_empty());
         assert!(!cli.all_boards);
+        assert!(!cli.interactive);
     }
 
     #[test]
@@ -161,6 +172,7 @@ mod tests {
         assert_eq!(cli.boards, ["a", "b"]);
 
         assert!(Cli::try_parse_from(["unpin", "alice", "--all-boards"]).is_ok());
+        assert!(Cli::try_parse_from(["unpin", "alice", "--interactive"]).is_ok());
     }
 
     #[test]
@@ -169,5 +181,24 @@ mod tests {
             Cli::try_parse_from(["unpin", "alice", "--all-boards", "--boards", "interiors"]);
 
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn parses_cookie_file_and_rejects_two_cookie_sources() {
+        let cli =
+            Cli::try_parse_from(["unpin", "alice/interiors", "--cookies", "cookies.txt"]).unwrap();
+        assert_eq!(cli.cookies, Some(PathBuf::from("cookies.txt")));
+
+        assert!(
+            Cli::try_parse_from([
+                "unpin",
+                "alice",
+                "--cookies",
+                "cookies.txt",
+                "--cookies-from-browser",
+                "chrome"
+            ])
+            .is_err()
+        );
     }
 }
