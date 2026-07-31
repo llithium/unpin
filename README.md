@@ -46,7 +46,7 @@ unpin username --interactive
 
 In the picker, arrow keys move, space toggles, enter confirms, and typing
 filters the list by name. The first row selects every board at once.
-`--all-boards` is still accepted for compatibility, but is no longer necessary.
+With no board-selection option, every board is scanned.
 
 Pinterest may return only part of a large board to anonymous web requests. For
 a complete view, import the Pinterest session from the browser where you are
@@ -107,8 +107,11 @@ unpin https://www.pinterest.com/username/board-name/ --no-color
 # Use a signed-in browser session when Pinterest truncates anonymous results
 unpin https://www.pinterest.com/username/board-name/ --cookies-from-browser chrome
 
-# Scan a whole profile without the picker
-unpin username --all-boards
+# Report only duplicates saved more than once within one board
+unpin username --same-board-only
+
+# Report only duplicates that span different boards
+unpin username --cross-board-only
 ```
 
 Run `unpin --help` for the complete interface.

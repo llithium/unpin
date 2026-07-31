@@ -41,7 +41,7 @@ pub enum AppError {
     #[error("--interactive requires an interactive terminal")]
     BoardSelectionNotInteractive,
 
-    #[error("--boards, --all-boards, and --interactive only apply to a username or profile URL")]
+    #[error("--boards and --interactive only apply to a username or profile URL")]
     BoardFlagsWithBoardUrl,
 
     /// Every selected board failed to fetch, so the per-board reasons are the
@@ -204,6 +204,22 @@ pub async fn run_with_api_root_and_progress(
         return Err(AppError::NoAnalyzablePins { reasons: warnings });
     }
 
+    if cli.same_board_only {
+        analysis
+            .exact_groups
+            .retain(|group| group.scope == crate::report::MatchScope::SameBoard);
+        analysis
+            .visual_candidates
+            .retain(|candidate| candidate.scope == crate::report::MatchScope::SameBoard);
+    } else if cli.cross_board_only {
+        analysis
+            .exact_groups
+            .retain(|group| group.scope == crate::report::MatchScope::CrossBoard);
+        analysis
+            .visual_candidates
+            .retain(|candidate| candidate.scope == crate::report::MatchScope::CrossBoard);
+    }
+
     let pins_reported = scanned_boards
         .iter()
         .map(|board| board.pins_reported)
@@ -236,7 +252,7 @@ async fn resolve_boards(
     client: &PinterestClient,
     progress: &dyn ProgressSink,
 ) -> Result<ResolvedSources, AppError> {
-    let selecting = !cli.boards.is_empty() || cli.all_boards || cli.interactive;
+    let selecting = !cli.boards.is_empty() || cli.interactive;
 
     let user = match target {
         Target::Board(board) => {

@@ -14,17 +14,21 @@ pub struct Cli {
         long,
         value_name = "BOARD",
         value_delimiter = ',',
-        conflicts_with = "all_boards"
+        conflicts_with = "interactive"
     )]
     pub boards: Vec<String>,
 
-    /// Scan every board on a profile (the default; retained for compatibility).
-    #[arg(long, conflicts_with_all = ["boards", "interactive"])]
-    pub all_boards: bool,
-
     /// Prompt to choose boards from a profile.
-    #[arg(long, conflicts_with_all = ["boards", "all_boards"])]
+    #[arg(long)]
     pub interactive: bool,
+
+    /// Report only duplicates whose pins are on the same board.
+    #[arg(long, conflicts_with = "cross_board_only")]
+    pub same_board_only: bool,
+
+    /// Report only duplicates whose pins span different boards.
+    #[arg(long, conflicts_with = "same_board_only")]
+    pub cross_board_only: bool,
 
     /// Report format.
     #[arg(long, value_enum, default_value_t = OutputFormat::Text)]
@@ -155,8 +159,9 @@ mod tests {
         assert_eq!(cli.cookies_from_browser, None);
         assert_eq!(cli.cookies, None);
         assert!(cli.boards.is_empty());
-        assert!(!cli.all_boards);
         assert!(!cli.interactive);
+        assert!(!cli.same_board_only);
+        assert!(!cli.cross_board_only);
     }
 
     #[test]
@@ -171,16 +176,32 @@ mod tests {
             Cli::try_parse_from(["unpin", "alice", "--boards", "a", "--boards", "b"]).unwrap();
         assert_eq!(cli.boards, ["a", "b"]);
 
-        assert!(Cli::try_parse_from(["unpin", "alice", "--all-boards"]).is_ok());
         assert!(Cli::try_parse_from(["unpin", "alice", "--interactive"]).is_ok());
     }
 
     #[test]
     fn rejects_board_selection_flags_together() {
         let result =
-            Cli::try_parse_from(["unpin", "alice", "--all-boards", "--boards", "interiors"]);
+            Cli::try_parse_from(["unpin", "alice", "--interactive", "--boards", "interiors"]);
 
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn parses_scope_filters_and_rejects_both_together() {
+        let same = Cli::try_parse_from(["unpin", "alice", "--same-board-only"]).unwrap();
+        assert!(same.same_board_only);
+        assert!(!same.cross_board_only);
+
+        let cross = Cli::try_parse_from(["unpin", "alice", "--cross-board-only"]).unwrap();
+        assert!(cross.cross_board_only);
+        assert!(!cross.same_board_only);
+
+        assert!(
+            Cli::try_parse_from(["unpin", "alice", "--same-board-only", "--cross-board-only"])
+                .is_err()
+        );
+        assert!(Cli::try_parse_from(["unpin", "alice", "--all-boards"]).is_err());
     }
 
     #[test]

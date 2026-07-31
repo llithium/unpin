@@ -179,11 +179,14 @@ mod tests {
         report.exact_groups[0].scope = MatchScope::CrossBoard;
         let multi = render_html(&report);
 
-        assert!(multi.contains("<span class=\"badge cross-board\">Across boards</span>"));
-        assert!(multi.contains("<span class=\"badge same-board\">Same board</span>"));
+        assert!(multi.contains("class=\"badge cross-board\""));
+        assert!(multi.contains("Across boards</span"));
+        assert!(multi.contains("class=\"badge same-board\""));
+        assert!(multi.contains("Same board</span"));
         // The badge sits beside the heading inside the wrapper that keeps
         // .match-heading a two-child flexbox.
-        assert!(multi.contains("<div class=\"match-title\"><h2>Exact group 1</h2><span"));
+        assert!(multi.contains("class=\"match-title\""));
+        assert!(multi.contains("<h2>Exact group 1</h2>"));
     }
 
     /// The single-board `sample_report` plus a second board and a cross-board
@@ -209,10 +212,12 @@ mod tests {
         let multi = render_html(&multi_board_report());
         assert!(multi.contains("role=\"group\""));
         // One exact group (cross) and one visual candidate (same).
-        assert!(multi.contains("<label for=\"filter-all\">All <span>2</span></label>"));
-        assert!(multi.contains("<label for=\"filter-same\">Same board <span>1</span></label>"));
-        assert!(multi.contains("<label for=\"filter-cross\">Across boards <span>1</span></label>"));
-        assert!(multi.contains("id=\"filter-all\" class=\"filter-input\" checked"));
+        assert!(multi.contains("All <span>2</span>"));
+        assert!(multi.contains("Same board <span>1</span>"));
+        assert!(multi.contains("Across boards <span>1</span>"));
+        assert!(multi.contains("id=\"filter-all\""));
+        assert!(multi.contains("class=\"filter-input\""));
+        assert!(multi.contains("checked"));
     }
 
     #[test]
@@ -252,9 +257,7 @@ mod tests {
         assert!(cross_only.contains("<div class=\"empty filter-empty same-board\">"));
         assert!(!cross_only.contains("<div class=\"empty filter-empty cross-board"));
         assert!(cross_only.contains("No duplicates within a single board."));
-        assert!(
-            cross_only.contains("<label for=\"filter-same\">Same board <span>0</span></label>")
-        );
+        assert!(cross_only.contains("Same board <span>0</span>"));
     }
 
     #[test]

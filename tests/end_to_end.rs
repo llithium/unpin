@@ -443,7 +443,7 @@ async fn total_failure_reports_the_reason_not_an_empty_board() {
         .mount(&server)
         .await;
 
-    let cli = Cli::try_parse_from(["unpin", "alice", "--all-boards"]).unwrap();
+    let cli = Cli::try_parse_from(["unpin", "alice"]).unwrap();
     let error = unpin::run_with_api_root(&cli, Some(Url::parse(&server.uri()).unwrap()))
         .await
         .unwrap_err();
@@ -518,7 +518,7 @@ async fn board_urls_in_the_report_are_encoded_and_http() {
     )
     .await;
 
-    let cli = Cli::try_parse_from(["unpin", "alice", "--all-boards"]).unwrap();
+    let cli = Cli::try_parse_from(["unpin", "alice"]).unwrap();
     let report = unpin::run_with_api_root(&cli, Some(Url::parse(&server.uri()).unwrap()))
         .await
         .unwrap();
@@ -704,6 +704,35 @@ async fn scans_selected_profile_boards_as_one_pooled_report() {
     assert!(html.contains("alice — 2 boards"));
     assert!(html.contains("class=\"board\">Interiors<"));
     assert!(html.contains("badge cross-board"));
+
+    let same_only = Cli::try_parse_from([
+        "unpin",
+        "alice",
+        "--boards",
+        "interiors,Mood board",
+        "--same-board-only",
+    ])
+    .unwrap();
+    let report = unpin::run_with_api_root(&same_only, Some(Url::parse(&server.uri()).unwrap()))
+        .await
+        .unwrap();
+    assert!(report.exact_groups.is_empty());
+    assert_eq!(report.summary.exact_groups, 0);
+
+    let cross_only = Cli::try_parse_from([
+        "unpin",
+        "alice",
+        "--boards",
+        "interiors,Mood board",
+        "--cross-board-only",
+    ])
+    .unwrap();
+    let report = unpin::run_with_api_root(&cross_only, Some(Url::parse(&server.uri()).unwrap()))
+        .await
+        .unwrap();
+    assert_eq!(report.exact_groups.len(), 1);
+    assert_eq!(report.summary.exact_groups, 1);
+    assert_eq!(report.exact_groups[0].scope, MatchScope::CrossBoard);
 }
 
 #[tokio::test]
@@ -724,7 +753,8 @@ async fn board_selection_flags_are_rejected_for_a_board_url() {
     let cli = Cli::try_parse_from([
         "unpin",
         "https://www.pinterest.com/alice/ideas/",
-        "--all-boards",
+        "--boards",
+        "ideas",
     ])
     .unwrap();
 
