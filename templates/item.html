@@ -1,0 +1,43 @@
+<article class="pin-card">
+    <a
+        class="image-stage"
+        href="{{ item.image_url }}"
+        target="_blank"
+        rel="noopener noreferrer"
+        ><img
+            src="{{ item.image_url }}"
+            alt="Pinterest pin {{ item.pin_id }}"
+            loading="lazy"
+            decoding="async"
+            referrerpolicy="no-referrer"
+    /></a>
+    <div class="card-body">
+        <div class="card-top">
+            <span class="badge {{ item.recommendation.css_class() }}"
+                >{{ item.recommendation.label() }}</span
+            ><span class="pin-id">Pin {{ item.pin_id }}</span>
+        </div>
+        {% if show_boards %}{% match item.board %}{% when Some with (board)
+        %}<span class="board">{{ board }}</span>{% when None %}{% endmatch %}{%
+        endif %}
+        <p class="dimensions">
+            {{ item.width }} × {{ item.height }}
+            <span>· {{ self.human_bytes(item.byte_size) }}</span>
+        </p>
+        <div class="actions">
+            <a
+                class="button primary"
+                href="{{ item.pin_url }}"
+                target="_blank"
+                rel="noopener noreferrer"
+                >Open pin</a
+            ><a
+                class="button"
+                href="{{ item.image_url }}"
+                target="_blank"
+                rel="noopener noreferrer"
+                >Open image</a
+            >
+        </div>
+    </div>
+</article>

@@ -5,6 +5,7 @@ edition = "2024"
 description = "Find duplicate image pins in a Pinterest board"
 
 [dependencies]
+askama = "0.14"
 clap = { version = "4.5", features = ["derive"] }
 console = "0.16"
 ctrlc = "3.5.2"
