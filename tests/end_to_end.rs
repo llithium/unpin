@@ -306,6 +306,70 @@ async fn mount_board_feed(server: &MockServer, board_id: &str, pin_id: &str, ima
 }
 
 #[tokio::test]
+async fn profile_scans_include_unorganized_pins() {
+    let server = MockServer::start().await;
+    let image = image_bytes(20, 20);
+    Mock::given(method("GET"))
+        .and(path("/profile-pin.png"))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .insert_header("content-type", "image/png")
+                .set_body_bytes(image),
+        )
+        .mount(&server)
+        .await;
+
+    mount_board_listing(&server, json!([])).await;
+    mount_resource(
+        &server,
+        "UserPins",
+        json!({
+            "username": "alice",
+            "field_set_key": "grid_item",
+            "page_size": 25,
+            "bookmarks": null
+        }),
+        page(
+            json!([
+                {
+                    "id": "board-pin",
+                    "board": {"layout": "default", "url": "/alice/ideas/"},
+                    "images": {"orig": {
+                        "url": format!("{}/profile-pin.png", server.uri()),
+                        "width": 20,
+                        "height": 20
+                    }}
+                },
+                {
+                    "id": "profile-pin",
+                    "board": {
+                        "layout": "quick_saves",
+                        "url": "/alice/_quick_saves/"
+                    },
+                    "images": {"orig": {
+                        "url": format!("{}/profile-pin.png", server.uri()),
+                        "width": 20,
+                        "height": 20
+                    }}
+                }
+            ]),
+            "-end-",
+        ),
+    )
+    .await;
+
+    let cli = Cli::try_parse_from(["unpin", "alice", "--exact-only"]).unwrap();
+    let report = unpin::run_with_api_root(&cli, Some(Url::parse(&server.uri()).unwrap()))
+        .await
+        .unwrap();
+
+    assert_eq!(report.summary.boards.len(), 1);
+    assert_eq!(report.summary.boards[0].name, "Unorganized ideas");
+    assert_eq!(report.summary.pins_found, 1);
+    assert_eq!(report.summary.analyzed, 1);
+}
+
+#[tokio::test]
 async fn one_failing_board_does_not_discard_the_others() {
     let server = MockServer::start().await;
     Mock::given(method("GET"))
@@ -389,16 +453,17 @@ async fn total_failure_reports_the_reason_not_an_empty_board() {
     // unactionable: nothing was fetched at all.
     assert!(message.contains("no board could be scanned"), "{message}");
     assert!(!message.contains("no analyzable"), "{message}");
-    // Every board's reason is carried through as an indented list, so the cause
-    // is visible instead of being dropped with the report that never got built.
-    for board in ["Interiors", "Mood board"] {
+    // Every scanned source's reason is carried through as an indented list, so
+    // the cause is visible instead of being dropped with the report that never
+    // got built.
+    for board in ["Interiors", "Mood board", "Unorganized ideas"] {
         assert!(
             message.contains(&format!("\n  {board}: skipped,")),
             "{message} missing an indented reason for {board}"
         );
     }
     assert!(message.contains("403"), "{message}");
-    assert_eq!(message.lines().count(), 3, "{message}");
+    assert_eq!(message.lines().count(), 4, "{message}");
 }
 
 #[tokio::test]

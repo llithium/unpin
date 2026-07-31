@@ -38,7 +38,7 @@ pub fn choose_boards(username: &str, boards: &[BoardRef]) -> Result<Vec<usize>, 
 
     // `raw_prompt` keeps each choice's original row index, which is what maps
     // back onto `boards` once the leading "all boards" row is accounted for.
-    let rows = MultiSelect::new(&format!("Select boards to scan for {username}:"), labels)
+    let rows = MultiSelect::new(&format!("Select pins to scan for {username}:"), labels)
         .with_help_message(
             "↑↓ move · space toggles · → all · ← none · type to filter · enter confirms",
         )
@@ -86,7 +86,7 @@ fn picker_labels(boards: &[BoardRef], terminal_width: usize) -> Vec<String> {
         .try_fold(0_usize, |total, reported| Some(total + reported?));
 
     let mut rows = Vec::with_capacity(boards.len() + 1);
-    rows.push((format!("All {} boards", boards.len()), pin_count(total)));
+    rows.push(("All pins".to_owned(), pin_count(total)));
     rows.extend(boards.iter().map(|board| {
         let secret = if board.is_secret { "  (secret)" } else { "" };
         (
@@ -313,7 +313,7 @@ mod tests {
     fn all_boards_row_totals_the_pin_counts() {
         let mut boards = boards();
         let labels = picker_labels(&boards, 80);
-        assert!(labels[0].contains("All 2 boards"));
+        assert!(labels[0].contains("All pins"));
         assert!(labels[0].contains("20 pins"));
 
         // An unknown count anywhere makes the total unknown rather than wrong.
@@ -354,7 +354,7 @@ mod tests {
     fn names_are_padded_only_as_far_as_the_longest_needs() {
         // With room to spare, padding tracks the longest name, not a constant.
         let labels = picker_labels(&boards(), 200);
-        let widest = ["All 2 boards", "Interiors", "Mood board"]
+        let widest = ["All pins", "Interiors", "Mood board"]
             .iter()
             .map(|name| name.chars().count())
             .max()

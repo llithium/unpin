@@ -493,6 +493,40 @@ impl PinterestClient {
         Ok(boards)
     }
 
+    /// Fetches pins saved directly to a profile rather than into a board.
+    ///
+    /// Pinterest presents these as "Unorganized ideas" in the Saved Ideas
+    /// view. They are not board records, so they never appear in `Boards`.
+    pub async fn fetch_user_pins(
+        &self,
+        target: &UserTarget,
+        seen_pin_ids: &mut HashSet<String>,
+        progress: &dyn ProgressSink,
+    ) -> Result<BoardPins, PinterestError> {
+        let raw_pins = self
+            .paginate(
+                "UserPins",
+                json!({
+                    "username": target.username,
+                    "field_set_key": "grid_item",
+                    "page_size": BOARD_PAGE_SIZE,
+                    "bookmarks": null
+                }),
+                progress,
+            )
+            .await?;
+
+        // UserPins is the account-wide saved-pin feed. Pinterest identifies
+        // pins shown under "Unorganized ideas" by assigning them to its hidden
+        // Quick Saves board, so discard ordinary board pins here.
+        let raw_pins = raw_pins
+            .into_iter()
+            .filter(is_unorganized_pin)
+            .collect::<Vec<_>>();
+        let pins_reported = Some(raw_pins.len());
+        self.parse_pins(raw_pins, "Unorganized ideas", pins_reported, seen_pin_ids)
+    }
+
     /// Fetches every pin in a board, including its sections.
     ///
     /// `seen_pin_ids` is shared across boards so a pin repeated in a board's
@@ -548,9 +582,23 @@ impl PinterestClient {
             }
         }
 
+        let mut parsed =
+            self.parse_pins(raw_pins, &board.name, board.pins_reported, seen_pin_ids)?;
+        parsed.warnings.splice(0..0, warnings);
+        Ok(parsed)
+    }
+
+    fn parse_pins(
+        &self,
+        raw_pins: Vec<Value>,
+        source_name: &str,
+        pins_reported: Option<usize>,
+        seen_pin_ids: &mut HashSet<String>,
+    ) -> Result<BoardPins, PinterestError> {
         let mut pins = Vec::new();
         let mut skipped = Vec::new();
         let mut pins_found = 0;
+        let mut warnings = Vec::new();
 
         for raw_pin in raw_pins {
             let id = value_string(raw_pin.get("id"));
@@ -561,7 +609,7 @@ impl PinterestClient {
             }
             pins_found += 1;
 
-            match parse_pin(&raw_pin, &board.name) {
+            match parse_pin(&raw_pin, source_name) {
                 Ok(pin) => pins.push(pin),
                 Err(reason) => skipped.push(SkippedPin {
                     pin_url: id
@@ -569,12 +617,12 @@ impl PinterestClient {
                         .map(|id| format!("https://www.pinterest.com/pin/{id}/")),
                     pin_id: id,
                     reason,
-                    board: Some(board.name.clone()),
+                    board: Some(source_name.to_owned()),
                 }),
             }
         }
 
-        if let Some(reported) = board.pins_reported
+        if let Some(reported) = pins_reported
             && pins_found < reported
         {
             if self.authenticated {
@@ -589,8 +637,8 @@ impl PinterestClient {
         }
 
         Ok(BoardPins {
-            board_name: board.name.clone(),
-            pins_reported: board.pins_reported,
+            board_name: source_name.to_owned(),
+            pins_reported,
             pins_found,
             pins,
             skipped,
@@ -802,6 +850,14 @@ fn response_bookmark(response: &Value) -> Option<String> {
         Value::Array(bookmarks) => bookmarks.first()?.as_str().map(str::to_owned),
         _ => None,
     }
+}
+
+fn is_unorganized_pin(raw: &Value) -> bool {
+    raw.pointer("/board/layout").and_then(Value::as_str) == Some("quick_saves")
+        || raw
+            .pointer("/board/url")
+            .and_then(Value::as_str)
+            .is_some_and(|url| url.trim_end_matches('/').ends_with("/_quick_saves"))
 }
 
 fn parse_pin(raw: &Value, board_name: &str) -> Result<Pin, String> {

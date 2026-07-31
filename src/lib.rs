@@ -17,6 +17,13 @@ use crate::pinterest::{BoardRef, PinterestClient, PinterestError, Target};
 use crate::progress::{NoProgress, ProgressEvent, ProgressSink};
 use crate::report::{Report, ScannedBoard, Summary};
 
+struct ResolvedSources {
+    user: Option<crate::pinterest::UserTarget>,
+    boards: Vec<BoardRef>,
+    include_unorganized: bool,
+    prefetched_unorganized: Option<Result<crate::pinterest::BoardPins, PinterestError>>,
+}
+
 #[derive(Debug, Error)]
 pub enum AppError {
     #[error(transparent)]
@@ -84,7 +91,10 @@ pub async fn run_with_api_root_and_progress(
         None => PinterestClient::with_cookies(root, cookies)?,
     };
 
-    let (username, boards) = resolve_boards(cli, &target, &client, progress).await?;
+    let resolved = resolve_boards(cli, &target, &client, progress).await?;
+    let user = resolved.user;
+    let boards = resolved.boards;
+    let username = user.as_ref().map(|user| user.username.clone());
 
     // Pins from every selected board are pooled into one analysis so that
     // duplicates spanning two boards are found as well.
@@ -93,7 +103,10 @@ pub async fn run_with_api_root_and_progress(
     let mut pins = Vec::new();
     let mut skipped = Vec::new();
     let mut warnings = Vec::new();
-    let multiple = boards.len() > 1;
+    // A profile feed is another independent source, even when the user has
+    // only one visible board. Do not let one board failure prevent its
+    // unorganized pins from being scanned.
+    let multiple = boards.len() > 1 || user.is_some();
 
     for (index, board) in boards.iter().enumerate() {
         progress.emit(ProgressEvent::BoardStarted {
@@ -131,6 +144,42 @@ pub async fn run_with_api_root_and_progress(
                 warning
             }
         }));
+    }
+
+    // Pins saved straight to a profile are displayed by Pinterest as
+    // "Unorganized ideas", not as a board. Include them in every profile scan
+    // so they participate in the same duplicate analysis as board pins.
+    if let Some(user) = user
+        && resolved.include_unorganized
+    {
+        let fetched = match resolved.prefetched_unorganized {
+            Some(fetched) => fetched,
+            None => {
+                client
+                    .fetch_user_pins(&user, &mut seen_pin_ids, progress)
+                    .await
+            }
+        };
+        match fetched {
+            Ok(mut fetched) => {
+                scanned_boards.push(ScannedBoard {
+                    name: fetched.board_name.clone(),
+                    url: format!("https://www.pinterest.com/{}/", user.username),
+                    pins_reported: fetched.pins_reported,
+                    pins_found: fetched.pins_found,
+                });
+                pins.append(&mut fetched.pins);
+                skipped.append(&mut fetched.skipped);
+                warnings.extend(fetched.warnings);
+            }
+            // Board results remain useful if Pinterest denies just the profile
+            // feed (for example, for a private profile viewed anonymously).
+            // When every source fails, the common check below turns these
+            // source-specific reasons into one actionable error.
+            Err(error) => {
+                warnings.push(format!("Unorganized ideas: skipped, {error}"));
+            }
+        }
     }
 
     // Distinguish "nothing could be fetched" from "fetched, but nothing was
@@ -186,7 +235,7 @@ async fn resolve_boards(
     target: &Target,
     client: &PinterestClient,
     progress: &dyn ProgressSink,
-) -> Result<(Option<String>, Vec<BoardRef>), AppError> {
+) -> Result<ResolvedSources, AppError> {
     let selecting = !cli.boards.is_empty() || cli.all_boards || cli.interactive;
 
     let user = match target {
@@ -195,7 +244,12 @@ async fn resolve_boards(
                 return Err(AppError::BoardFlagsWithBoardUrl);
             }
             let board = client.resolve_board(board, progress).await?;
-            return Ok((None, vec![board]));
+            return Ok(ResolvedSources {
+                user: None,
+                boards: vec![board],
+                include_unorganized: false,
+                prefetched_unorganized: None,
+            });
         }
         Target::User(user) => user,
     };
@@ -207,20 +261,45 @@ async fn resolve_boards(
     }
 
     let boards = client.fetch_user_boards(user, progress).await?;
-    if boards.is_empty() {
+    if boards.is_empty() && !cli.boards.is_empty() {
         return Err(select::SelectError::NoBoards {
             username: user.username.clone(),
         }
         .into());
     }
 
+    let mut include_unorganized = cli.boards.is_empty();
+    let mut prefetched_unorganized = None;
     let selected = if !cli.boards.is_empty() {
+        include_unorganized = false;
         select::resolve_requested(&cli.boards, &boards)?
     } else if cli.interactive {
+        let fetched = client
+            .fetch_user_pins(user, &mut HashSet::new(), progress)
+            .await;
+        let unorganized_count = fetched.as_ref().ok().map(|pins| pins.pins_found);
+        let mut choices = boards.clone();
+        choices.push(BoardRef {
+            id: "__unorganized__".into(),
+            name: "Unorganized ideas".into(),
+            slug: "_quick_saves".into(),
+            url: format!("https://www.pinterest.com/{}/", user.username),
+            pins_reported: unorganized_count,
+            section_count: 0,
+            is_secret: false,
+        });
         progress.emit(ProgressEvent::SelectionStarted);
-        let chosen = select::choose_boards(&user.username, &boards);
+        let chosen = select::choose_boards(&user.username, &choices);
         progress.emit(ProgressEvent::SelectionFinished);
-        chosen?
+        let chosen = chosen?;
+        include_unorganized = chosen.contains(&boards.len());
+        if include_unorganized {
+            prefetched_unorganized = Some(fetched);
+        }
+        chosen
+            .into_iter()
+            .filter(|index| *index < boards.len())
+            .collect()
     } else {
         (0..boards.len()).collect()
     };
@@ -229,5 +308,10 @@ async fn resolve_boards(
         .into_iter()
         .map(|index| boards[index].clone())
         .collect();
-    Ok((Some(user.username.clone()), boards))
+    Ok(ResolvedSources {
+        user: Some(user.clone()),
+        boards,
+        include_unorganized,
+        prefetched_unorganized,
+    })
 }
