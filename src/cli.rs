@@ -58,6 +58,10 @@ pub struct Cli {
     #[arg(long)]
     pub no_color: bool,
 
+    /// Download and fingerprint every image instead of using the local cache.
+    #[arg(long)]
+    pub no_cache: bool,
+
     /// Import Pinterest cookies from a signed-in browser.
     #[arg(long, value_enum)]
     pub cookies_from_browser: Option<CookieBrowser>,
@@ -119,6 +123,7 @@ mod tests {
             "--no-open",
             "--no-progress",
             "--no-color",
+            "--no-cache",
             "--cookies-from-browser",
             "chrome",
         ])
@@ -132,6 +137,7 @@ mod tests {
         assert!(cli.no_open);
         assert!(cli.no_progress);
         assert!(cli.no_color);
+        assert!(cli.no_cache);
         assert_eq!(cli.cookies_from_browser, Some(CookieBrowser::Chrome));
     }
 
@@ -156,6 +162,7 @@ mod tests {
         assert!(!cli.no_open);
         assert!(!cli.no_progress);
         assert!(!cli.no_color);
+        assert!(!cli.no_cache);
         assert_eq!(cli.cookies_from_browser, None);
         assert_eq!(cli.cookies, None);
         assert!(cli.boards.is_empty());

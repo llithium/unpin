@@ -3367,6 +3367,7 @@ dependencies = [
  "tokio",
  "url",
  "wiremock",
+ "zune-core",
 ]
 
 [[package]]

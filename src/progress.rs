@@ -39,6 +39,11 @@ pub enum ProgressEvent {
         current: usize,
         total: usize,
     },
+    RequestRetry {
+        resource: &'static str,
+        attempt: usize,
+        delay: Duration,
+    },
     ImagesStarted {
         total: usize,
     },
@@ -194,6 +199,17 @@ impl ProgressSink for TerminalProgress {
             ProgressEvent::SectionStarted { current, total } => {
                 self.bar
                     .set_message(format!("Fetching board section {current}/{total}"));
+            }
+            ProgressEvent::RequestRetry {
+                resource,
+                attempt,
+                delay,
+            } => {
+                self.resume_spinner();
+                self.bar.set_message(format!(
+                    "Retrying Pinterest {resource} request (attempt {attempt}) in {:.1}s",
+                    delay.as_secs_f64()
+                ));
             }
             ProgressEvent::ImagesStarted { total } => {
                 self.bar.disable_steady_tick();

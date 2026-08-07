@@ -7,6 +7,7 @@ pub mod report;
 pub mod select;
 pub mod visual;
 
+use futures_util::stream::{self, StreamExt};
 use std::collections::HashSet;
 use std::io::IsTerminal;
 use thiserror::Error;
@@ -23,6 +24,8 @@ struct ResolvedSources {
     include_unorganized: bool,
     prefetched_unorganized: Option<Result<crate::pinterest::BoardPins, PinterestError>>,
 }
+
+const BOARD_FETCH_CONCURRENCY: usize = 3;
 
 #[derive(Debug, Error)]
 pub enum AppError {
@@ -86,6 +89,9 @@ pub async fn run_with_api_root_and_progress(
         Vec::new()
     };
     let root = target.root().clone();
+    // A custom API root is the deterministic test/integration path; never let
+    // those synthetic media URLs leak into the user's normal cache.
+    let use_default_cache = api_root.is_none() && !cli.no_cache;
     let client = match api_root {
         Some(api_root) => PinterestClient::with_api_root_and_cookies(root, api_root, cookies)?,
         None => PinterestClient::with_cookies(root, cookies)?,
@@ -108,15 +114,28 @@ pub async fn run_with_api_root_and_progress(
     // unorganized pins from being scanned.
     let multiple = boards.len() > 1 || user.is_some();
 
-    for (index, board) in boards.iter().enumerate() {
-        progress.emit(ProgressEvent::BoardStarted {
-            name: board.name.clone(),
-            current: index + 1,
-            total: boards.len(),
-        });
-        let fetched = client
-            .fetch_board_pins(board, &mut seen_pin_ids, progress)
-            .await;
+    let board_total = boards.len();
+    let board_fetches = stream::iter(boards.into_iter().enumerate().map(|(index, board)| {
+        let client = client.clone();
+        async move {
+            progress.emit(ProgressEvent::BoardStarted {
+                name: board.name.clone(),
+                current: index + 1,
+                total: board_total,
+            });
+            let mut board_pin_ids = HashSet::new();
+            let fetched = client
+                .fetch_board_pins(&board, &mut board_pin_ids, progress)
+                .await;
+            (index, board, fetched)
+        }
+    }))
+    .buffer_unordered(BOARD_FETCH_CONCURRENCY);
+    futures_util::pin_mut!(board_fetches);
+    let mut board_results = board_fetches.collect::<Vec<_>>().await;
+    board_results.sort_by_key(|(index, _, _)| *index);
+
+    for (_, board, fetched) in board_results {
         let mut fetched = match fetched {
             Ok(fetched) => fetched,
             // One unreachable board should not throw away every other board's
@@ -127,6 +146,7 @@ pub async fn run_with_api_root_and_progress(
             }
             Err(error) => return Err(error.into()),
         };
+        retain_unseen_board_items(&mut fetched, &mut seen_pin_ids, client.is_authenticated());
 
         scanned_boards.push(ScannedBoard {
             name: fetched.board_name.clone(),
@@ -192,11 +212,15 @@ pub async fn run_with_api_root_and_progress(
         return Err(AppError::NoAnalyzablePins { reasons: warnings });
     }
 
-    let mut analysis = analysis::analyze_pins_with_progress(
+    let cache_dir = use_default_cache
+        .then(analysis::default_fingerprint_cache_dir)
+        .flatten();
+    let mut analysis = analysis::analyze_pins_with_progress_and_cache(
         pins,
         cli.exact_only,
         cli.similarity_threshold,
         progress,
+        cache_dir,
     )
     .await?;
     skipped.append(&mut analysis.skipped);
@@ -243,6 +267,32 @@ pub async fn run_with_api_root_and_progress(
         warnings,
         visual_report: None,
     })
+}
+
+fn retain_unseen_board_items(
+    fetched: &mut crate::pinterest::BoardPins,
+    seen_pin_ids: &mut HashSet<String>,
+    authenticated: bool,
+) {
+    fetched
+        .pins
+        .retain(|pin| seen_pin_ids.insert(pin.id.clone()));
+    fetched.skipped.retain(|pin| {
+        pin.pin_id
+            .as_ref()
+            .is_none_or(|id| seen_pin_ids.insert(id.clone()))
+    });
+    fetched.pins_found = fetched.pins.len() + fetched.skipped.len();
+    fetched
+        .warnings
+        .retain(|warning| !warning.starts_with("Pinterest reports "));
+    if let Some(warning) = crate::pinterest::incomplete_scan_warning(
+        authenticated,
+        fetched.pins_reported,
+        fetched.pins_found,
+    ) {
+        fetched.warnings.push(warning);
+    }
 }
 
 /// Works out which boards to scan, prompting when a profile needs a choice.
@@ -330,4 +380,52 @@ async fn resolve_boards(
         include_unorganized,
         prefetched_unorganized,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::pinterest::{BoardPins, Pin, SkippedPin};
+
+    #[test]
+    fn concurrent_board_merge_deduplicates_in_original_order() {
+        let mut seen = HashSet::from(["already-seen".to_owned()]);
+        let mut fetched = BoardPins {
+            board_name: "Second board".into(),
+            pins_reported: Some(3),
+            pins_found: 3,
+            pins: vec![
+                Pin {
+                    id: "already-seen".into(),
+                    media_url: "https://example.com/duplicate.jpg".into(),
+                    metadata_width: None,
+                    metadata_height: None,
+                    board: Some("Second board".into()),
+                },
+                Pin {
+                    id: "new-pin".into(),
+                    media_url: "https://example.com/new.jpg".into(),
+                    metadata_width: None,
+                    metadata_height: None,
+                    board: Some("Second board".into()),
+                },
+            ],
+            skipped: vec![SkippedPin {
+                pin_id: Some("already-seen".into()),
+                pin_url: None,
+                reason: "unsupported".into(),
+                board: Some("Second board".into()),
+            }],
+            warnings: Vec::new(),
+        };
+
+        retain_unseen_board_items(&mut fetched, &mut seen, false);
+
+        assert_eq!(fetched.pins.len(), 1);
+        assert_eq!(fetched.pins[0].id, "new-pin");
+        assert!(fetched.skipped.is_empty());
+        assert_eq!(fetched.pins_found, 1);
+        assert_eq!(fetched.warnings.len(), 1);
+        assert!(fetched.warnings[0].contains("returned only 1 anonymously"));
+    }
 }

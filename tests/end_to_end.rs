@@ -1,5 +1,6 @@
 use std::io::Cursor;
-use std::sync::Mutex;
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::{Arc, Mutex};
 
 use clap::Parser;
 use image::{DynamicImage, ImageBuffer, ImageFormat, Rgb};
@@ -694,6 +695,27 @@ async fn scans_selected_profile_boards_as_one_pooled_report() {
         current: 2,
         total: 2,
     }));
+    let events = progress.events();
+    let second_board_started = events
+        .iter()
+        .position(|event| matches!(event, ProgressEvent::BoardStarted { current: 2, .. }))
+        .unwrap();
+    let first_board_page = events
+        .iter()
+        .position(|event| {
+            matches!(
+                event,
+                ProgressEvent::PageFetched {
+                    resource: "BoardFeed",
+                    ..
+                }
+            )
+        })
+        .unwrap();
+    assert!(
+        second_board_started < first_board_page,
+        "both board requests should be started before either response is merged"
+    );
 
     let text = report.render_text();
     assert!(text.contains("[Interiors]"));
@@ -764,6 +786,62 @@ async fn board_selection_flags_are_rejected_for_a_board_url() {
         .unwrap_err();
 
     assert!(error.to_string().contains("only apply to a username"));
+}
+
+#[tokio::test]
+async fn retries_throttled_pinterest_requests_using_retry_after() {
+    let server = MockServer::start().await;
+    let attempts = Arc::new(AtomicUsize::new(0));
+    let responder_attempts = attempts.clone();
+    Mock::given(method("GET"))
+        .and(path("/resource/BoardResource/get/"))
+        .respond_with(move |_request: &wiremock::Request| {
+            if responder_attempts.fetch_add(1, Ordering::SeqCst) == 0 {
+                ResponseTemplate::new(429).insert_header("retry-after", "0")
+            } else {
+                ResponseTemplate::new(200).set_body_json(json!({
+                    "resource_response": {"data": {
+                        "id": "board-1",
+                        "name": "Ideas",
+                        "pin_count": 0,
+                        "section_count": 0
+                    }}
+                }))
+            }
+        })
+        .expect(2)
+        .mount(&server)
+        .await;
+    mount_resource(
+        &server,
+        "BoardFeed",
+        json!({
+            "board_id": "board-1",
+            "field_set_key": "react_grid_pin",
+            "prepend": false,
+            "bookmarks": null
+        }),
+        page(json!([]), "-end-"),
+    )
+    .await;
+
+    let target = BoardTarget::parse("https://www.pinterest.com/alice/ideas/").unwrap();
+    let client =
+        PinterestClient::with_api_root(target.root.clone(), Url::parse(&server.uri()).unwrap())
+            .unwrap();
+    let progress = RecordingProgress::default();
+    let result = client
+        .fetch_board_with_progress(&target, &progress)
+        .await
+        .unwrap();
+
+    assert_eq!(attempts.load(Ordering::SeqCst), 2);
+    assert_eq!(result.board_name, "Ideas");
+    assert!(progress.events().contains(&ProgressEvent::RequestRetry {
+        resource: "Board",
+        attempt: 2,
+        delay: std::time::Duration::ZERO,
+    }));
 }
 
 #[tokio::test]

@@ -164,6 +164,7 @@
             }
 
             .progress-fill {
+                display: block;
                 width: 0;
                 height: 100%;
                 border-radius: inherit;
@@ -1436,14 +1437,6 @@
                         link.setAttribute("aria-current", selected ? "true" : "false");
                     });
                     updateControls();
-                    if (options.scroll) {
-                        active.scrollIntoView({
-                            behavior: window.matchMedia("(prefers-reduced-motion: reduce)").matches
-                                ? "auto"
-                                : "smooth",
-                            block: "start",
-                        });
-                    }
                     if (options.announce) {
                         announce(
                             `${active.querySelector("h1, h2")?.textContent || "Match"} selected`,
@@ -1481,6 +1474,14 @@
                     announce(reviewed ? "Marked reviewed" : "Review mark removed");
                 };
 
+                const advanceAfterReview = (group) => {
+                    const visible = visibleGroups();
+                    const index = visible.indexOf(group);
+                    if (index < 0 || index >= visible.length - 1) return;
+                    setOverview(false);
+                    setActive(visible[index + 1], { announce: true });
+                };
+
                 const applyFilter = () => {
                     const scope = filters.find((filter) => filter.checked)?.value || "all";
                     groups.forEach((group) => {
@@ -1507,7 +1508,6 @@
                     link.addEventListener("click", () => {
                         setOverview(false);
                         setActive(document.getElementById(link.dataset.target), {
-                            scroll: true,
                             announce: true,
                         });
                     });
@@ -1516,7 +1516,9 @@
                 groups.forEach((group) => {
                     group.querySelector("[data-review-button]")?.addEventListener("click", () => {
                         setActive(group);
-                        setReviewed(group, group.dataset.reviewed !== "true");
+                        const reviewed = group.dataset.reviewed !== "true";
+                        setReviewed(group, reviewed);
+                        if (reviewed) advanceAfterReview(group);
                     });
                 });
 
@@ -1545,7 +1547,10 @@
                     if (key === "j") move(1);
                     if (key === "k") move(-1);
                     if (key === "e" && active) {
-                        setReviewed(active, active.dataset.reviewed !== "true");
+                        const reviewedGroup = active;
+                        const reviewed = reviewedGroup.dataset.reviewed !== "true";
+                        setReviewed(reviewedGroup, reviewed);
+                        if (reviewed) advanceAfterReview(reviewedGroup);
                     }
                     if (key === "o") {
                         setOverview(!document.body.classList.contains("overview-mode"));

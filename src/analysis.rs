@@ -1,13 +1,18 @@
 use std::cmp::Reverse;
 use std::collections::{BTreeMap, HashMap};
-use std::io::Cursor;
-use std::time::Duration;
+use std::ffi::OsString;
+use std::fs;
+use std::io::{Cursor, Write};
+use std::path::{Path, PathBuf};
+use std::time::{Duration, SystemTime};
 
 use futures_util::stream::{self, StreamExt, TryStreamExt};
 use image::imageops::FilterType;
 use image::{DynamicImage, GenericImageView, ImageReader};
 use reqwest::Client;
+use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
+use tempfile::Builder;
 use thiserror::Error;
 
 use crate::pinterest::{Pin, SkippedPin};
@@ -20,6 +25,9 @@ const DOWNLOAD_CONCURRENCY: usize = 8;
 const MAX_IMAGE_BYTES: u64 = 100 * 1024 * 1024;
 const STRUCTURAL_SIGNATURE_SIZE: u32 = 64;
 const MIN_STRUCTURAL_SIMILARITY: f64 = 0.97;
+const CACHE_FORMAT_VERSION: u8 = 1;
+const CACHE_MAX_AGE: Duration = Duration::from_secs(30 * 24 * 60 * 60);
+const CACHE_ENTRY_SUBDIRECTORY: &str = "fingerprints-v1";
 
 #[derive(Debug)]
 pub struct AnalysisResult {
@@ -49,7 +57,7 @@ struct AnalyzedImage {
     structural_signature: Box<[u8]>,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Eq, PartialEq, Serialize, Deserialize)]
 struct ImageFingerprint {
     width: u32,
     height: u32,
@@ -57,6 +65,150 @@ struct ImageFingerprint {
     sha256: String,
     difference_hash: u64,
     structural_signature: Box<[u8]>,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+struct CachedFingerprint {
+    version: u8,
+    fingerprint: ImageFingerprint,
+}
+
+#[derive(Debug, Clone)]
+struct FingerprintCache {
+    directory: PathBuf,
+}
+
+impl FingerprintCache {
+    fn new(root_directory: PathBuf) -> Self {
+        // Keep cleanup inside a directory owned by unpin. In particular, an
+        // explicit UNPIN_CACHE_DIR may point at a cache root shared by several
+        // applications, whose hashed JSON files must never be pruned here.
+        let cache = Self {
+            directory: root_directory.join(CACHE_ENTRY_SUBDIRECTORY),
+        };
+        cache.prune_expired();
+        cache
+    }
+
+    fn entry_path(&self, media_url: &str) -> PathBuf {
+        let key = hex::encode(Sha256::digest(media_url.as_bytes()));
+        self.directory.join(format!("{key}.json"))
+    }
+
+    fn get(&self, media_url: &str) -> Option<ImageFingerprint> {
+        let path = self.entry_path(media_url);
+        let metadata = fs::metadata(&path).ok()?;
+        let modified = metadata.modified().ok()?;
+        if SystemTime::now()
+            .duration_since(modified)
+            .is_ok_and(|age| age > CACHE_MAX_AGE)
+        {
+            let _ = fs::remove_file(path);
+            return None;
+        }
+
+        let cached: CachedFingerprint = match fs::read(&path)
+            .ok()
+            .and_then(|bytes| serde_json::from_slice::<CachedFingerprint>(&bytes).ok())
+        {
+            Some(cached) if cached.version == CACHE_FORMAT_VERSION => cached,
+            _ => {
+                let _ = fs::remove_file(path);
+                return None;
+            }
+        };
+        Some(cached.fingerprint)
+    }
+
+    fn put(&self, media_url: &str, fingerprint: &ImageFingerprint) {
+        if fs::create_dir_all(&self.directory).is_err() {
+            return;
+        }
+        let Ok(mut temporary) = Builder::new()
+            .prefix(".fingerprint-")
+            .tempfile_in(&self.directory)
+        else {
+            return;
+        };
+        let cached = CachedFingerprint {
+            version: CACHE_FORMAT_VERSION,
+            fingerprint: fingerprint.clone(),
+        };
+        if serde_json::to_writer(temporary.as_file_mut(), &cached).is_err()
+            || temporary.as_file_mut().flush().is_err()
+        {
+            return;
+        }
+        let _ = temporary.persist(self.entry_path(media_url));
+    }
+
+    fn prune_expired(&self) {
+        let Ok(entries) = fs::read_dir(&self.directory) else {
+            return;
+        };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if !is_fingerprint_cache_entry(&path) {
+                continue;
+            }
+            let expired = entry
+                .metadata()
+                .ok()
+                .and_then(|metadata| metadata.modified().ok())
+                .and_then(|modified| SystemTime::now().duration_since(modified).ok())
+                .is_some_and(|age| age > CACHE_MAX_AGE);
+            if expired {
+                let _ = fs::remove_file(path);
+            }
+        }
+    }
+}
+
+fn is_fingerprint_cache_entry(path: &Path) -> bool {
+    path.file_name()
+        .and_then(|name| name.to_str())
+        .and_then(|name| name.strip_suffix(".json"))
+        .is_some_and(|stem| {
+            stem.len() == 64
+                && stem
+                    .bytes()
+                    .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+        })
+}
+
+fn absolute_environment_path(name: &str) -> Option<PathBuf> {
+    absolute_path(std::env::var_os(name))
+}
+
+fn absolute_path(value: Option<OsString>) -> Option<PathBuf> {
+    value
+        .filter(|value| !value.is_empty())
+        .map(PathBuf::from)
+        .filter(|path| path.is_absolute())
+}
+
+pub(crate) fn default_fingerprint_cache_dir() -> Option<PathBuf> {
+    if let Some(configured) = std::env::var_os("UNPIN_CACHE_DIR").filter(|path| !path.is_empty()) {
+        return Some(PathBuf::from(configured));
+    }
+
+    #[cfg(target_os = "macos")]
+    {
+        absolute_environment_path("HOME")
+            .map(|home| home.join("Library").join("Caches").join("unpin"))
+    }
+
+    #[cfg(target_os = "windows")]
+    {
+        absolute_environment_path("LOCALAPPDATA").map(|local| local.join("unpin").join("cache"))
+    }
+
+    #[cfg(not(any(target_os = "macos", target_os = "windows")))]
+    {
+        absolute_environment_path("XDG_CACHE_HOME")
+            .or_else(|| absolute_environment_path("HOME").map(|home| home.join(".cache")))
+            .map(|cache| cache.join("unpin"))
+    }
 }
 
 impl AnalyzedImage {
@@ -88,11 +240,23 @@ pub async fn analyze_pins_with_progress(
     similarity_threshold: u8,
     progress: &dyn ProgressSink,
 ) -> Result<AnalysisResult, AnalysisError> {
+    analyze_pins_with_progress_and_cache(pins, exact_only, similarity_threshold, progress, None)
+        .await
+}
+
+pub(crate) async fn analyze_pins_with_progress_and_cache(
+    pins: Vec<Pin>,
+    exact_only: bool,
+    similarity_threshold: u8,
+    progress: &dyn ProgressSink,
+    cache_directory: Option<PathBuf>,
+) -> Result<AnalysisResult, AnalysisError> {
     let http = Client::builder()
         .timeout(Duration::from_secs(30))
         .user_agent("unpin/0.1")
         .build()
         .map_err(AnalysisError::Client)?;
+    let cache = cache_directory.map(FingerprintCache::new);
 
     let mut pins_by_media_url: BTreeMap<String, Vec<Pin>> = BTreeMap::new();
     for pin in pins {
@@ -108,8 +272,21 @@ pub async fn analyze_pins_with_progress(
 
     let downloads = stream::iter(pins_by_media_url.into_iter().map(|(media_url, pins)| {
         let http = http.clone();
+        let cache = cache.clone();
         async move {
-            match download_and_fingerprint(&http, &media_url).await {
+            let fingerprint = match cache.as_ref().and_then(|cache| cache.get(&media_url)) {
+                Some(fingerprint) => Ok(fingerprint),
+                None => match download_and_fingerprint(&http, &media_url).await {
+                    Ok(fingerprint) => {
+                        if let Some(cache) = &cache {
+                            cache.put(&media_url, &fingerprint);
+                        }
+                        Ok(fingerprint)
+                    }
+                    Err(reason) => Err(reason),
+                },
+            };
+            match fingerprint {
                 Ok(fingerprint) => Ok(pins
                     .into_iter()
                     .map(|pin| AnalyzedImage {
@@ -501,6 +678,17 @@ impl BkTree {
 mod tests {
     use super::*;
 
+    fn fingerprint() -> ImageFingerprint {
+        ImageFingerprint {
+            width: 1200,
+            height: 800,
+            byte_size: 42_000,
+            sha256: "abc123".into(),
+            difference_hash: 0xfeed,
+            structural_signature: vec![0, 64, 128, 255].into_boxed_slice(),
+        }
+    }
+
     fn analyzed(id: &str, width: u32, height: u32, bytes: u64, hash: u64) -> AnalyzedImage {
         AnalyzedImage {
             pin_id: id.into(),
@@ -526,6 +714,120 @@ mod tests {
         let mut matches = tree.query(0b0011, 2);
         matches.sort_unstable();
         assert_eq!(matches, vec![0, 1]);
+    }
+
+    #[test]
+    fn fingerprint_cache_round_trips_without_exposing_the_url() {
+        let directory = tempfile::tempdir().unwrap();
+        let cache = FingerprintCache::new(directory.path().to_path_buf());
+        let media_url = "https://i.pinimg.com/originals/private-looking-name.jpg?token=value";
+        let expected = fingerprint();
+
+        assert_eq!(cache.get(media_url), None);
+        cache.put(media_url, &expected);
+        assert_eq!(cache.get(media_url), Some(expected));
+
+        let entries = fs::read_dir(&cache.directory)
+            .unwrap()
+            .collect::<Result<Vec<_>, _>>()
+            .unwrap();
+        assert_eq!(entries.len(), 1);
+        let filename = entries[0].file_name().to_string_lossy().into_owned();
+        assert!(filename.ends_with(".json"));
+        assert!(!filename.contains("private-looking-name"));
+        assert!(!filename.contains("token"));
+    }
+
+    #[test]
+    fn fingerprint_cache_discards_corrupt_or_old_format_entries() {
+        let directory = tempfile::tempdir().unwrap();
+        let cache = FingerprintCache::new(directory.path().to_path_buf());
+        let media_url = "https://i.pinimg.com/originals/example.jpg";
+        let path = cache.entry_path(media_url);
+        fs::create_dir_all(&cache.directory).unwrap();
+
+        fs::write(&path, b"not json").unwrap();
+        assert_eq!(cache.get(media_url), None);
+        assert!(!path.exists());
+
+        let old = CachedFingerprint {
+            version: CACHE_FORMAT_VERSION.saturating_sub(1),
+            fingerprint: fingerprint(),
+        };
+        fs::write(&path, serde_json::to_vec(&old).unwrap()).unwrap();
+        assert_eq!(cache.get(media_url), None);
+        assert!(!path.exists());
+    }
+
+    #[test]
+    fn fingerprint_cache_prunes_expired_entries_but_leaves_other_files() {
+        let directory = tempfile::tempdir().unwrap();
+        let cache_directory = directory.path().join(CACHE_ENTRY_SUBDIRECTORY);
+        fs::create_dir_all(&cache_directory).unwrap();
+        let unpruned = FingerprintCache {
+            directory: cache_directory,
+        };
+        let expired = unpruned.entry_path("https://i.pinimg.com/expired.jpg");
+        let current = unpruned.entry_path("https://i.pinimg.com/current.jpg");
+        let unrelated = unpruned.directory.join("notes.json");
+        let shared_root_entry = directory.path().join(format!("{}.json", "a".repeat(64)));
+        fs::write(&expired, b"expired").unwrap();
+        fs::write(&current, b"current").unwrap();
+        fs::write(&unrelated, b"leave this alone").unwrap();
+        fs::write(&shared_root_entry, b"belongs to another application").unwrap();
+
+        let old_time = SystemTime::now() - CACHE_MAX_AGE - Duration::from_secs(1);
+        fs::File::options()
+            .write(true)
+            .open(&expired)
+            .unwrap()
+            .set_times(fs::FileTimes::new().set_modified(old_time))
+            .unwrap();
+
+        let _cache = FingerprintCache::new(directory.path().to_path_buf());
+        assert!(!expired.exists());
+        assert!(current.exists());
+        assert!(unrelated.exists());
+        assert!(shared_root_entry.exists());
+    }
+
+    #[test]
+    fn platform_cache_paths_must_be_nonempty_and_absolute() {
+        assert_eq!(absolute_path(None), None);
+        assert_eq!(absolute_path(Some(OsString::new())), None);
+        assert_eq!(absolute_path(Some("relative/cache".into())), None);
+        #[cfg(not(target_os = "windows"))]
+        assert_eq!(
+            absolute_path(Some("/tmp/unpin-cache".into())),
+            Some(PathBuf::from("/tmp/unpin-cache"))
+        );
+    }
+
+    #[tokio::test]
+    async fn analysis_uses_a_cached_fingerprint_without_downloading() {
+        let directory = tempfile::tempdir().unwrap();
+        let media_url = "http://127.0.0.1:9/should-not-be-requested.png";
+        FingerprintCache::new(directory.path().to_path_buf()).put(media_url, &fingerprint());
+        let pin = Pin {
+            id: "cached-pin".into(),
+            media_url: media_url.into(),
+            metadata_width: None,
+            metadata_height: None,
+            board: None,
+        };
+
+        let result = analyze_pins_with_progress_and_cache(
+            vec![pin],
+            false,
+            5,
+            &NoProgress,
+            Some(directory.path().to_path_buf()),
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(result.analyzed, 1);
+        assert!(result.skipped.is_empty());
     }
 
     #[test]

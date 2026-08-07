@@ -104,6 +104,9 @@ unpin https://www.pinterest.com/username/board-name/ --no-progress
 # Suppress ANSI colors in interactive text output
 unpin https://www.pinterest.com/username/board-name/ --no-color
 
+# Ignore cached image fingerprints and download every image again
+unpin https://www.pinterest.com/username/board-name/ --no-cache
+
 # Use a signed-in browser session when Pinterest truncates anonymous results
 unpin https://www.pinterest.com/username/board-name/ --cookies-from-browser chrome
 
@@ -120,6 +123,9 @@ Run `unpin --help` for the complete interface.
 
 - Pinterest board metadata is fetched page by page, including board sections.
   Pins repeated in the main feed and a section are counted once.
+- Up to three selected boards are fetched concurrently. Pagination within each
+  board remains sequential, and throttled or transient requests are retried up
+  to three times with bounded exponential backoff.
 - When several boards are selected, their pins are pooled into a single
   analysis, so duplicates spanning two boards are found. Each reported pin
   carries its board name, and pin counts are also broken down per board.
@@ -135,6 +141,11 @@ Run `unpin --help` for the complete interface.
   scan warning.
 - Ordinary, single-image pins are downloaded with an eight-request concurrency
   limit and a 100 MiB per-image safety limit.
+- Successful image fingerprints are cached for 30 days in the operating
+  system's user cache directory. The cache contains dimensions, file size, and
+  derived hashes—not raw images, Pinterest responses, or browser cookies. Set
+  `UNPIN_CACHE_DIR` to choose another cache root or use `--no-cache` to bypass
+  it. Fingerprint entries live in an unpin-owned subdirectory beneath that root.
 - Identical downloaded bytes are grouped using SHA-256.
 - Other images first become candidates when their 64-bit difference hashes are
   within the selected threshold and their aspect ratios differ by no more than

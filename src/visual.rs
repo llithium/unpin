@@ -162,6 +162,7 @@ mod tests {
         assert!(html.contains("class=\"app-shell\""));
         assert!(html.contains("id=\"overview-toggle\""));
         assert!(html.contains("data-review-button"));
+        assert!(html.contains(".progress-fill {\n                display: block;"));
         assert!(html.contains("document.addEventListener(\"keydown\""));
         assert!(html.contains("event.target instanceof HTMLButtonElement"));
         assert!(html.contains("prefers-reduced-motion: reduce"));
@@ -293,9 +294,12 @@ mod tests {
         assert!(html.contains("if (key === \"k\") move(-1)"));
         assert!(html.contains("if (key === \"e\" && active)"));
         assert!(html.contains("if (key === \"o\")"));
-        assert!(html.contains("setReviewed(active"));
+        assert!(html.contains("setReviewed(reviewedGroup, reviewed)"));
         assert!(html.contains("setActive(target, { announce: true })"));
-        assert!(!html.contains("setActive(target, { scroll: true"));
+        assert!(!html.contains("scroll: true"));
+        assert!(!html.contains("scrollIntoView"));
+        assert!(html.contains("advanceAfterReview(group)"));
+        assert!(html.contains("advanceAfterReview(reviewedGroup)"));
         assert!(!html.contains("localStorage"));
         assert!(!html.contains("sessionStorage"));
     }

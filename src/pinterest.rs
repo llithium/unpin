@@ -15,6 +15,9 @@ use crate::progress::{NoProgress, ProgressEvent, ProgressSink};
 const MAX_PAGES: usize = 10_000;
 const DEFAULT_ROOT: &str = "https://www.pinterest.com/";
 const BOARD_PAGE_SIZE: usize = 25;
+const MAX_REQUEST_ATTEMPTS: usize = 4;
+const RETRY_BASE_DELAY: Duration = Duration::from_millis(250);
+const MAX_RETRY_DELAY: Duration = Duration::from_secs(30);
 
 /// Path segments that never name a Pinterest user.
 const RESERVED_SEGMENTS: [&str; 4] = ["pin", "search", "ideas", "today"];
@@ -353,6 +356,10 @@ impl PinterestClient {
         self.http.clone()
     }
 
+    pub(crate) fn is_authenticated(&self) -> bool {
+        self.authenticated
+    }
+
     pub async fn fetch_board(&self, target: &BoardTarget) -> Result<BoardPins, PinterestError> {
         self.fetch_board_with_progress(target, &NoProgress).await
     }
@@ -382,6 +389,7 @@ impl PinterestClient {
                     "username": target.username,
                     "field_set_key": "detailed"
                 }),
+                progress,
             )
             .await?;
         let board = response_data(&board_response, "Board")?;
@@ -622,18 +630,10 @@ impl PinterestClient {
             }
         }
 
-        if let Some(reported) = pins_reported
-            && pins_found < reported
+        if let Some(warning) =
+            incomplete_scan_warning(self.authenticated, pins_reported, pins_found)
         {
-            if self.authenticated {
-                warnings.push(format!(
-                    "Pinterest reports {reported} pins, but returned {pins_found} through its authenticated web API. Some unavailable or restricted pins may still be hidden."
-                ));
-            } else {
-                warnings.push(format!(
-                    "Pinterest reports {reported} pins, but returned only {pins_found} anonymously. Rerun with --cookies-from-browser chrome while signed in to Pinterest."
-                ));
-            }
+            warnings.push(warning);
         }
 
         Ok(BoardPins {
@@ -656,7 +656,7 @@ impl PinterestClient {
         let mut seen_bookmarks = HashSet::new();
 
         for page_index in 0..MAX_PAGES {
-            let response = self.call(resource, options.clone()).await?;
+            let response = self.call(resource, options.clone(), progress).await?;
             all_results.extend(response_results(&response, resource)?);
             progress.emit(ProgressEvent::PageFetched {
                 resource,
@@ -689,7 +689,12 @@ impl PinterestClient {
         ))
     }
 
-    async fn call(&self, resource: &'static str, options: Value) -> Result<Value, PinterestError> {
+    async fn call(
+        &self,
+        resource: &'static str,
+        options: Value,
+        progress: &dyn ProgressSink,
+    ) -> Result<Value, PinterestError> {
         let endpoint = self
             .api_root
             .join(&format!("resource/{resource}Resource/get/"))
@@ -697,25 +702,89 @@ impl PinterestClient {
         let data = serde_json::to_string(&json!({ "options": options }))
             .map_err(|_| invalid_response(resource, "could not serialize request options"))?;
 
-        let response = self
-            .http
-            .get(endpoint)
-            .query(&[("data", data.as_str()), ("source_url", "")])
-            .header("Cookie", self.cookie_header.clone())
-            .send()
-            .await
-            .map_err(|source| PinterestError::Request { resource, source })?;
+        for attempt in 0..MAX_REQUEST_ATTEMPTS {
+            let response = self
+                .http
+                .get(endpoint.clone())
+                .query(&[("data", data.as_str()), ("source_url", "")])
+                .header("Cookie", self.cookie_header.clone())
+                .send()
+                .await;
+            let response = match response {
+                Ok(response) => response,
+                Err(source)
+                    if attempt + 1 < MAX_REQUEST_ATTEMPTS
+                        && (source.is_connect() || source.is_timeout()) =>
+                {
+                    let delay = retry_delay(attempt, None);
+                    emit_retry(progress, resource, attempt, delay);
+                    tokio::time::sleep(delay).await;
+                    continue;
+                }
+                Err(source) => return Err(PinterestError::Request { resource, source }),
+            };
 
-        let status = response.status();
-        if !status.is_success() {
+            let status = response.status();
+            if status.is_success() {
+                return response
+                    .json()
+                    .await
+                    .map_err(|source| PinterestError::Request { resource, source });
+            }
+            if attempt + 1 < MAX_REQUEST_ATTEMPTS && is_retryable_status(status) {
+                let delay = retry_delay(attempt, response.headers().get("retry-after"));
+                emit_retry(progress, resource, attempt, delay);
+                tokio::time::sleep(delay).await;
+                continue;
+            }
             return Err(PinterestError::Http { resource, status });
         }
 
-        response
-            .json()
-            .await
-            .map_err(|source| PinterestError::Request { resource, source })
+        unreachable!("the request loop always returns on its final attempt")
     }
+}
+
+pub(crate) fn incomplete_scan_warning(
+    authenticated: bool,
+    pins_reported: Option<usize>,
+    pins_found: usize,
+) -> Option<String> {
+    let reported = pins_reported.filter(|reported| pins_found < *reported)?;
+    if authenticated {
+        Some(format!(
+            "Pinterest reports {reported} pins, but returned {pins_found} through its authenticated web API. Some unavailable or restricted pins may still be hidden."
+        ))
+    } else {
+        Some(format!(
+            "Pinterest reports {reported} pins, but returned only {pins_found} anonymously. Rerun with --cookies-from-browser chrome while signed in to Pinterest."
+        ))
+    }
+}
+
+fn retry_delay(attempt: usize, retry_after: Option<&HeaderValue>) -> Duration {
+    retry_after
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| value.trim().parse::<u64>().ok())
+        .map(Duration::from_secs)
+        .unwrap_or_else(|| RETRY_BASE_DELAY.saturating_mul(1_u32 << attempt.min(16)))
+        .min(MAX_RETRY_DELAY)
+}
+
+fn is_retryable_status(status: reqwest::StatusCode) -> bool {
+    status == reqwest::StatusCode::TOO_MANY_REQUESTS || status.is_server_error()
+}
+
+fn emit_retry(
+    progress: &dyn ProgressSink,
+    resource: &'static str,
+    attempt: usize,
+    delay: Duration,
+) {
+    progress.emit(ProgressEvent::RequestRetry {
+        resource,
+        attempt: attempt + 2,
+        delay,
+    });
 }
 
 fn build_cookie_header(
@@ -1182,5 +1251,33 @@ mod tests {
         assert!(!header.to_str().unwrap().contains("injected"));
         assert!(header.to_str().unwrap().contains("csrftoken="));
         assert!(!authenticated);
+    }
+
+    #[test]
+    fn retries_only_throttling_and_transient_server_errors() {
+        assert!(is_retryable_status(reqwest::StatusCode::TOO_MANY_REQUESTS));
+        assert!(is_retryable_status(
+            reqwest::StatusCode::INTERNAL_SERVER_ERROR
+        ));
+        assert!(is_retryable_status(
+            reqwest::StatusCode::SERVICE_UNAVAILABLE
+        ));
+        assert!(!is_retryable_status(reqwest::StatusCode::BAD_REQUEST));
+        assert!(!is_retryable_status(reqwest::StatusCode::FORBIDDEN));
+    }
+
+    #[test]
+    fn retry_after_seconds_override_bounded_exponential_backoff() {
+        let retry_after = HeaderValue::from_static("7");
+        assert_eq!(retry_delay(0, Some(&retry_after)), Duration::from_secs(7));
+        assert_eq!(retry_delay(0, None), Duration::from_millis(250));
+        assert_eq!(retry_delay(1, None), Duration::from_millis(500));
+
+        let excessive = HeaderValue::from_static("3600");
+        assert_eq!(
+            retry_delay(0, Some(&excessive)),
+            MAX_RETRY_DELAY,
+            "a hostile Retry-After header must not stall the CLI indefinitely"
+        );
     }
 }
