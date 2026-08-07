@@ -4,6 +4,7 @@
         href="{{ item.image_url }}"
         target="_blank"
         rel="noopener noreferrer"
+        aria-label="Open original image for pin {{ item.pin_id }}"
         ><img
             src="{{ item.image_url }}"
             alt="Pinterest pin {{ item.pin_id }}"
@@ -15,15 +16,20 @@
         <div class="card-top">
             <span class="badge {{ item.recommendation.css_class() }}"
                 >{{ item.recommendation.label() }}</span
-            ><span class="pin-id">Pin {{ item.pin_id }}</span>
+            >
+            <span class="pin-id" title="Pin {{ item.pin_id }}"
+                >Pin {{ item.pin_id }}</span
+            >
         </div>
-        {% if show_boards %}{% match item.board %}{% when Some with (board)
-        %}<span class="board">{{ board }}</span>{% when None %}{% endmatch %}{%
-        endif %}
-        <p class="dimensions">
-            {{ item.width }} × {{ item.height }}
-            <span>· {{ self.human_bytes(item.byte_size) }}</span>
-        </p>
+        <div class="item-details">
+            <p class="dimensions">{{ item.width }} × {{ item.height }}</p>
+            <span class="file-size">{{ self.human_bytes(item.byte_size) }}</span>
+        </div>
+        {% if show_boards %}{% match item.board %}{% when Some with (board) %}<span
+            class="board"
+            title="{{ board }}"
+            >{{ board }}</span
+        >{% when None %}{% endmatch %}{% endif %}
         <div class="actions">
             <a
                 class="button primary"
@@ -31,8 +37,9 @@
                 target="_blank"
                 rel="noopener noreferrer"
                 >Open pin</a
-            ><a
-                class="button"
+            >
+            <a
+                class="button secondary"
                 href="{{ item.image_url }}"
                 target="_blank"
                 rel="noopener noreferrer"

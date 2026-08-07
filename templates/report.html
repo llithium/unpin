@@ -3,615 +3,1558 @@
     <head>
         <meta charset="utf-8" />
         <meta name="viewport" content="width=device-width, initial-scale=1" />
-        <title>unpin comparison report</title>
+        <title>unpin · {{ report.title() }}</title>
+        <script>
+            document.documentElement.classList.add("js");
+        </script>
         <style>
             :root {
-                color-scheme: light;
-                --ink: #111820;
-                --muted: #566474;
-                --paper: #e9eef2;
-                --card: #f9fbfc;
-                --line: #aebbc7;
-                --signal: #006d77;
-                --red: #b42336;
-                --red-soft: #fde8eb;
-                --green: #08704f;
-                --green-soft: #dff5eb;
-                --gold: #735500;
-                --gold-soft: #fff0b8;
-                font-family: "Avenir Next", Avenir, "Segoe UI", sans-serif;
+                color-scheme: dark;
+                --canvas: #0d0e10;
+                --shell: #111315;
+                --surface: #16181b;
+                --surface-raised: #1b1e22;
+                --surface-hover: #22262b;
+                --line: #2b2f34;
+                --line-strong: #3b4148;
+                --ink: #f4f4f2;
+                --muted: #92979e;
+                --muted-strong: #b8bcc1;
+                --accent: #8b7cff;
+                --accent-soft: #282344;
+                --green: #68d8ad;
+                --green-soft: #16352c;
+                --amber: #f2c66d;
+                --amber-soft: #3a2e18;
+                --red: #ff808b;
+                --red-soft: #3b2025;
+                --focus: #a99fff;
+                font-family:
+                    Inter, ui-sans-serif, -apple-system, BlinkMacSystemFont,
+                    "Segoe UI", sans-serif;
             }
+
             * {
                 box-sizing: border-box;
             }
+
+            html {
+                background: var(--canvas);
+            }
+
             body {
+                min-width: 320px;
+                min-height: 100vh;
                 margin: 0;
-                background: var(--paper);
+                background:
+                    radial-gradient(
+                        circle at 75% -20%,
+                        rgb(139 124 255 / 8%),
+                        transparent 34rem
+                    ),
+                    var(--canvas);
                 color: var(--ink);
             }
-            main {
-                width: min(1440px, calc(100% - 32px));
-                margin: 0 auto;
-                padding: 52px 0 80px;
+
+            button,
+            input {
+                font: inherit;
             }
-            header {
-                display: grid;
-                gap: 15px;
-                margin-bottom: 44px;
-                padding-left: 18px;
-                border-left: 5px solid var(--signal);
+
+            button,
+            a {
+                -webkit-tap-highlight-color: transparent;
             }
-            .eyebrow {
-                margin: 0;
-                color: var(--signal);
-                font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
-                font-size: 0.73rem;
-                font-weight: 800;
-                letter-spacing: 0.14em;
-                text-transform: uppercase;
+
+            a {
+                color: inherit;
             }
-            h1 {
-                max-width: 1100px;
-                margin: 0;
-                font-family:
-                    "Avenir Next Condensed", "Arial Narrow", sans-serif;
-                font-size: clamp(2.5rem, 6vw, 5.7rem);
-                font-stretch: condensed;
-                font-weight: 800;
-                line-height: 0.9;
-                letter-spacing: -0.045em;
-                text-transform: uppercase;
-            }
-            .lede {
-                max-width: 700px;
-                margin: 0;
-                color: var(--muted);
-                font-size: 1.03rem;
-                line-height: 1.6;
-            }
-            .stats {
-                display: grid;
-                grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
-                gap: 1px;
+
+            .app-shell {
+                width: min(1600px, calc(100% - 24px));
+                min-height: calc(100vh - 24px);
+                margin: 12px auto;
                 overflow: hidden;
-                margin-left: -18px;
                 border: 1px solid var(--line);
-                border-radius: 3px;
-                background: var(--line);
+                border-radius: 14px;
+                background: var(--shell);
+                box-shadow: 0 24px 80px rgb(0 0 0 / 38%);
             }
-            .stat {
-                padding: 18px;
-                background: var(--card);
-            }
-            .stat strong {
-                display: block;
-                font-family:
-                    "Avenir Next Condensed", "Arial Narrow", sans-serif;
-                font-size: 2.2rem;
-                font-weight: 800;
-                line-height: 1;
-            }
-            .stat span {
-                color: var(--muted);
-                font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
-                font-size: 0.7rem;
-                font-weight: 700;
-                letter-spacing: 0.06em;
-                text-transform: uppercase;
-            }
-            .match {
-                margin-top: 48px;
-            }
-            .match-heading {
-                display: flex;
-                align-items: end;
-                justify-content: space-between;
-                gap: 20px;
-                padding-bottom: 12px;
+
+            .topbar {
+                position: sticky;
+                top: 0;
+                z-index: 20;
+                display: grid;
+                grid-template-columns: minmax(280px, 1fr) auto auto;
+                align-items: center;
+                gap: 18px;
+                min-height: 64px;
+                padding: 10px 14px 10px 18px;
                 border-bottom: 1px solid var(--line);
+                background: rgb(17 19 21 / 94%);
+                backdrop-filter: blur(18px);
             }
-            .match-title {
+
+            .brand-block,
+            .topbar-actions,
+            .progress-block,
+            .match-title,
+            .match-actions,
+            .card-top,
+            .actions,
+            .shortcut-row {
                 display: flex;
                 align-items: center;
-                gap: 12px;
-                flex-wrap: wrap;
             }
-            .match-heading h2 {
-                margin: 0;
-                font-family:
-                    "Avenir Next Condensed", "Arial Narrow", sans-serif;
-                font-size: clamp(1.55rem, 3vw, 2.35rem);
-                font-weight: 800;
-                letter-spacing: -0.02em;
-                text-transform: uppercase;
+
+            .brand-block {
+                min-width: 0;
+                gap: 13px;
             }
-            .match-heading p {
+
+            .brand {
+                display: inline-flex;
+                align-items: center;
+                gap: 8px;
+                flex: none;
+                font-size: 0.92rem;
+                font-weight: 760;
+                letter-spacing: -0.015em;
+            }
+
+            .brand-mark {
+                display: grid;
+                width: 25px;
+                height: 25px;
+                place-items: center;
+                border-radius: 7px;
+                background: var(--accent);
+                color: #0e0e12;
+                font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+                font-size: 0.72rem;
+                font-weight: 900;
+            }
+
+            .report-name {
+                min-width: 0;
+                overflow: hidden;
+                padding-left: 13px;
+                border-left: 1px solid var(--line);
+                color: var(--muted-strong);
+                font-size: 0.84rem;
+                text-overflow: ellipsis;
+                white-space: nowrap;
+            }
+
+            .progress-block {
+                gap: 10px;
+                color: var(--muted);
+                font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+                font-size: 0.68rem;
+                letter-spacing: 0.03em;
+            }
+
+            .progress-track {
+                width: 112px;
+                height: 3px;
+                overflow: hidden;
+                border-radius: 99px;
+                background: var(--line);
+            }
+
+            .progress-fill {
+                width: 0;
+                height: 100%;
+                border-radius: inherit;
+                background: var(--green);
+                transition: width 180ms ease;
+            }
+
+            .topbar-actions,
+            .match-actions,
+            .actions {
+                gap: 8px;
+            }
+
+            .control,
+            .button,
+            .review-button {
+                display: inline-flex;
+                align-items: center;
+                justify-content: center;
+                min-height: 36px;
+                border: 1px solid var(--line-strong);
+                border-radius: 8px;
+                background: var(--surface);
+                color: var(--ink);
+                cursor: pointer;
+                font-size: 0.76rem;
+                font-weight: 680;
+                text-decoration: none;
+                transition:
+                    border-color 140ms ease,
+                    background 140ms ease,
+                    transform 140ms ease;
+            }
+
+            .control {
+                gap: 7px;
+                padding: 7px 10px;
+            }
+
+            .control.icon-only {
+                width: 36px;
+                padding: 0;
+                font-size: 1rem;
+            }
+
+            .control:hover,
+            .button:hover,
+            .review-button:hover {
+                border-color: #565d66;
+                background: var(--surface-hover);
+            }
+
+            .control:active,
+            .button:active,
+            .review-button:active {
+                transform: translateY(1px);
+            }
+
+            .control[disabled] {
+                cursor: not-allowed;
+                opacity: 0.38;
+            }
+
+            .control[aria-pressed="true"] {
+                border-color: var(--accent);
+                background: var(--accent-soft);
+                color: #d8d2ff;
+            }
+
+            kbd {
+                min-width: 18px;
+                padding: 2px 5px;
+                border: 1px solid var(--line-strong);
+                border-radius: 4px;
+                background: #0f1113;
+                color: var(--muted-strong);
+                font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+                font-size: 0.62rem;
+                font-weight: 600;
+                text-align: center;
+                box-shadow: inset 0 -1px 0 rgb(255 255 255 / 6%);
+            }
+
+            .workspace {
+                display: grid;
+                grid-template-columns: 258px minmax(0, 1fr);
+            }
+
+            .rail {
+                position: sticky;
+                top: 65px;
+                align-self: start;
+                height: calc(100vh - 78px);
+                overflow: auto;
+                border-right: 1px solid var(--line);
+                background: #121416;
+            }
+
+            .rail-section {
+                padding: 18px;
+                border-bottom: 1px solid var(--line);
+            }
+
+            .eyebrow,
+            .rail-label,
+            .detail-label,
+            .match-kicker {
                 margin: 0;
                 color: var(--muted);
                 font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
-                font-size: 0.76rem;
-                text-align: right;
+                font-size: 0.64rem;
+                font-weight: 700;
+                letter-spacing: 0.13em;
                 text-transform: uppercase;
             }
+
+            .rail-heading {
+                margin: 7px 0 6px;
+                font-size: 1.12rem;
+                font-weight: 720;
+                letter-spacing: -0.025em;
+            }
+
+            .rail-copy {
+                margin: 0;
+                color: var(--muted);
+                font-size: 0.76rem;
+                line-height: 1.55;
+            }
+
+            .stats {
+                display: grid;
+                grid-template-columns: 1fr 1fr;
+            }
+
+            .stat {
+                min-width: 0;
+                padding: 15px 18px;
+                border-right: 1px solid var(--line);
+                border-bottom: 1px solid var(--line);
+            }
+
+            .stat:nth-child(even) {
+                border-right: 0;
+            }
+
+            .stat strong {
+                display: block;
+                margin-bottom: 4px;
+                font-size: 1.25rem;
+                font-weight: 720;
+                letter-spacing: -0.03em;
+            }
+
+            .stat span {
+                display: block;
+                overflow: hidden;
+                color: var(--muted);
+                font-size: 0.67rem;
+                text-overflow: ellipsis;
+                white-space: nowrap;
+            }
+
+            .filters {
+                display: flex;
+                gap: 5px;
+                padding: 12px 14px;
+                border-bottom: 1px solid var(--line);
+            }
+
+            .filter-input {
+                position: absolute;
+                width: 1px;
+                height: 1px;
+                overflow: hidden;
+                opacity: 0;
+                pointer-events: none;
+            }
+
+            .filters label {
+                flex: 1;
+                padding: 7px 6px;
+                border: 1px solid transparent;
+                border-radius: 6px;
+                color: var(--muted);
+                cursor: pointer;
+                font-size: 0.68rem;
+                font-weight: 670;
+                text-align: center;
+            }
+
+            .filters label:hover {
+                color: var(--ink);
+                background: var(--surface);
+            }
+
+            #filter-all:checked ~ .filters label[for="filter-all"],
+            #filter-same:checked ~ .filters label[for="filter-same"],
+            #filter-cross:checked ~ .filters label[for="filter-cross"] {
+                border-color: var(--line-strong);
+                background: var(--surface-raised);
+                color: var(--ink);
+            }
+
+            #filter-all:focus-visible ~ .filters label[for="filter-all"],
+            #filter-same:focus-visible ~ .filters label[for="filter-same"],
+            #filter-cross:focus-visible ~ .filters label[for="filter-cross"] {
+                outline: 2px solid var(--focus);
+                outline-offset: 2px;
+            }
+
+            .match-nav {
+                display: grid;
+                gap: 3px;
+                padding: 9px;
+            }
+
+            .match-link {
+                position: relative;
+                display: grid;
+                grid-template-columns: 28px minmax(0, 1fr) auto;
+                gap: 9px;
+                align-items: center;
+                width: 100%;
+                padding: 10px;
+                border: 1px solid transparent;
+                border-radius: 8px;
+                background: transparent;
+                color: var(--muted-strong);
+                cursor: pointer;
+                text-align: left;
+            }
+
+            .match-link:hover {
+                background: var(--surface);
+                color: var(--ink);
+            }
+
+            .match-link[aria-current="true"] {
+                border-color: #3b365d;
+                background: var(--accent-soft);
+                color: var(--ink);
+            }
+
+            .match-link.is-reviewed::after {
+                content: "";
+                position: absolute;
+                top: 8px;
+                right: 8px;
+                width: 6px;
+                height: 6px;
+                border-radius: 50%;
+                background: var(--green);
+            }
+
+            .match-link.is-filtered,
+            .match.is-filtered {
+                display: none !important;
+            }
+
+            .match-number {
+                display: grid;
+                width: 28px;
+                height: 28px;
+                place-items: center;
+                border: 1px solid var(--line);
+                border-radius: 7px;
+                color: var(--muted);
+                font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+                font-size: 0.66rem;
+            }
+
+            .match-link[aria-current="true"] .match-number {
+                border-color: #5f54a3;
+                color: #d6d1ff;
+            }
+
+            .match-link-copy {
+                min-width: 0;
+            }
+
+            .match-link-title,
+            .match-link-meta {
+                display: block;
+                overflow: hidden;
+                text-overflow: ellipsis;
+                white-space: nowrap;
+            }
+
+            .match-link-title {
+                font-size: 0.75rem;
+                font-weight: 680;
+            }
+
+            .match-link-meta {
+                margin-top: 3px;
+                color: var(--muted);
+                font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+                font-size: 0.61rem;
+            }
+
+            .scope-dot {
+                width: 7px;
+                height: 7px;
+                margin-right: 2px;
+                border-radius: 50%;
+                background: #525860;
+            }
+
+            .match-link.cross-board .scope-dot {
+                background: var(--amber);
+            }
+
+            .shortcut-row {
+                justify-content: space-between;
+                gap: 8px;
+                padding: 13px 18px;
+                color: var(--muted);
+                font-size: 0.65rem;
+            }
+
+            .shortcut-row span {
+                display: inline-flex;
+                align-items: center;
+                gap: 5px;
+            }
+
+            .content {
+                min-width: 0;
+                padding: clamp(24px, 4vw, 52px);
+            }
+
+            .match {
+                max-width: 1240px;
+                margin: 0 auto;
+            }
+
+            .js body:not(.overview-mode) .match:not(.is-active) {
+                display: none;
+            }
+
+            .overview-mode .match {
+                padding-bottom: 48px;
+                border-bottom: 1px solid var(--line);
+                margin-bottom: 48px;
+            }
+
+            .overview-mode .match:last-of-type {
+                margin-bottom: 0;
+                border-bottom: 0;
+            }
+
+            .match-heading {
+                display: flex;
+                align-items: flex-start;
+                justify-content: space-between;
+                gap: 24px;
+                margin-bottom: 22px;
+            }
+
+            .match-title {
+                min-width: 0;
+                flex-wrap: wrap;
+                gap: 10px;
+            }
+
+            .match-heading h1,
+            .match-heading h2 {
+                margin: 4px 0 0;
+                font-size: clamp(1.55rem, 2.4vw, 2.15rem);
+                font-weight: 730;
+                letter-spacing: -0.045em;
+                line-height: 1.08;
+            }
+
+            .match-description {
+                max-width: 690px;
+                margin: 9px 0 0;
+                color: var(--muted-strong);
+                font-size: 0.86rem;
+                line-height: 1.55;
+            }
+
+            .badge {
+                display: inline-flex;
+                align-items: center;
+                min-height: 24px;
+                padding: 4px 8px;
+                border: 1px solid transparent;
+                border-radius: 6px;
+                font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+                font-size: 0.59rem;
+                font-weight: 800;
+                letter-spacing: 0.08em;
+                text-transform: uppercase;
+            }
+
+            .badge.keep {
+                color: var(--green);
+                background: var(--green-soft);
+            }
+
+            .badge.tie,
+            .badge.cross-board {
+                color: var(--amber);
+                background: var(--amber-soft);
+            }
+
+            .badge.delete {
+                color: var(--red);
+                background: var(--red-soft);
+            }
+
+            .badge.same-board {
+                border-color: var(--line-strong);
+                color: var(--muted-strong);
+                background: var(--surface);
+            }
+
+            .review-button {
+                flex: none;
+                gap: 8px;
+                padding: 7px 11px;
+            }
+
+            .review-button[aria-pressed="true"] {
+                border-color: #28654f;
+                background: var(--green-soft);
+                color: var(--green);
+            }
+
+            .review-check {
+                font-size: 0.95rem;
+                line-height: 1;
+            }
+
             .comparison {
                 display: grid;
                 grid-template-columns: repeat(
                     auto-fit,
-                    minmax(min(100%, 310px), 1fr)
+                    minmax(min(100%, 300px), 1fr)
                 );
-                gap: 18px;
-                margin-top: 18px;
+                gap: 14px;
             }
+
             .pin-card {
                 min-width: 0;
                 overflow: hidden;
-                border: 1px solid #8293a2;
-                border-radius: 3px;
-                background: var(--card);
-                box-shadow: 5px 5px 0 rgb(91 110 125 / 14%);
+                border: 1px solid var(--line);
+                border-radius: 11px;
+                background: var(--surface);
+                box-shadow: 0 16px 34px rgb(0 0 0 / 18%);
             }
+
             .image-stage {
                 position: relative;
-                display: block;
-                min-width: 0;
+                display: grid;
+                min-height: 220px;
+                place-items: center;
                 overflow: hidden;
-                background: #d9e2e8;
+                border-bottom: 1px solid var(--line);
+                background:
+                    linear-gradient(45deg, #17191c 25%, transparent 25%) 0 0 /
+                        18px 18px,
+                    linear-gradient(-45deg, #17191c 25%, transparent 25%) 0 0 /
+                        18px 18px,
+                    linear-gradient(45deg, transparent 75%, #17191c 75%) 0 0 /
+                        18px 18px,
+                    linear-gradient(-45deg, transparent 75%, #17191c 75%) 0 0 /
+                        18px 18px,
+                    #131517;
                 line-height: 0;
             }
-            .image-stage::before {
-                content: "IMAGE FIELD";
-                position: absolute;
-                top: 7px;
-                left: 9px;
-                z-index: 1;
-                padding: 2px 5px;
-                color: #344655;
-                background: rgb(249 251 252 / 88%);
-                font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
-                font-size: 0.58rem;
-                font-weight: 800;
-                letter-spacing: 0.12em;
-            }
+
             .image-stage::after {
-                content: "";
+                content: "View original";
                 position: absolute;
-                inset: 7px;
-                pointer-events: none;
-                background:
-                    linear-gradient(var(--signal), var(--signal)) left top /
-                        16px 2px no-repeat,
-                    linear-gradient(var(--signal), var(--signal)) left top / 2px
-                        16px no-repeat,
-                    linear-gradient(var(--signal), var(--signal)) right bottom /
-                        16px 2px no-repeat,
-                    linear-gradient(var(--signal), var(--signal)) right bottom /
-                        2px 16px no-repeat;
+                right: 10px;
+                bottom: 10px;
+                padding: 5px 7px;
+                border: 1px solid rgb(255 255 255 / 12%);
+                border-radius: 6px;
+                background: rgb(9 10 12 / 78%);
+                color: #d9dadd;
+                font-size: 0.62rem;
+                font-weight: 650;
+                line-height: 1;
+                opacity: 0;
+                transform: translateY(3px);
+                transition:
+                    opacity 140ms ease,
+                    transform 140ms ease;
             }
-            /* Bounded by both maxes with no explicit width or height, so a tall pin cannot
-   fill the viewport and the box keeps the image's own aspect ratio. Setting
-   width: 100% alongside max-height would make both axes definite and stretch
-   the image. */
+
+            .image-stage:hover::after,
+            .image-stage:focus-visible::after {
+                opacity: 1;
+                transform: none;
+            }
+
+            /* Max constraints preserve the source aspect ratio without forcing
+               both axes to definite dimensions. */
             .image-stage img {
                 display: block;
                 max-width: 100%;
                 max-height: min(60vh, 620px);
                 margin: 0 auto;
             }
+
             .card-body {
                 display: grid;
-                gap: 13px;
-                padding: 16px;
+                gap: 12px;
+                padding: 14px;
             }
+
             .card-top {
-                display: flex;
-                align-items: center;
                 justify-content: space-between;
                 gap: 12px;
             }
-            .badge {
-                display: inline-flex;
-                align-items: center;
-                min-height: 27px;
-                padding: 4px 9px;
-                border-radius: 999px;
-                font-size: 0.72rem;
-                font-weight: 850;
-                letter-spacing: 0.08em;
-            }
-            .badge.keep {
-                color: var(--green);
-                background: var(--green-soft);
-            }
-            .badge.tie {
-                color: var(--gold);
-                background: var(--gold-soft);
-            }
-            .badge.delete {
-                color: var(--red);
-                background: var(--red-soft);
-            }
-            .badge.cross-board {
-                color: var(--gold);
-                background: var(--gold-soft);
-            }
-            .badge.same-board {
-                color: var(--muted);
-                border: 1px solid var(--line);
-            }
+
             .pin-id {
+                min-width: 0;
                 overflow: hidden;
                 color: var(--muted);
                 font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
-                font-size: 0.76rem;
-                text-overflow: ellipsis;
-            }
-            .board {
-                justify-self: start;
-                max-width: 100%;
-                overflow: hidden;
-                padding: 2px 9px;
-                border: 1px solid var(--line);
-                border-radius: 999px;
-                color: var(--muted);
-                font-size: 0.74rem;
+                font-size: 0.66rem;
                 text-overflow: ellipsis;
                 white-space: nowrap;
             }
-            .boards {
-                margin: 14px 0 0;
-                color: var(--muted);
-                font-size: 0.9rem;
-                line-height: 1.7;
+
+            .item-details {
+                display: grid;
+                grid-template-columns: 1fr auto;
+                gap: 12px;
+                align-items: end;
             }
+
             .dimensions {
                 margin: 0;
-                font-family:
-                    "Avenir Next Condensed", "Arial Narrow", sans-serif;
-                font-size: 1.5rem;
-                font-weight: 750;
+                font-size: 0.96rem;
+                font-weight: 690;
+                letter-spacing: -0.015em;
             }
-            .dimensions span {
+
+            .file-size {
                 color: var(--muted);
-                font-family: ui-sans-serif, sans-serif;
-                font-size: 0.82rem;
+                font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+                font-size: 0.65rem;
             }
-            .actions {
-                display: flex;
-                flex-wrap: wrap;
-                gap: 8px;
-            }
-            .button {
+
+            .board {
                 display: inline-flex;
-                align-items: center;
-                justify-content: center;
-                min-height: 38px;
+                justify-self: start;
+                max-width: 100%;
+                overflow: hidden;
+                padding: 4px 7px;
+                border-radius: 5px;
+                background: #23262a;
+                color: var(--muted-strong);
+                font-size: 0.66rem;
+                text-overflow: ellipsis;
+                white-space: nowrap;
+            }
+
+            .actions {
+                display: grid;
+                grid-template-columns: 1fr auto;
+            }
+
+            .button {
                 padding: 8px 12px;
-                border: 1px solid var(--ink);
-                border-radius: 2px;
-                color: var(--ink);
-                font-size: 0.82rem;
-                font-weight: 750;
-                text-decoration: none;
             }
+
             .button.primary {
-                color: white;
-                background: var(--ink);
+                border-color: #f0f0ed;
+                background: #f0f0ed;
+                color: #111315;
             }
-            .button:hover {
-                transform: translateY(-1px);
+
+            .button.secondary {
+                min-width: 94px;
             }
-            .button:focus-visible,
-            .image-stage:focus-visible,
-            summary:focus-visible {
-                outline: 3px solid #00a6b2;
-                outline-offset: 3px;
-            }
-            .empty {
-                margin-top: 42px;
-                padding: 32px;
-                border: 1px dashed var(--line);
-                border-radius: 3px;
+
+            .empty,
+            .filter-empty {
+                max-width: 760px;
+                margin: 40px auto;
+                padding: 42px;
+                border: 1px dashed var(--line-strong);
+                border-radius: 12px;
+                background: var(--surface);
                 color: var(--muted);
                 text-align: center;
-                background: var(--card);
             }
-            .filter-input {
-                position: absolute;
-                width: 1px;
-                height: 1px;
-                margin: 0;
-                padding: 0;
-                overflow: hidden;
-                opacity: 0;
-            }
-            .filters {
-                display: flex;
-                flex-wrap: wrap;
-                gap: 8px;
-                margin-top: 38px;
-            }
-            .filters label {
-                display: inline-flex;
-                align-items: center;
-                gap: 8px;
-                padding: 9px 15px;
-                border: 1px solid var(--line);
-                border-radius: 2px;
-                background: var(--card);
-                color: var(--muted);
-                cursor: pointer;
-                font-size: 0.85rem;
-                font-weight: 750;
-            }
-            .filters label span {
-                padding: 1px 7px;
-                border-radius: 999px;
-                background: var(--paper);
-                font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
-                font-size: 0.74rem;
-            }
-            .filters label:hover {
-                border-color: var(--signal);
+
+            .empty strong {
+                display: block;
+                margin-bottom: 8px;
                 color: var(--ink);
+                font-size: 1rem;
             }
-            /* Checked and focus styling forward from the hidden input to its own label. */
-            #filter-all:checked ~ .filters label[for="filter-all"],
-            #filter-same:checked ~ .filters label[for="filter-same"],
-            #filter-cross:checked ~ .filters label[for="filter-cross"] {
-                border-color: var(--ink);
-                background: var(--ink);
-                color: white;
-            }
-            #filter-all:checked ~ .filters label[for="filter-all"] span,
-            #filter-same:checked ~ .filters label[for="filter-same"] span,
-            #filter-cross:checked ~ .filters label[for="filter-cross"] span {
-                background: rgb(255 255 255 / 22%);
-            }
-            #filter-all:focus-visible ~ .filters label[for="filter-all"],
-            #filter-same:focus-visible ~ .filters label[for="filter-same"],
-            #filter-cross:focus-visible ~ .filters label[for="filter-cross"] {
-                outline: 3px solid #00a6b2;
-                outline-offset: 3px;
-            }
-            #filter-same:checked ~ .match.cross-board,
-            #filter-cross:checked ~ .match.same-board {
-                display: none;
-            }
+
             .filter-empty {
                 display: none;
             }
-            #filter-same:checked ~ .filter-empty.same-board,
-            #filter-cross:checked ~ .filter-empty.cross-board {
+
+            .filter-empty.is-visible {
                 display: block;
             }
-            details {
-                margin-top: 30px;
-                padding: 16px 18px;
-                border: 1px solid var(--line);
-                border-radius: 3px;
-                background: var(--card);
-            }
-            summary {
-                cursor: pointer;
-                font-weight: 750;
-            }
-            details ul {
-                margin-bottom: 0;
-                padding-left: 20px;
-                color: var(--muted);
-                line-height: 1.6;
-            }
-            footer {
-                margin-top: 52px;
-                padding-top: 18px;
+
+            .secondary-panels {
+                max-width: 1240px;
+                margin: 42px auto 0;
+                padding-top: 22px;
                 border-top: 1px solid var(--line);
-                color: var(--muted);
-                font-size: 0.8rem;
             }
-            @media (prefers-reduced-motion: reduce) {
-                .button:hover {
-                    transform: none;
+
+            details {
+                border-bottom: 1px solid var(--line);
+            }
+
+            summary {
+                display: flex;
+                align-items: center;
+                justify-content: space-between;
+                padding: 15px 2px;
+                color: var(--muted-strong);
+                cursor: pointer;
+                font-size: 0.78rem;
+                font-weight: 660;
+                list-style: none;
+            }
+
+            summary::-webkit-details-marker {
+                display: none;
+            }
+
+            summary::after {
+                content: "+";
+                color: var(--muted);
+                font-size: 1rem;
+            }
+
+            details[open] summary::after {
+                content: "−";
+            }
+
+            details ul,
+            .scan-details {
+                margin: 0 0 16px;
+                padding: 0 2px 0 20px;
+                color: var(--muted);
+                font-size: 0.76rem;
+                line-height: 1.7;
+            }
+
+            .scan-details {
+                padding-left: 2px;
+            }
+
+            .scan-details a,
+            details li a {
+                color: var(--muted-strong);
+                text-decoration-color: var(--line-strong);
+                text-underline-offset: 3px;
+            }
+
+            footer {
+                max-width: 1240px;
+                margin: 42px auto 0;
+                color: #6f747a;
+                font-size: 0.68rem;
+                line-height: 1.55;
+            }
+
+            .control:focus-visible,
+            .button:focus-visible,
+            .review-button:focus-visible,
+            .match-link:focus-visible,
+            .image-stage:focus-visible,
+            summary:focus-visible {
+                outline: 2px solid var(--focus);
+                outline-offset: 2px;
+            }
+
+            .sr-only {
+                position: absolute;
+                width: 1px;
+                height: 1px;
+                padding: 0;
+                margin: -1px;
+                overflow: hidden;
+                clip: rect(0, 0, 0, 0);
+                white-space: nowrap;
+                border: 0;
+            }
+
+            @media (max-width: 880px) {
+                .app-shell {
+                    width: 100%;
+                    min-height: 100vh;
+                    margin: 0;
+                    border-width: 0;
+                    border-radius: 0;
+                }
+
+                .topbar {
+                    grid-template-columns: minmax(0, 1fr) auto;
+                }
+
+                .progress-block {
+                    display: none;
+                }
+
+                .workspace {
+                    display: block;
+                }
+
+                .rail {
+                    position: static;
+                    width: 100%;
+                    height: auto;
+                    overflow: visible;
+                    border-right: 0;
+                    border-bottom: 1px solid var(--line);
+                }
+
+                .rail-intro,
+                .stats,
+                .shortcut-row {
+                    display: none;
+                }
+
+                .match-nav {
+                    display: flex;
+                    overflow-x: auto;
+                    padding: 9px 14px 12px;
+                    scrollbar-width: thin;
+                }
+
+                .match-link {
+                    flex: 0 0 190px;
+                }
+
+                .content {
+                    padding: 28px 18px 44px;
                 }
             }
-            /* Print every match: a filtered printout would silently drop the hidden ones. */
+
+            @media (max-width: 620px) {
+                .topbar {
+                    gap: 9px;
+                    min-height: 58px;
+                    padding: 9px 10px 9px 13px;
+                }
+
+                .brand {
+                    font-size: 0;
+                    gap: 0;
+                }
+
+                .brand-mark {
+                    font-size: 0.72rem;
+                }
+
+                .report-name {
+                    padding-left: 10px;
+                }
+
+                .control .control-label,
+                .topbar-actions kbd {
+                    display: none;
+                }
+
+                .match-heading {
+                    display: grid;
+                    gap: 16px;
+                }
+
+                .match-actions {
+                    justify-content: flex-start;
+                }
+
+                .comparison {
+                    grid-template-columns: 1fr;
+                }
+
+                .image-stage {
+                    min-height: 180px;
+                }
+
+                .image-stage img {
+                    max-height: 68vh;
+                }
+
+                .actions {
+                    grid-template-columns: 1fr 1fr;
+                }
+            }
+
+            @media (prefers-reduced-motion: reduce) {
+                *,
+                *::before,
+                *::after {
+                    scroll-behavior: auto !important;
+                    transition-duration: 0.01ms !important;
+                }
+            }
+
             @media print {
-                .filters,
-                .filter-empty {
+                :root {
+                    color-scheme: light;
+                    --canvas: #fff;
+                    --shell: #fff;
+                    --surface: #fff;
+                    --line: #ccc;
+                    --line-strong: #999;
+                    --ink: #111;
+                    --muted: #555;
+                    --muted-strong: #333;
+                }
+
+                body {
+                    background: #fff;
+                }
+
+                .app-shell {
+                    width: 100%;
+                    min-height: 0;
+                    margin: 0;
+                    overflow: visible;
+                    border: 0;
+                    box-shadow: none;
+                }
+
+                .topbar,
+                .rail,
+                .match-actions,
+                .filter-empty,
+                footer {
                     display: none !important;
                 }
-                #filter-same:checked ~ .match.cross-board,
-                #filter-cross:checked ~ .match.same-board {
+
+                .workspace {
+                    display: block;
+                }
+
+                .content {
+                    padding: 0;
+                }
+
+                .match,
+                .js body:not(.overview-mode) .match:not(.is-active),
+                .match.is-filtered {
                     display: block !important;
+                    break-after: page;
+                    margin-bottom: 28px;
+                    padding-bottom: 28px;
                 }
-            }
-            @media (max-width: 620px) {
-                main {
-                    width: min(100% - 20px, 1440px);
-                    padding-top: 30px;
+
+                .image-stage {
+                    min-height: 0;
+                    background: #f3f3f3;
                 }
-                .match-heading {
-                    align-items: start;
-                    flex-direction: column;
+
+                .pin-card {
+                    box-shadow: none;
                 }
-                .match-heading p {
-                    text-align: left;
+
+                .button {
+                    color: #111;
+                    background: #fff;
                 }
             }
         </style>
     </head>
     <body>
-        <main>
-            <header>
-                <p class="eyebrow">Pinterest duplicate review</p>
-
-                <h1>{{ report.title() }}</h1>
-                <p class="lede">
-                    Compare likely duplicate pins visually. Recommendations
-                    favor pixel area, longest edge, and file size. Review every
-                    candidate before deleting anything.
-                </p>
-                <div class="stats">
-                    <div class="stat">
-                        <strong>{{ report.summary.pins_found }}</strong
-                        ><span>Pins returned</span>
-                    </div>
-                    {% match report.summary.pins_reported %}{% when Some with
-                    (reported) %}
-                    <div class="stat">
-                        <strong>{{ reported }}</strong
-                        ><span>Pinterest total</span>
-                    </div>
-                    {% when None %}{% endmatch %}
-                    <div class="stat">
-                        <strong>{{ report.summary.analyzed }}</strong
-                        ><span>Analyzed</span>
-                    </div>
-                    <div class="stat">
-                        <strong>{{ report.summary.skipped }}</strong
-                        ><span>Skipped</span>
-                    </div>
-                    <div class="stat">
-                        <strong>{{ report.summary.exact_groups }}</strong
-                        ><span>Exact groups</span>
-                    </div>
-                    <div class="stat">
-                        <strong>{{ report.summary.visual_candidates }}</strong
-                        ><span>Visual pairs</span>
-                    </div>
+        <div class="app-shell">
+            <header class="topbar">
+                <div class="brand-block">
+                    <span class="brand"
+                        ><span class="brand-mark">U</span>unpin</span
+                    >
+                    <span class="report-name">{{ report.title() }}</span>
                 </div>
-                {% if show_boards %}
-                <p class="boards">
-                    Scanned {% for board in report.summary.boards %}{% if
-                    !loop.first %} · {% endif %}{% if board.url.is_empty() %}{{
-                    board.name }}{% else %}<a
-                        href="{{ board.url }}"
-                        target="_blank"
-                        rel="noopener noreferrer"
-                        >{{ board.name }}</a
-                    >{% endif %} ({{ board.pins_found }} pins){% endfor %}
-                </p>
-                {% endif %}
+                <div class="progress-block" aria-label="Review progress">
+                    <span id="review-progress">0 / {{ same + cross }}</span>
+                    <span class="progress-track" aria-hidden="true"
+                        ><span class="progress-fill" id="progress-fill"></span
+                    ></span>
+                    <span>reviewed</span>
+                </div>
+                <div class="topbar-actions">
+                    <button
+                        class="control icon-only"
+                        id="previous-match"
+                        type="button"
+                        aria-label="Previous match"
+                        title="Previous match (K)"
+                    >
+                        ←
+                    </button>
+                    <button
+                        class="control icon-only"
+                        id="next-match"
+                        type="button"
+                        aria-label="Next match"
+                        title="Next match (J)"
+                    >
+                        →
+                    </button>
+                    <button
+                        class="control"
+                        id="overview-toggle"
+                        type="button"
+                        aria-pressed="false"
+                    >
+                        <span class="control-label">Overview</span>
+                        <kbd>O</kbd>
+                    </button>
+                </div>
             </header>
-            {% if report.exact_groups.is_empty() &&
-            report.visual_candidates.is_empty() %}
-            <div class="empty">
-                <strong>No duplicate image pins found.</strong><br />The scan
-                completed without producing comparison candidates.
-            </div>
-            {% endif %} {% if show_filters %}
-            <input
-                type="radio"
-                name="scope-filter"
-                id="filter-all"
-                class="filter-input"
-                checked
-            />
-            <input
-                type="radio"
-                name="scope-filter"
-                id="filter-same"
-                class="filter-input"
-            />
-            <input
-                type="radio"
-                name="scope-filter"
-                id="filter-cross"
-                class="filter-input"
-            />
-            <div
-                class="filters"
-                role="group"
-                aria-label="Filter matches by board scope"
-            >
-                <label for="filter-all"
-                    >All <span>{{ same + cross }}</span></label
-                >
-                <label for="filter-same"
-                    >Same board <span>{{ same }}</span></label
-                >
-                <label for="filter-cross"
-                    >Across boards <span>{{ cross }}</span></label
-                >
-            </div>
-            {% if same == 0 %}
-            <div class="empty filter-empty same-board">
-                No duplicates within a single board.
-            </div>
-            {% endif %} {% if cross == 0 %}
-            <div class="empty filter-empty cross-board">
-                No duplicates spanning two boards.
-            </div>
-            {% endif %} {% endif %} {% for group in report.exact_groups %}
-            <section class="match {{ group.scope.css_class() }}">
-                <div class="match-heading">
-                    <div class="match-title">
-                        <h2>Exact group {{ loop.index }}</h2>
-                        {% if show_boards %}<span
-                            class="badge {{ group.scope.css_class() }}"
-                            >{{ group.scope.html_label() }}</span
-                        >{% endif %}
+
+            <div class="workspace">
+                <aside class="rail" aria-label="Report navigation">
+                    <div class="rail-section rail-intro">
+                        <p class="eyebrow">Duplicate review</p>
+                        <h2 class="rail-heading">{{ report.title() }}</h2>
+                        <p class="rail-copy">
+                            Compare candidates before removing anything from
+                            Pinterest.
+                        </p>
                     </div>
-                    <p>Byte-identical image files</p>
-                </div>
-                <div class="comparison">
-                    {% for item in group.items %}{% include "item.html" %}{%
-                    endfor %}
-                </div>
-            </section>
-            {% endfor %} {% for candidate in report.visual_candidates %}
-            <section class="match {{ candidate.scope.css_class() }}">
-                <div class="match-heading">
-                    <div class="match-title">
-                        <h2>Visual candidate {{ loop.index }}</h2>
-                        {% if show_boards %}<span
-                            class="badge {{ candidate.scope.css_class() }}"
-                            >{{ candidate.scope.html_label() }}</span
-                        >{% endif %}
+
+                    <div class="stats" aria-label="Scan summary">
+                        <div class="stat">
+                            <strong>{{ report.summary.pins_found }}</strong>
+                            <span>Pins returned</span>
+                        </div>
+                        {% match report.summary.pins_reported %}{% when Some
+                        with (reported) %}
+                        <div class="stat">
+                            <strong>{{ reported }}</strong>
+                            <span>Pinterest total</span>
+                        </div>
+                        {% when None %}{% endmatch %}
+                        <div class="stat">
+                            <strong>{{ report.summary.analyzed }}</strong>
+                            <span>Analyzed</span>
+                        </div>
+                        <div class="stat">
+                            <strong>{{ report.summary.skipped }}</strong>
+                            <span>Skipped</span>
+                        </div>
+                        <div class="stat">
+                            <strong>{{ report.summary.exact_groups }}</strong>
+                            <span>Exact groups</span>
+                        </div>
+                        <div class="stat">
+                            <strong
+                                >{{ report.summary.visual_candidates }}</strong
+                            >
+                            <span>Visual pairs</span>
+                        </div>
                     </div>
-                    <p>
-                        {{ candidate.similarity_percent }}% similar · hash
-                        distance {{ candidate.hash_distance }}/64
-                    </p>
-                </div>
-                <div class="comparison">
-                    {% for item in candidate.items %}{% include "item.html" %}{%
-                    endfor %}
-                </div>
-            </section>
-            {% endfor %} {% if !report.skipped.is_empty() %}
-            <details>
-                <summary>{{ report.skipped.len() }} skipped pin(s)</summary>
-                <ul>
-                    {% for skipped in report.skipped %}
-                    <li>
-                        {% match skipped.pin_url %}{% when Some with (url) %}<a
-                            href="{{ url }}"
-                            target="_blank"
-                            rel="noopener noreferrer"
-                            >{{ skipped.pin_id.as_deref().unwrap_or("Unknown
-                            pin") }}</a
-                        >{% when None %}{{
-                        skipped.pin_id.as_deref().unwrap_or("Unknown pin") }}{%
-                        endmatch %}: {{ skipped.reason }}
-                    </li>
+
+                    {% if show_filters %}
+                    <input
+                        type="radio"
+                        name="scope-filter"
+                        id="filter-all"
+                        class="filter-input"
+                        value="all"
+                        checked
+                    />
+                    <input
+                        type="radio"
+                        name="scope-filter"
+                        id="filter-same"
+                        class="filter-input"
+                        value="same-board"
+                    />
+                    <input
+                        type="radio"
+                        name="scope-filter"
+                        id="filter-cross"
+                        class="filter-input"
+                        value="cross-board"
+                    />
+                    <div
+                        class="filters"
+                        role="group"
+                        aria-label="Filter matches by board scope"
+                    >
+                        <label for="filter-all">All {{ same + cross }}</label>
+                        <label for="filter-same">Same {{ same }}</label>
+                        <label for="filter-cross">Cross {{ cross }}</label>
+                    </div>
+                    {% endif %}
+
+                    <nav class="match-nav" aria-label="Duplicate matches">
+                        {% for group in report.exact_groups %}
+                        <button
+                            class="match-link {{ group.scope.css_class() }}"
+                            type="button"
+                            data-target="exact-{{ loop.index }}"
+                            data-scope="{{ group.scope.css_class() }}"
+                        >
+                            <span class="match-number">E{{ loop.index }}</span>
+                            <span class="match-link-copy">
+                                <span class="match-link-title"
+                                    >Exact group {{ loop.index }}</span
+                                >
+                                <span class="match-link-meta"
+                                    >{{ group.items.len() }} copies ·
+                                    byte-identical</span
+                                >
+                            </span>
+                            <span class="scope-dot" aria-hidden="true"></span>
+                        </button>
+                        {% endfor %} {% for candidate in
+                        report.visual_candidates %}
+                        <button
+                            class="match-link {{ candidate.scope.css_class() }}"
+                            type="button"
+                            data-target="visual-{{ loop.index }}"
+                            data-scope="{{ candidate.scope.css_class() }}"
+                        >
+                            <span class="match-number">V{{ loop.index }}</span>
+                            <span class="match-link-copy">
+                                <span class="match-link-title"
+                                    >Visual candidate {{ loop.index }}</span
+                                >
+                                <span class="match-link-meta"
+                                    >{{ candidate.similarity_percent }}% match ·
+                                    distance {{ candidate.hash_distance }}</span
+                                >
+                            </span>
+                            <span class="scope-dot" aria-hidden="true"></span>
+                        </button>
+                        {% endfor %}
+                    </nav>
+
+                    <div class="shortcut-row" aria-hidden="true">
+                        <span><kbd>J</kbd><kbd>K</kbd> move</span>
+                        <span><kbd>E</kbd> reviewed</span>
+                    </div>
+                </aside>
+
+                <main class="content">
+                    {% if report.exact_groups.is_empty() &&
+                    report.visual_candidates.is_empty() %}
+                    <div class="empty">
+                        <strong>No duplicate image pins found</strong>
+                        The scan completed without producing comparison
+                        candidates.
+                    </div>
+                    {% endif %}
+
+                    <div class="filter-empty" id="filter-empty" role="status">
+                        No matches in this board scope.
+                    </div>
+
+                    {% for group in report.exact_groups %}
+                    <section
+                        class="match {{ group.scope.css_class() }}"
+                        id="exact-{{ loop.index }}"
+                        data-group
+                        data-scope="{{ group.scope.css_class() }}"
+                        data-reviewed="false"
+                    >
+                        <div class="match-heading">
+                            <div>
+                                <p class="match-kicker">Exact match</p>
+                                <div class="match-title">
+                                    <h1>Exact group {{ loop.index }}</h1>
+                                    {% if show_boards %}<span
+                                        class="badge {{ group.scope.css_class() }}"
+                                        >{{ group.scope.html_label() }}</span
+                                    >{% endif %}
+                                </div>
+                                <p class="match-description">
+                                    These files are byte-identical. Compare
+                                    their boards and pin context before choosing
+                                    which copy to keep.
+                                </p>
+                            </div>
+                            <div class="match-actions">
+                                <button
+                                    class="review-button"
+                                    type="button"
+                                    data-review-button
+                                    aria-pressed="false"
+                                >
+                                    <span class="review-check">✓</span>
+                                    <span data-review-label>Mark reviewed</span>
+                                    <kbd>E</kbd>
+                                </button>
+                            </div>
+                        </div>
+                        <div class="comparison">
+                            {% for item in group.items %}{% include "item.html"
+                            %}{% endfor %}
+                        </div>
+                    </section>
+                    {% endfor %} {% for candidate in report.visual_candidates %}
+                    <section
+                        class="match {{ candidate.scope.css_class() }}"
+                        id="visual-{{ loop.index }}"
+                        data-group
+                        data-scope="{{ candidate.scope.css_class() }}"
+                        data-reviewed="false"
+                    >
+                        <div class="match-heading">
+                            <div>
+                                <p class="match-kicker">Visual match</p>
+                                <div class="match-title">
+                                    <h2>Visual candidate {{ loop.index }}</h2>
+                                    {% if show_boards %}<span
+                                        class="badge {{ candidate.scope.css_class() }}"
+                                        >{{ candidate.scope.html_label() }}</span
+                                    >{% endif %}
+                                </div>
+                                <p class="match-description">
+                                    {{ candidate.similarity_percent }}% similar
+                                    with perceptual hash distance {{
+                                    candidate.hash_distance }}/64. Inspect both
+                                    images before acting on the recommendation.
+                                </p>
+                            </div>
+                            <div class="match-actions">
+                                <button
+                                    class="review-button"
+                                    type="button"
+                                    data-review-button
+                                    aria-pressed="false"
+                                >
+                                    <span class="review-check">✓</span>
+                                    <span data-review-label>Mark reviewed</span>
+                                    <kbd>E</kbd>
+                                </button>
+                            </div>
+                        </div>
+                        <div class="comparison">
+                            {% for item in candidate.items %}{% include
+                            "item.html" %}{% endfor %}
+                        </div>
+                    </section>
                     {% endfor %}
-                </ul>
-            </details>
-            {% endif %} {% if !report.warnings.is_empty() %}
-            <details>
-                <summary>{{ report.warnings.len() }} warning(s)</summary>
-                <ul>
-                    {% for warning in report.warnings %}
-                    <li>{{ warning }}</li>
-                    {% endfor %}
-                </ul>
-            </details>
-            {% endif %}
-            <footer>
-                This temporary report loads images from Pinterest and remains
-                available until your operating system cleans its temporary
-                files.
-            </footer>
-        </main>
+
+                    <div class="secondary-panels">
+                        {% if show_boards %}
+                        <details>
+                            <summary>Scanned boards</summary>
+                            <p class="scan-details">
+                                {% for board in report.summary.boards %}{% if
+                                !loop.first %} · {% endif %}{% if
+                                board.url.is_empty() %}{{ board.name }}{% else
+                                %}<a
+                                    href="{{ board.url }}"
+                                    target="_blank"
+                                    rel="noopener noreferrer"
+                                    >{{ board.name }}</a
+                                >{% endif %} ({{ board.pins_found }} pins){%
+                                endfor %}
+                            </p>
+                        </details>
+                        {% endif %} {% if !report.skipped.is_empty() %}
+                        <details>
+                            <summary>
+                                {{ report.skipped.len() }} skipped pin(s)
+                            </summary>
+                            <ul>
+                                {% for skipped in report.skipped %}
+                                <li>
+                                    {% match skipped.pin_url %}{% when Some
+                                    with (url) %}<a
+                                        href="{{ url }}"
+                                        target="_blank"
+                                        rel="noopener noreferrer"
+                                        >{{
+                                        skipped.pin_id.as_deref().unwrap_or("Unknown pin")
+                                        }}</a
+                                    >{% when None %}{{
+                                    skipped.pin_id.as_deref().unwrap_or("Unknown pin")
+                                    }}{% endmatch %}: {{ skipped.reason }}
+                                </li>
+                                {% endfor %}
+                            </ul>
+                        </details>
+                        {% endif %} {% if !report.warnings.is_empty() %}
+                        <details>
+                            <summary>
+                                {{ report.warnings.len() }} warning(s)
+                            </summary>
+                            <ul>
+                                {% for warning in report.warnings %}
+                                <li>{{ warning }}</li>
+                                {% endfor %}
+                            </ul>
+                        </details>
+                        {% endif %}
+                    </div>
+
+                    <footer>
+                        This temporary report loads images from Pinterest and
+                        remains available until your operating system cleans its
+                        temporary files. Review actions exist only in this open
+                        page and never modify Pinterest.
+                    </footer>
+                </main>
+            </div>
+        </div>
+
+        <p class="sr-only" id="interaction-status" aria-live="polite"></p>
+
+        <script>
+            (() => {
+                const groups = Array.from(
+                    document.querySelectorAll("[data-group]"),
+                );
+                const links = Array.from(
+                    document.querySelectorAll(".match-link[data-target]"),
+                );
+                const filters = Array.from(
+                    document.querySelectorAll('input[name="scope-filter"]'),
+                );
+                const previous = document.querySelector("#previous-match");
+                const next = document.querySelector("#next-match");
+                const overview = document.querySelector("#overview-toggle");
+                const empty = document.querySelector("#filter-empty");
+                const progress = document.querySelector("#review-progress");
+                const progressFill = document.querySelector("#progress-fill");
+                const status = document.querySelector("#interaction-status");
+                let active = groups[0] || null;
+
+                const visibleGroups = () =>
+                    groups.filter((group) => !group.classList.contains("is-filtered"));
+
+                const announce = (message) => {
+                    if (status) status.textContent = message;
+                };
+
+                const updateProgress = () => {
+                    const reviewed = groups.filter(
+                        (group) => group.dataset.reviewed === "true",
+                    ).length;
+                    if (progress) progress.textContent = `${reviewed} / ${groups.length}`;
+                    if (progressFill) {
+                        progressFill.style.width = groups.length
+                            ? `${(reviewed / groups.length) * 100}%`
+                            : "0%";
+                    }
+                };
+
+                const updateControls = () => {
+                    const visible = visibleGroups();
+                    const index = visible.indexOf(active);
+                    if (previous) previous.disabled = index <= 0;
+                    if (next) next.disabled = index < 0 || index >= visible.length - 1;
+                };
+
+                const setActive = (group, options = {}) => {
+                    if (!group || group.classList.contains("is-filtered")) return;
+                    active?.classList.remove("is-active");
+                    active = group;
+                    active.classList.add("is-active");
+                    links.forEach((link) => {
+                        const selected = link.dataset.target === active.id;
+                        link.setAttribute("aria-current", selected ? "true" : "false");
+                    });
+                    updateControls();
+                    if (options.scroll) {
+                        active.scrollIntoView({
+                            behavior: window.matchMedia("(prefers-reduced-motion: reduce)").matches
+                                ? "auto"
+                                : "smooth",
+                            block: "start",
+                        });
+                    }
+                    if (options.announce) {
+                        announce(
+                            `${active.querySelector("h1, h2")?.textContent || "Match"} selected`,
+                        );
+                    }
+                };
+
+                const setOverview = (enabled) => {
+                    document.body.classList.toggle("overview-mode", enabled);
+                    overview?.setAttribute("aria-pressed", enabled ? "true" : "false");
+                    const label = overview?.querySelector(".control-label");
+                    if (label) label.textContent = enabled ? "Focus view" : "Overview";
+                    announce(enabled ? "Overview opened" : "Focus view opened");
+                };
+
+                const move = (offset) => {
+                    const visible = visibleGroups();
+                    if (!visible.length) return;
+                    const index = Math.max(0, visible.indexOf(active));
+                    const target = visible[Math.min(visible.length - 1, Math.max(0, index + offset))];
+                    setOverview(false);
+                    setActive(target, { announce: true });
+                };
+
+                const setReviewed = (group, reviewed) => {
+                    if (!group) return;
+                    group.dataset.reviewed = reviewed ? "true" : "false";
+                    const button = group.querySelector("[data-review-button]");
+                    button?.setAttribute("aria-pressed", reviewed ? "true" : "false");
+                    const label = button?.querySelector("[data-review-label]");
+                    if (label) label.textContent = reviewed ? "Reviewed" : "Mark reviewed";
+                    const link = links.find((item) => item.dataset.target === group.id);
+                    link?.classList.toggle("is-reviewed", reviewed);
+                    updateProgress();
+                    announce(reviewed ? "Marked reviewed" : "Review mark removed");
+                };
+
+                const applyFilter = () => {
+                    const scope = filters.find((filter) => filter.checked)?.value || "all";
+                    groups.forEach((group) => {
+                        group.classList.toggle(
+                            "is-filtered",
+                            scope !== "all" && group.dataset.scope !== scope,
+                        );
+                    });
+                    links.forEach((link) => {
+                        link.classList.toggle(
+                            "is-filtered",
+                            scope !== "all" && link.dataset.scope !== scope,
+                        );
+                    });
+                    const visible = visibleGroups();
+                    empty?.classList.toggle("is-visible", groups.length > 0 && visible.length === 0);
+                    if (!visible.includes(active)) active = visible[0] || null;
+                    if (active) setActive(active);
+                    else updateControls();
+                    announce(`${visible.length} matches shown`);
+                };
+
+                links.forEach((link) => {
+                    link.addEventListener("click", () => {
+                        setOverview(false);
+                        setActive(document.getElementById(link.dataset.target), {
+                            scroll: true,
+                            announce: true,
+                        });
+                    });
+                });
+
+                groups.forEach((group) => {
+                    group.querySelector("[data-review-button]")?.addEventListener("click", () => {
+                        setActive(group);
+                        setReviewed(group, group.dataset.reviewed !== "true");
+                    });
+                });
+
+                filters.forEach((filter) => filter.addEventListener("change", applyFilter));
+                previous?.addEventListener("click", () => move(-1));
+                next?.addEventListener("click", () => move(1));
+                overview?.addEventListener("click", () => {
+                    setOverview(!document.body.classList.contains("overview-mode"));
+                });
+
+                document.addEventListener("keydown", (event) => {
+                    if (
+                        event.metaKey ||
+                        event.ctrlKey ||
+                        event.altKey ||
+                        event.target instanceof HTMLInputElement ||
+                        event.target instanceof HTMLTextAreaElement ||
+                        event.target instanceof HTMLSelectElement ||
+                        event.target instanceof HTMLButtonElement ||
+                        event.target instanceof HTMLAnchorElement ||
+                        event.target?.isContentEditable
+                    ) {
+                        return;
+                    }
+                    const key = event.key.toLowerCase();
+                    if (key === "j") move(1);
+                    if (key === "k") move(-1);
+                    if (key === "e" && active) {
+                        setReviewed(active, active.dataset.reviewed !== "true");
+                    }
+                    if (key === "o") {
+                        setOverview(!document.body.classList.contains("overview-mode"));
+                    }
+                });
+
+                applyFilter();
+                updateProgress();
+            })();
+        </script>
     </body>
 </html>

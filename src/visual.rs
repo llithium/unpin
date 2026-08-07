@@ -159,6 +159,12 @@ mod tests {
         assert!(html.contains("max-height: min(60vh, 620px)"));
         assert!(!html.contains("width: 100%; height: auto"));
         assert!(!html.contains("object-fit"));
+        assert!(html.contains("class=\"app-shell\""));
+        assert!(html.contains("id=\"overview-toggle\""));
+        assert!(html.contains("data-review-button"));
+        assert!(html.contains("document.addEventListener(\"keydown\""));
+        assert!(html.contains("event.target instanceof HTMLButtonElement"));
+        assert!(html.contains("prefers-reduced-motion: reduce"));
     }
 
     #[test]
@@ -186,7 +192,7 @@ mod tests {
         // The badge sits beside the heading inside the wrapper that keeps
         // .match-heading a two-child flexbox.
         assert!(multi.contains("class=\"match-title\""));
-        assert!(multi.contains("<h2>Exact group 1</h2>"));
+        assert!(multi.contains("<h1>Exact group 1</h1>"));
     }
 
     /// The single-board `sample_report` plus a second board and a cross-board
@@ -207,14 +213,14 @@ mod tests {
     fn filter_tabs_appear_only_for_multi_board_scans() {
         let single = render_html(&sample_report());
         assert!(!single.contains("class=\"filters\""));
-        assert!(!single.contains("scope-filter"));
+        assert!(!single.contains("id=\"filter-all\""));
 
         let multi = render_html(&multi_board_report());
         assert!(multi.contains("role=\"group\""));
         // One exact group (cross) and one visual candidate (same).
-        assert!(multi.contains("All <span>2</span>"));
-        assert!(multi.contains("Same board <span>1</span>"));
-        assert!(multi.contains("Across boards <span>1</span>"));
+        assert!(multi.contains("for=\"filter-all\">All 2</label>"));
+        assert!(multi.contains("for=\"filter-same\">Same 1</label>"));
+        assert!(multi.contains("for=\"filter-cross\">Cross 1</label>"));
         assert!(multi.contains("id=\"filter-all\""));
         assert!(multi.contains("class=\"filter-input\""));
         assert!(multi.contains("checked"));
@@ -224,55 +230,74 @@ mod tests {
     fn match_sections_carry_their_scope_class() {
         let multi = render_html(&multi_board_report());
 
-        assert!(multi.contains("<section class=\"match cross-board\">"));
-        assert!(multi.contains("<section class=\"match same-board\">"));
+        assert!(multi.contains("class=\"match cross-board\""));
+        assert!(multi.contains("class=\"match same-board\""));
+        assert!(multi.contains("data-scope=\"cross-board\""));
+        assert!(multi.contains("data-scope=\"same-board\""));
     }
 
     #[test]
-    fn filter_inputs_precede_every_match_section() {
+    fn filters_and_match_sections_have_stable_dom_ids() {
         let multi = render_html(&multi_board_report());
         let first_input = multi.find("id=\"filter-all\"").unwrap();
-        let first_match = multi.find("<section class=\"match").unwrap();
+        let first_match = multi.find("id=\"exact-1\"").unwrap();
 
-        // The filtering CSS uses `~`, which only reaches later siblings, so this
-        // ordering is load-bearing rather than cosmetic.
+        // Navigation is emitted before content, and both sides expose stable
+        // identifiers for the client-side controller.
         assert!(
             first_input < first_match,
-            "inputs must come before the matches they filter"
+            "filter controls must precede the controlled workspace"
         );
+        assert!(multi.contains("data-target=\"exact-1\""));
     }
 
     #[test]
     fn an_empty_scope_explains_itself() {
-        // Both scopes present, so neither tab needs an empty state. Match the
-        // div, not the bare class name, which also occurs in the stylesheet.
+        // A single live region handles any empty filtered scope.
         let both = render_html(&multi_board_report());
-        assert!(!both.contains("<div class=\"empty filter-empty"));
+        assert!(both.contains("id=\"filter-empty\" role=\"status\""));
 
         // Make every match cross-board; the same-board tab then has nothing.
         let mut report = multi_board_report();
         report.visual_candidates[0].scope = MatchScope::CrossBoard;
         let cross_only = render_html(&report);
 
-        assert!(cross_only.contains("<div class=\"empty filter-empty same-board\">"));
-        assert!(!cross_only.contains("<div class=\"empty filter-empty cross-board"));
-        assert!(cross_only.contains("No duplicates within a single board."));
-        assert!(cross_only.contains("Same board <span>0</span>"));
+        assert!(cross_only.contains("for=\"filter-same\">Same 0</label>"));
+        assert!(cross_only.contains("for=\"filter-cross\">Cross 2</label>"));
+        assert!(cross_only.contains("No matches in this board scope."));
+        assert!(cross_only.contains("visible.length === 0"));
     }
 
     #[test]
     fn filtering_never_hides_the_details_or_footer() {
         let multi = render_html(&multi_board_report());
 
-        // Only `.match` and `.filter-empty` may be hidden by a checked filter.
-        for rule in [
-            "#filter-same:checked ~ .match.cross-board",
-            "#filter-cross:checked ~ .match.same-board",
-        ] {
-            assert!(multi.contains(rule), "{rule}");
-        }
-        assert!(!multi.contains(":checked ~ details"));
-        assert!(!multi.contains(":checked ~ footer"));
+        assert!(multi.contains("group.classList.toggle("));
+        assert!(multi.contains("\"is-filtered\""));
+        assert!(multi.contains("scope !== \"all\" && group.dataset.scope !== scope"));
+        assert!(!multi.contains("details.is-filtered"));
+        assert!(!multi.contains("footer.is-filtered"));
+        // Print explicitly restores matches hidden by focus mode or filtering.
+        assert!(multi.contains(".match.is-filtered"));
+        assert!(multi.contains("display: block !important"));
+    }
+
+    #[test]
+    fn review_workspace_has_session_only_navigation_hooks() {
+        let html = render_html(&multi_board_report());
+
+        assert!(html.contains("data-reviewed=\"false\""));
+        assert!(html.contains("id=\"previous-match\""));
+        assert!(html.contains("id=\"next-match\""));
+        assert!(html.contains("if (key === \"j\") move(1)"));
+        assert!(html.contains("if (key === \"k\") move(-1)"));
+        assert!(html.contains("if (key === \"e\" && active)"));
+        assert!(html.contains("if (key === \"o\")"));
+        assert!(html.contains("setReviewed(active"));
+        assert!(html.contains("setActive(target, { announce: true })"));
+        assert!(!html.contains("setActive(target, { scroll: true"));
+        assert!(!html.contains("localStorage"));
+        assert!(!html.contains("sessionStorage"));
     }
 
     #[test]
