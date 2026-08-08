@@ -113,6 +113,7 @@ async fn scans_paginated_board_and_sections_end_to_end() {
             "board_id": "board-1",
             "field_set_key": "react_grid_pin",
             "prepend": false,
+            "page_size": 250,
             "bookmarks": null
         }),
         page(
@@ -135,6 +136,7 @@ async fn scans_paginated_board_and_sections_end_to_end() {
             "board_id": "board-1",
             "field_set_key": "react_grid_pin",
             "prepend": false,
+            "page_size": 250,
             "bookmarks": ["next-page"]
         }),
         page(
@@ -160,7 +162,7 @@ async fn scans_paginated_board_and_sections_end_to_end() {
     mount_resource(
         &server,
         "BoardSectionPins",
-        json!({"section_id": "section-1", "bookmarks": null}),
+        json!({"section_id": "section-1", "page_size": 250, "bookmarks": null}),
         page(
             json!([
                 {
@@ -293,6 +295,7 @@ async fn mount_board_feed(server: &MockServer, board_id: &str, pin_id: &str, ima
             "board_id": board_id,
             "field_set_key": "react_grid_pin",
             "prepend": false,
+            "page_size": 250,
             "bookmarks": null
         }),
         page(
@@ -327,7 +330,7 @@ async fn profile_scans_include_unorganized_pins() {
         json!({
             "username": "alice",
             "field_set_key": "grid_item",
-            "page_size": 25,
+            "page_size": 250,
             "bookmarks": null
         }),
         page(
@@ -611,6 +614,7 @@ async fn scans_selected_profile_boards_as_one_pooled_report() {
                 "board_id": board_id,
                 "field_set_key": "react_grid_pin",
                 "prepend": false,
+                "page_size": 250,
                 "bookmarks": null
             }),
             page(
@@ -819,6 +823,7 @@ async fn retries_throttled_pinterest_requests_using_retry_after() {
             "board_id": "board-1",
             "field_set_key": "react_grid_pin",
             "prepend": false,
+            "page_size": 250,
             "bookmarks": null
         }),
         page(json!([]), "-end-"),
@@ -842,6 +847,125 @@ async fn retries_throttled_pinterest_requests_using_retry_after() {
         attempt: 2,
         delay: std::time::Duration::ZERO,
     }));
+}
+
+/// `page_size` is an undocumented option that Pinterest refuses outright rather
+/// than capping, so a rejected page must cost round trips, not the whole scan.
+#[tokio::test]
+async fn an_unsupported_page_size_falls_back_to_the_default_page() {
+    let server = MockServer::start().await;
+    mount_resource(
+        &server,
+        "Board",
+        json!({
+            "slug": "ideas",
+            "username": "alice",
+            "field_set_key": "detailed"
+        }),
+        json!({
+            "resource_response": { "data": {
+                "id": "board-1",
+                "name": "Ideas",
+                "pin_count": 1,
+                "section_count": 0
+            }}
+        }),
+    )
+    .await;
+
+    // The sized request is refused the way Pinterest refuses an oversized page.
+    Mock::given(method("GET"))
+        .and(path("/resource/BoardFeedResource/get/"))
+        .and(query_param(
+            "data",
+            request_data(json!({
+                "board_id": "board-1",
+                "field_set_key": "react_grid_pin",
+                "prepend": false,
+                "page_size": 250,
+                "bookmarks": null
+            })),
+        ))
+        .respond_with(ResponseTemplate::new(400))
+        .expect(1)
+        .mount(&server)
+        .await;
+    // Retrying without the option must succeed, and must not be sent twice.
+    Mock::given(method("GET"))
+        .and(path("/resource/BoardFeedResource/get/"))
+        .and(query_param(
+            "data",
+            request_data(json!({
+                "board_id": "board-1",
+                "field_set_key": "react_grid_pin",
+                "prepend": false,
+                "bookmarks": null
+            })),
+        ))
+        .respond_with(ResponseTemplate::new(200).set_body_json(page(
+            json!([{
+                "id": "201",
+                "images": {"orig": {"url": "https://example.com/a.jpg"}}
+            }]),
+            "-end-",
+        )))
+        .expect(1)
+        .mount(&server)
+        .await;
+
+    let target = BoardTarget::parse("https://www.pinterest.com/alice/ideas/").unwrap();
+    let client =
+        PinterestClient::with_api_root(target.root.clone(), Url::parse(&server.uri()).unwrap())
+            .unwrap();
+    let result = client.fetch_board(&target).await.unwrap();
+
+    assert_eq!(result.pins_found, 1);
+    assert_eq!(result.pins[0].id, "201");
+}
+
+/// A rejection that the fallback cannot fix must still surface as an error
+/// rather than being retried forever.
+#[tokio::test]
+async fn a_bad_request_without_a_page_size_is_still_an_error() {
+    let server = MockServer::start().await;
+    mount_resource(
+        &server,
+        "Board",
+        json!({
+            "slug": "ideas",
+            "username": "alice",
+            "field_set_key": "detailed"
+        }),
+        json!({
+            "resource_response": { "data": {
+                "id": "board-1",
+                "name": "Ideas",
+                "pin_count": 1,
+                "section_count": 0
+            }}
+        }),
+    )
+    .await;
+    Mock::given(method("GET"))
+        .and(path("/resource/BoardFeedResource/get/"))
+        .respond_with(ResponseTemplate::new(400))
+        // Once with the page size, once without, and then it gives up.
+        .expect(2)
+        .mount(&server)
+        .await;
+
+    let target = BoardTarget::parse("https://www.pinterest.com/alice/ideas/").unwrap();
+    let client =
+        PinterestClient::with_api_root(target.root.clone(), Url::parse(&server.uri()).unwrap())
+            .unwrap();
+
+    assert!(matches!(
+        client.fetch_board(&target).await,
+        Err(PinterestError::Http {
+            resource: "BoardFeed",
+            status: reqwest::StatusCode::BAD_REQUEST,
+        })
+    ));
 }
 
 #[tokio::test]

@@ -25,7 +25,10 @@ struct ResolvedSources {
     prefetched_unorganized: Option<Result<crate::pinterest::BoardPins, PinterestError>>,
 }
 
-const BOARD_FETCH_CONCURRENCY: usize = 3;
+/// Board feeds paginate sequentially, so overlapping whole boards is the only
+/// way to shorten a multi-board scan. Kept modest because each board may also be
+/// fanning out across its own sections.
+const BOARD_FETCH_CONCURRENCY: usize = 6;
 
 #[derive(Debug, Error)]
 pub enum AppError {
