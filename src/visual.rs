@@ -227,6 +227,23 @@ mod tests {
         assert!(multi.contains("checked"));
     }
 
+    /// Focus view renders whichever match carries `is-active`, so exactly one
+    /// element may hold it. Filtering the active match out used to reassign the
+    /// tracking variable before clearing the class, stranding it on the hidden
+    /// match; returning to "All" then drew that stale match below the real one.
+    #[test]
+    fn filtering_away_the_active_match_clears_it_before_reassigning() {
+        let multi = render_html(&multi_board_report());
+
+        assert!(multi.contains(".js body:not(.overview-mode) .match:not(.is-active)"));
+        assert!(
+            !multi.contains("if (!visible.includes(active)) active = visible[0]"),
+            "reassigning first hands setActive the replacement, so the outgoing \
+             match keeps is-active and reappears alongside the active one"
+        );
+        assert!(multi.contains("active?.classList.remove(\"is-active\");\n                        active = visible[0] || null;"));
+    }
+
     #[test]
     fn match_sections_carry_their_scope_class() {
         let multi = render_html(&multi_board_report());
