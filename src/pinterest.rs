@@ -1,6 +1,7 @@
 use std::collections::HashSet;
 use std::time::Duration;
 
+use futures_util::stream::{self, StreamExt};
 use percent_encoding::percent_decode_str;
 use rand::Rng;
 use reqwest::header::{HeaderMap, HeaderName, HeaderValue};
@@ -15,6 +16,18 @@ use crate::progress::{NoProgress, ProgressEvent, ProgressSink};
 const MAX_PAGES: usize = 10_000;
 const DEFAULT_ROOT: &str = "https://www.pinterest.com/";
 const BOARD_PAGE_SIZE: usize = 25;
+/// Pin feeds default to 25 results per page, and pagination is strictly
+/// sequential because each page is addressed by the previous page's bookmark.
+/// Asking for larger pages is the only way to shorten that chain.
+///
+/// The option is undocumented, and Pinterest refuses values it dislikes with
+/// HTTP 400 rather than capping them: 250 is served, 300 is not. That is a hard
+/// edge to sit on, so `paginate` retries once without the option when a request
+/// is refused, giving the round trips back rather than failing the scan.
+const FEED_PAGE_SIZE: usize = 250;
+/// Sections belong to one board that is already sharing the board-level
+/// concurrency budget, so this stays well below it.
+const SECTION_FETCH_CONCURRENCY: usize = 4;
 const MAX_REQUEST_ATTEMPTS: usize = 4;
 const RETRY_BASE_DELAY: Duration = Duration::from_millis(250);
 const MAX_RETRY_DELAY: Duration = Duration::from_secs(30);
@@ -517,7 +530,7 @@ impl PinterestClient {
                 json!({
                     "username": target.username,
                     "field_set_key": "grid_item",
-                    "page_size": BOARD_PAGE_SIZE,
+                    "page_size": FEED_PAGE_SIZE,
                     "bookmarks": null
                 }),
                 progress,
@@ -552,6 +565,7 @@ impl PinterestClient {
                     "board_id": board.id,
                     "field_set_key": "react_grid_pin",
                     "prepend": false,
+                    "page_size": FEED_PAGE_SIZE,
                     "bookmarks": null
                 }),
                 progress,
@@ -563,30 +577,51 @@ impl PinterestClient {
             let sections = self
                 .paginate("BoardSections", json!({ "board_id": board.id }), progress)
                 .await?;
+            let mut section_ids = Vec::new();
+            for section in sections {
+                match value_string(section.get("id")) {
+                    Some(id) => section_ids.push(id),
+                    None => {
+                        warnings.push("Pinterest returned a board section without an ID".into())
+                    }
+                }
+            }
+            // Announced after filtering so the total matches the number of
+            // sections that will actually report progress.
             progress.emit(ProgressEvent::SectionsStarted {
-                total: sections.len(),
+                total: section_ids.len(),
             });
-            let section_total = sections.len();
-            for (section_index, section) in sections.into_iter().enumerate() {
-                progress.emit(ProgressEvent::SectionStarted {
-                    current: section_index + 1,
-                    total: section_total,
-                });
-                let Some(section_id) = value_string(section.get("id")) else {
-                    warnings.push("Pinterest returned a board section without an ID".into());
-                    continue;
-                };
-                raw_pins.extend(
-                    self.paginate(
-                        "BoardSectionPins",
-                        json!({
-                            "section_id": section_id,
-                            "bookmarks": null
-                        }),
-                        progress,
-                    )
-                    .await?,
-                );
+
+            // Each section is an independent paginated feed, so they overlap
+            // rather than running end to end. Results are reordered back into
+            // section order below to keep a scan's pin order deterministic.
+            let section_total = section_ids.len();
+            let section_fetches = stream::iter(section_ids.into_iter().enumerate().map(
+                |(index, id)| async move {
+                    progress.emit(ProgressEvent::SectionStarted {
+                        current: index + 1,
+                        total: section_total,
+                    });
+                    let fetched = self
+                        .paginate(
+                            "BoardSectionPins",
+                            json!({
+                                "section_id": id,
+                                "page_size": FEED_PAGE_SIZE,
+                                "bookmarks": null
+                            }),
+                            progress,
+                        )
+                        .await;
+                    (index, fetched)
+                },
+            ))
+            .buffer_unordered(SECTION_FETCH_CONCURRENCY);
+            futures_util::pin_mut!(section_fetches);
+            let mut fetched_sections = section_fetches.collect::<Vec<_>>().await;
+            fetched_sections.sort_by_key(|(index, _)| *index);
+            for (_, fetched) in fetched_sections {
+                raw_pins.extend(fetched?);
             }
         }
 
@@ -656,15 +691,30 @@ impl PinterestClient {
         let mut seen_bookmarks = HashSet::new();
 
         for page_index in 0..MAX_PAGES {
-            let response = self.call(resource, options.clone(), progress).await?;
-            all_results.extend(response_results(&response, resource)?);
+            let response = match self.call(resource, options.clone(), progress).await {
+                Ok(response) => response,
+                // An oversized `page_size` is refused outright, and the value
+                // that is acceptable today is not promised for tomorrow. Drop
+                // the option and take Pinterest's default page rather than
+                // losing the scan; `remove_page_size` reporting false on the
+                // second pass stops this from looping.
+                Err(error) => {
+                    if !is_bad_request(&error) || !remove_page_size(&mut options) {
+                        return Err(error);
+                    }
+                    self.call(resource, options.clone(), progress).await?
+                }
+            };
+            // Read the bookmark before the results are moved out of the response.
+            let bookmark = response_bookmark(&response);
+            all_results.extend(response_results(response, resource)?);
             progress.emit(ProgressEvent::PageFetched {
                 resource,
                 page: page_index + 1,
                 items: all_results.len(),
             });
 
-            let Some(bookmark) = response_bookmark(&response) else {
+            let Some(bookmark) = bookmark else {
                 return Ok(all_results);
             };
             if bookmark == "-end-" || bookmark.starts_with("Y2JOb25lO") {
@@ -768,6 +818,20 @@ fn retry_delay(attempt: usize, retry_after: Option<&HeaderValue>) -> Duration {
         .map(Duration::from_secs)
         .unwrap_or_else(|| RETRY_BASE_DELAY.saturating_mul(1_u32 << attempt.min(16)))
         .min(MAX_RETRY_DELAY)
+}
+
+fn is_bad_request(error: &PinterestError) -> bool {
+    matches!(
+        error,
+        PinterestError::Http { status, .. } if *status == reqwest::StatusCode::BAD_REQUEST
+    )
+}
+
+/// Removes the `page_size` option, reporting whether there was one to remove.
+fn remove_page_size(options: &mut Value) -> bool {
+    options
+        .as_object_mut()
+        .is_some_and(|options| options.remove("page_size").is_some())
 }
 
 fn is_retryable_status(status: reqwest::StatusCode) -> bool {
@@ -895,21 +959,31 @@ fn response_data<'a>(
         .ok_or_else(|| invalid_response(resource, "resource_response.data is missing"))
 }
 
+/// Takes the response by value so a page of results is moved out rather than
+/// deep-cloned; a single feed page carries a lot of JSON that is thrown away
+/// immediately afterwards.
 fn response_results(
-    response: &Value,
+    mut response: Value,
     resource: &'static str,
 ) -> Result<Vec<Value>, PinterestError> {
-    let data = response_data(response, resource)?;
-    if let Some(results) = data.as_array() {
-        return Ok(results.clone());
+    let data = response
+        .pointer_mut("/resource_response/data")
+        .map(Value::take)
+        .ok_or_else(|| invalid_response(resource, "resource_response.data is missing"))?;
+    match data {
+        Value::Array(results) => Ok(results),
+        Value::Object(mut data) => match data.get_mut("results").map(Value::take) {
+            Some(Value::Array(results)) => Ok(results),
+            _ => Err(invalid_response(
+                resource,
+                "resource_response.data was not a result list",
+            )),
+        },
+        _ => Err(invalid_response(
+            resource,
+            "resource_response.data was not a result list",
+        )),
     }
-    if let Some(results) = data.get("results").and_then(Value::as_array) {
-        return Ok(results.clone());
-    }
-    Err(invalid_response(
-        resource,
-        "resource_response.data was not a result list",
-    ))
 }
 
 fn response_bookmark(response: &Value) -> Option<String> {

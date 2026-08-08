@@ -7,7 +7,7 @@ use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime};
 
 use futures_util::stream::{self, StreamExt, TryStreamExt};
-use image::imageops::FilterType;
+use image::imageops::{self, FilterType};
 use image::{DynamicImage, GenericImageView, ImageReader};
 use reqwest::Client;
 use serde::{Deserialize, Serialize};
@@ -21,13 +21,24 @@ use crate::report::{
     DuplicateGroup, MatchScope, Recommendation, ReportItem, VisualCandidate, rank_tuple,
 };
 
-const DOWNLOAD_CONCURRENCY: usize = 8;
+/// In-flight image buffers are bounded by this plus [`cpu_concurrency`]. Typical
+/// Pinterest originals are a few megabytes, so the practical ceiling is modest,
+/// but [`MAX_IMAGE_BYTES`] means a pathological board could hold much more.
+const DOWNLOAD_CONCURRENCY: usize = 24;
 const MAX_IMAGE_BYTES: u64 = 100 * 1024 * 1024;
 const STRUCTURAL_SIGNATURE_SIZE: u32 = 64;
+const DIFFERENCE_HASH_WIDTH: u32 = 9;
+const DIFFERENCE_HASH_HEIGHT: u32 = 8;
 const MIN_STRUCTURAL_SIMILARITY: f64 = 0.97;
-const CACHE_FORMAT_VERSION: u8 = 1;
+const CACHE_FORMAT_VERSION: u8 = 2;
 const CACHE_MAX_AGE: Duration = Duration::from_secs(30 * 24 * 60 * 60);
-const CACHE_ENTRY_SUBDIRECTORY: &str = "fingerprints-v1";
+const CACHE_ENTRY_SUBDIRECTORY: &str = "fingerprints-v2";
+
+/// Decoding and downscaling are CPU-bound and run on the blocking pool, so the
+/// number in flight is tied to the machine rather than to the network limit.
+fn cpu_concurrency() -> usize {
+    std::thread::available_parallelism().map_or(2, |count| count.get().max(2))
+}
 
 #[derive(Debug)]
 pub struct AnalysisResult {
@@ -64,7 +75,25 @@ struct ImageFingerprint {
     byte_size: u64,
     sha256: String,
     difference_hash: u64,
+    /// Hex rather than a JSON number array: this is 4 KiB of bytes, and parsing
+    /// it back as thousands of decimal integers dominated warm-cache runs.
+    #[serde(with = "hex_bytes")]
     structural_signature: Box<[u8]>,
+}
+
+mod hex_bytes {
+    use serde::{Deserialize, Deserializer, Serializer};
+
+    pub fn serialize<S: Serializer>(bytes: &[u8], serializer: S) -> Result<S::Ok, S::Error> {
+        serializer.serialize_str(&hex::encode(bytes))
+    }
+
+    pub fn deserialize<'de, D: Deserializer<'de>>(deserializer: D) -> Result<Box<[u8]>, D::Error> {
+        let encoded = String::deserialize(deserializer)?;
+        hex::decode(&encoded)
+            .map(Vec::into_boxed_slice)
+            .map_err(serde::de::Error::custom)
+    }
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -86,8 +115,22 @@ impl FingerprintCache {
         let cache = Self {
             directory: root_directory.join(CACHE_ENTRY_SUBDIRECTORY),
         };
-        cache.prune_expired();
+        cache.prune_expired_in_background();
         cache
+    }
+
+    /// Pruning stats every entry in the directory, which is pure housekeeping
+    /// and has no business delaying the scan behind it.
+    fn prune_expired_in_background(&self) {
+        match tokio::runtime::Handle::try_current() {
+            Ok(handle) => {
+                let cache = self.clone();
+                handle.spawn_blocking(move || cache.prune_expired());
+            }
+            // No runtime to hand it to, so there is nothing to get out of the
+            // way of; prune inline instead of silently skipping it.
+            Err(_) => self.prune_expired(),
+        }
     }
 
     fn entry_path(&self, media_url: &str) -> PathBuf {
@@ -265,65 +308,78 @@ pub(crate) async fn analyze_pins_with_progress_and_cache(
             .or_default()
             .push(pin);
     }
-    let download_total = pins_by_media_url.len();
+    let entries = pins_by_media_url.into_iter().collect::<Vec<_>>();
+    let download_total = entries.len();
     progress.emit(ProgressEvent::ImagesStarted {
         total: download_total,
     });
 
-    let downloads = stream::iter(pins_by_media_url.into_iter().map(|(media_url, pins)| {
-        let http = http.clone();
-        let cache = cache.clone();
-        async move {
-            let fingerprint = match cache.as_ref().and_then(|cache| cache.get(&media_url)) {
-                Some(fingerprint) => Ok(fingerprint),
-                None => match download_and_fingerprint(&http, &media_url).await {
-                    Ok(fingerprint) => {
-                        if let Some(cache) = &cache {
-                            cache.put(&media_url, &fingerprint);
-                        }
-                        Ok(fingerprint)
-                    }
-                    Err(reason) => Err(reason),
-                },
-            };
-            match fingerprint {
-                Ok(fingerprint) => Ok(pins
-                    .into_iter()
-                    .map(|pin| AnalyzedImage {
-                        pin_url: pin.pin_url(),
-                        pin_id: pin.id,
-                        board: pin.board,
-                        image_url: media_url.clone(),
-                        width: fingerprint.width,
-                        height: fingerprint.height,
-                        byte_size: fingerprint.byte_size,
-                        sha256: fingerprint.sha256.clone(),
-                        difference_hash: fingerprint.difference_hash,
-                        structural_signature: fingerprint.structural_signature.clone(),
-                    })
-                    .collect::<Vec<_>>()),
-                Err(reason) => Err(pins
-                    .into_iter()
-                    .map(|pin| SkippedPin {
-                        pin_url: Some(pin.pin_url()),
-                        pin_id: Some(pin.id),
-                        reason: reason.clone(),
-                        board: pin.board,
-                    })
-                    .collect::<Vec<_>>()),
-            }
-        }
-    }))
-    .buffer_unordered(DOWNLOAD_CONCURRENCY);
-    futures_util::pin_mut!(downloads);
-
     let mut images = Vec::new();
     let mut skipped = Vec::new();
     let mut completed = 0;
-    while let Some(result) = downloads.next().await {
-        match result {
-            Ok(mut downloaded_images) => images.append(&mut downloaded_images),
-            Err(mut download_skips) => skipped.append(&mut download_skips),
+
+    // Cache hits are resolved up front in one blocking batch. Doing them inside
+    // the download stream put thousands of small synchronous reads on the async
+    // runtime and made a fully cached run wait behind the network limit.
+    let hits = cached_fingerprints(cache.as_ref(), &entries).await;
+    let mut misses = Vec::new();
+    for ((media_url, pins), hit) in entries.into_iter().zip(hits) {
+        match hit {
+            Some(fingerprint) => {
+                images.extend(analyzed_images(&media_url, pins, &fingerprint));
+                completed += 1;
+                progress.emit(ProgressEvent::ImageFinished {
+                    completed,
+                    total: download_total,
+                });
+            }
+            None => misses.push((media_url, pins)),
+        }
+    }
+
+    // Two stages so that the network limit and the CPU limit are independent:
+    // decoding an image no longer occupies a slot that could be pulling bytes.
+    let fingerprints = stream::iter(misses.into_iter().map(|(media_url, pins)| {
+        let http = http.clone();
+        async move {
+            let bytes = download_bytes(&http, &media_url).await;
+            (media_url, pins, bytes)
+        }
+    }))
+    .buffer_unordered(DOWNLOAD_CONCURRENCY)
+    .map(|(media_url, pins, bytes)| {
+        let cache = cache.clone();
+        async move {
+            let fingerprint = match bytes {
+                Ok(bytes) => {
+                    let cached_url = media_url.clone();
+                    tokio::task::spawn_blocking(move || {
+                        let fingerprint = fingerprint_image(&bytes)?;
+                        if let Some(cache) = &cache {
+                            cache.put(&cached_url, &fingerprint);
+                        }
+                        Ok(fingerprint)
+                    })
+                    .await
+                    .unwrap_or_else(|_| Err("image analysis did not finish".to_owned()))
+                }
+                Err(reason) => Err(reason),
+            };
+            (media_url, pins, fingerprint)
+        }
+    })
+    .buffer_unordered(cpu_concurrency());
+    futures_util::pin_mut!(fingerprints);
+
+    while let Some((media_url, pins, fingerprint)) = fingerprints.next().await {
+        match fingerprint {
+            Ok(fingerprint) => images.extend(analyzed_images(&media_url, pins, &fingerprint)),
+            Err(reason) => skipped.extend(pins.into_iter().map(|pin| SkippedPin {
+                pin_url: Some(pin.pin_url()),
+                pin_id: Some(pin.id),
+                reason: reason.clone(),
+                board: pin.board,
+            })),
         }
         completed += 1;
         progress.emit(ProgressEvent::ImageFinished {
@@ -349,10 +405,72 @@ pub(crate) async fn analyze_pins_with_progress_and_cache(
     })
 }
 
-async fn download_and_fingerprint(
-    http: &Client,
+/// Reads every entry's cached fingerprint in one blocking batch, returning one
+/// slot per entry. A cache that cannot be read at all is treated as all misses.
+async fn cached_fingerprints(
+    cache: Option<&FingerprintCache>,
+    entries: &[(String, Vec<Pin>)],
+) -> Vec<Option<ImageFingerprint>> {
+    let Some(cache) = cache.cloned() else {
+        return vec![None; entries.len()];
+    };
+    let urls = entries
+        .iter()
+        .map(|(media_url, _)| media_url.clone())
+        .collect::<Vec<_>>();
+    let total = urls.len();
+    tokio::task::spawn_blocking(move || {
+        urls.iter()
+            .map(|media_url| cache.get(media_url))
+            .collect::<Vec<_>>()
+    })
+    .await
+    .unwrap_or_else(|_| vec![None; total])
+}
+
+fn analyzed_images(
     media_url: &str,
-) -> Result<ImageFingerprint, String> {
+    pins: Vec<Pin>,
+    fingerprint: &ImageFingerprint,
+) -> Vec<AnalyzedImage> {
+    pins.into_iter()
+        .map(|pin| AnalyzedImage {
+            pin_url: pin.pin_url(),
+            pin_id: pin.id,
+            board: pin.board,
+            image_url: media_url.to_owned(),
+            width: fingerprint.width,
+            height: fingerprint.height,
+            byte_size: fingerprint.byte_size,
+            sha256: fingerprint.sha256.clone(),
+            difference_hash: fingerprint.difference_hash,
+            structural_signature: fingerprint.structural_signature.clone(),
+        })
+        .collect()
+}
+
+/// Decodes and hashes downloaded bytes. Runs on the blocking pool.
+fn fingerprint_image(bytes: &[u8]) -> Result<ImageFingerprint, String> {
+    let image = decode_image(bytes)?;
+    let (width, height) = image.dimensions();
+    if width == 0 || height == 0 {
+        return Err("decoded image has zero width or height".into());
+    }
+
+    let sha256 = hex::encode(Sha256::digest(bytes));
+    let (difference_hash, structural_signature) = fingerprint_hashes(&image);
+
+    Ok(ImageFingerprint {
+        width,
+        height,
+        byte_size: bytes.len() as u64,
+        sha256,
+        difference_hash,
+        structural_signature,
+    })
+}
+
+async fn download_bytes(http: &Client, media_url: &str) -> Result<Vec<u8>, String> {
     let response = http
         .get(media_url)
         .send()
@@ -392,24 +510,7 @@ async fn download_and_fingerprint(
         bytes.extend_from_slice(&chunk);
     }
 
-    let image = decode_image(&bytes)?;
-    let (width, height) = image.dimensions();
-    if width == 0 || height == 0 {
-        return Err("decoded image has zero width or height".into());
-    }
-
-    let sha256 = hex::encode(Sha256::digest(&bytes));
-    let difference_hash = difference_hash(&image);
-    let structural_signature = structural_signature(&image);
-
-    Ok(ImageFingerprint {
-        width,
-        height,
-        byte_size: bytes.len() as u64,
-        sha256,
-        difference_hash,
-        structural_signature,
-    })
+    Ok(bytes)
 }
 
 fn decode_image(bytes: &[u8]) -> Result<DynamicImage, String> {
@@ -433,33 +534,40 @@ fn concise_reqwest_error(error: &reqwest::Error) -> &'static str {
     }
 }
 
-fn difference_hash(image: &DynamicImage) -> u64 {
-    let grayscale = image.resize_exact(9, 8, FilterType::Triangle).into_luma8();
+/// Derives both hashes from a single full-resolution downscale.
+///
+/// Grayscale conversion comes first because only luminance is ever used, and
+/// resizing one channel instead of three or four is where most of the saving
+/// comes from. The difference-hash grid is then taken off the 64×64 signature
+/// rather than the original, so the second downscale touches four thousand
+/// pixels instead of several million.
+fn fingerprint_hashes(image: &DynamicImage) -> (u64, Box<[u8]>) {
+    let luminance = image.to_luma8();
+    let signature = imageops::resize(
+        &luminance,
+        STRUCTURAL_SIGNATURE_SIZE,
+        STRUCTURAL_SIGNATURE_SIZE,
+        FilterType::Triangle,
+    );
+    let grid = imageops::resize(
+        &signature,
+        DIFFERENCE_HASH_WIDTH,
+        DIFFERENCE_HASH_HEIGHT,
+        FilterType::Triangle,
+    );
+
     let mut hash = 0_u64;
     let mut bit = 0_u32;
-
-    for y in 0..8 {
-        for x in 0..8 {
-            if grayscale.get_pixel(x, y)[0] > grayscale.get_pixel(x + 1, y)[0] {
+    for y in 0..DIFFERENCE_HASH_HEIGHT {
+        for x in 0..DIFFERENCE_HASH_WIDTH - 1 {
+            if grid.get_pixel(x, y)[0] > grid.get_pixel(x + 1, y)[0] {
                 hash |= 1_u64 << bit;
             }
             bit += 1;
         }
     }
 
-    hash
-}
-
-fn structural_signature(image: &DynamicImage) -> Box<[u8]> {
-    image
-        .resize_exact(
-            STRUCTURAL_SIGNATURE_SIZE,
-            STRUCTURAL_SIGNATURE_SIZE,
-            FilterType::Triangle,
-        )
-        .into_luma8()
-        .into_raw()
-        .into_boxed_slice()
+    (hash, signature.into_raw().into_boxed_slice())
 }
 
 fn structural_similarity(left: &[u8], right: &[u8]) -> f64 {
@@ -717,6 +825,27 @@ mod tests {
     }
 
     #[test]
+    fn cached_signatures_are_stored_as_hex_not_a_number_array() {
+        // A real signature is 4 KiB. Written as a JSON number array it costs
+        // roughly four thousand integer parses per cached image, which is the
+        // whole cost of a warm run; keep the compact encoding pinned.
+        let mut fingerprint = fingerprint();
+        fingerprint.structural_signature = vec![0, 15, 16, 255].into_boxed_slice();
+        let encoded = serde_json::to_string(&CachedFingerprint {
+            version: CACHE_FORMAT_VERSION,
+            fingerprint: fingerprint.clone(),
+        })
+        .unwrap();
+
+        assert!(
+            encoded.contains(r#""structural_signature":"000f10ff""#),
+            "{encoded}"
+        );
+        let decoded: CachedFingerprint = serde_json::from_str(&encoded).unwrap();
+        assert_eq!(decoded.fingerprint, fingerprint);
+    }
+
+    #[test]
     fn fingerprint_cache_round_trips_without_exposing_the_url() {
         let directory = tempfile::tempdir().unwrap();
         let cache = FingerprintCache::new(directory.path().to_path_buf());
@@ -918,7 +1047,7 @@ mod tests {
             image::Rgb([(x * 2) as u8, 0, 0])
         }));
         let resized = image.resize_exact(900, 800, FilterType::Nearest);
-        assert_eq!(difference_hash(&image), difference_hash(&resized));
+        assert_eq!(fingerprint_hashes(&image).0, fingerprint_hashes(&resized).0);
     }
 
     #[test]

@@ -1498,7 +1498,14 @@
                     });
                     const visible = visibleGroups();
                     empty?.classList.toggle("is-visible", groups.length > 0 && visible.length === 0);
-                    if (!visible.includes(active)) active = visible[0] || null;
+                    if (!visible.includes(active)) {
+                        // Clear the outgoing match here rather than leaving it to
+                        // setActive: reassigning first would hand setActive the
+                        // replacement, stranding "is-active" on the filtered-out
+                        // group so it reappears beside the real one under "All".
+                        active?.classList.remove("is-active");
+                        active = visible[0] || null;
+                    }
                     if (active) setActive(active);
                     else updateControls();
                     announce(`${visible.length} matches shown`);

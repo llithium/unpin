@@ -123,9 +123,14 @@ Run `unpin --help` for the complete interface.
 
 - Pinterest board metadata is fetched page by page, including board sections.
   Pins repeated in the main feed and a section are counted once.
-- Up to three selected boards are fetched concurrently. Pagination within each
-  board remains sequential, and throttled or transient requests are retried up
-  to three times with bounded exponential backoff.
+- Up to six selected boards are fetched concurrently, and a board's sections are
+  fetched up to four at a time. Pagination within any single feed remains
+  sequential, since each page is addressed by the previous page's bookmark, so
+  `unpin` asks for 250 pins per page instead of Pinterest's default 25 to keep
+  that chain short. The page size is an undocumented option; if Pinterest
+  refuses it, the feed is refetched at the default page size rather than
+  failing. Throttled or transient requests are retried up to three times with
+  bounded exponential backoff.
 - When several boards are selected, their pins are pooled into a single
   analysis, so duplicates spanning two boards are found. Each reported pin
   carries its board name, and pin counts are also broken down per board.
@@ -139,13 +144,17 @@ Run `unpin --help` for the complete interface.
 - When Pinterest's reported total is larger than the number returned by its web
   API, text, JSON, and HTML output show both counts and include an incomplete
   scan warning.
-- Ordinary, single-image pins are downloaded with an eight-request concurrency
-  limit and a 100 MiB per-image safety limit.
+- Ordinary, single-image pins are downloaded with a twenty-four-request
+  concurrency limit and a 100 MiB per-image safety limit. Decoding and hashing
+  run on a separate pool sized to the machine's processors, so images keep
+  downloading while earlier ones are still being analyzed.
 - Successful image fingerprints are cached for 30 days in the operating
   system's user cache directory. The cache contains dimensions, file size, and
   derived hashes—not raw images, Pinterest responses, or browser cookies. Set
   `UNPIN_CACHE_DIR` to choose another cache root or use `--no-cache` to bypass
   it. Fingerprint entries live in an unpin-owned subdirectory beneath that root.
+  The entry format is versioned; upgrading `unpin` past a format change means
+  one full re-download before the cache is warm again.
 - Identical downloaded bytes are grouped using SHA-256.
 - Other images first become candidates when their 64-bit difference hashes are
   within the selected threshold and their aspect ratios differ by no more than
