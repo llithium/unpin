@@ -153,12 +153,12 @@ mod tests {
         assert!(!html.contains("<script>alert"));
         assert!(html.contains("video &#60;unsupported&#62;"));
         assert!(html.contains("overflow: hidden"));
-        // Images are height-bounded via max-* only. An explicit width alongside
-        // max-height would make both axes definite and stretch the image, and
-        // object-fit would paper over that by letterboxing instead.
+        // Intrinsic dimensions reserve each lazy image's final aspect ratio
+        // before decode, while the viewport cap prevents overly tall cards.
         assert!(html.contains("max-height: min(68dvh, 720px)"));
-        assert!(!html.contains("width: 100%; height: auto"));
-        assert!(!html.contains("object-fit"));
+        assert!(html.contains("width=\"1200\""));
+        assert!(html.contains("height=\"800\""));
+        assert!(html.contains("object-fit: contain"));
         assert!(html.contains("class=\"app-shell\""));
         assert!(html.contains("id=\"overview-toggle\""));
         assert!(html.contains("data-review-button"));
@@ -332,6 +332,10 @@ mod tests {
         assert!(!html.contains("scrollIntoView"));
         assert!(html.contains("advanceAfterReview(group)"));
         assert!(html.contains("advanceAfterReview(reviewedGroup)"));
+        assert!(html.contains("const warmGroupImages = (group)"));
+        assert!(html.contains("warmNearbyImages();"));
+        assert!(html.contains("image.loading = \"eager\""));
+        assert!(html.contains("link.addEventListener(\"pointerenter\", warmTarget)"));
         assert!(!html.contains("localStorage"));
         assert!(!html.contains("sessionStorage"));
     }

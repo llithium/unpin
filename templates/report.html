@@ -693,7 +693,7 @@
             .image-stage {
                 position: relative;
                 display: grid;
-                min-height: 220px;
+                min-height: 0;
                 place-items: center;
                 overflow: hidden;
                 background: var(--canvas);
@@ -726,14 +726,23 @@
                 transform: none;
             }
 
-            /* Max constraints preserve the source aspect ratio without forcing
-               both axes to definite dimensions. */
             .image-stage img {
                 display: block;
-                max-width: 100%;
+                width: 100%;
+                height: auto;
                 max-height: min(68dvh, 720px);
-                margin: 0 auto;
-                transition: transform 700ms cubic-bezier(0.32, 0.72, 0, 1);
+                object-fit: contain;
+                transition:
+                    opacity 700ms cubic-bezier(0.32, 0.72, 0, 1),
+                    transform 700ms cubic-bezier(0.32, 0.72, 0, 1);
+            }
+
+            .js .image-stage img {
+                opacity: 0;
+            }
+
+            .js .image-stage img.is-loaded {
+                opacity: 1;
             }
 
             .image-stage:hover img {
@@ -1044,14 +1053,6 @@
                     grid-template-columns: 1fr;
                 }
 
-                .image-stage {
-                    min-height: 180px;
-                }
-
-                .image-stage img {
-                    max-height: 68dvh;
-                }
-
                 .actions {
                     grid-template-columns: 1fr 1fr;
                 }
@@ -1129,6 +1130,13 @@
                 .image-stage {
                     min-height: 0;
                     background: #fff;
+                }
+
+                .image-stage img {
+                    width: auto;
+                    height: auto;
+                    max-width: 100%;
+                    max-height: 720px;
                 }
 
                 .pin-card {
@@ -1513,6 +1521,35 @@
                     if (status) status.textContent = message;
                 };
 
+                const markImageReady = (image) => {
+                    const reveal = () => image.classList.add("is-loaded");
+                    if (image.complete && image.naturalWidth > 0) {
+                        reveal();
+                        return;
+                    }
+                    image.addEventListener("load", reveal, { once: true });
+                    image.addEventListener("error", reveal, { once: true });
+                    if (typeof image.decode === "function") {
+                        image.decode().then(reveal).catch(() => {});
+                    }
+                };
+
+                const warmGroupImages = (group) => {
+                    group?.querySelectorAll(".image-stage img").forEach((image) => {
+                        image.loading = "eager";
+                        markImageReady(image);
+                    });
+                };
+
+                const warmNearbyImages = () => {
+                    const visible = visibleGroups();
+                    const index = visible.indexOf(active);
+                    if (index < 0) return;
+                    warmGroupImages(visible[index - 1]);
+                    warmGroupImages(visible[index]);
+                    warmGroupImages(visible[index + 1]);
+                };
+
                 const updateProgress = () => {
                     const reviewed = groups.filter(
                         (group) => group.dataset.reviewed === "true",
@@ -1534,6 +1571,7 @@
 
                 const setActive = (group, options = {}) => {
                     if (!group || group.classList.contains("is-filtered")) return;
+                    warmGroupImages(group);
                     active?.classList.remove("is-active");
                     active = group;
                     active.classList.add("is-active");
@@ -1542,6 +1580,7 @@
                         link.setAttribute("aria-current", selected ? "true" : "false");
                     });
                     updateControls();
+                    warmNearbyImages();
                     if (options.announce) {
                         announce(
                             `${active.querySelector("h1, h2")?.textContent || "Match"} selected`,
@@ -1617,6 +1656,10 @@
                 };
 
                 links.forEach((link) => {
+                    const warmTarget = () =>
+                        warmGroupImages(document.getElementById(link.dataset.target));
+                    link.addEventListener("pointerenter", warmTarget);
+                    link.addEventListener("focus", warmTarget);
                     link.addEventListener("click", () => {
                         setOverview(false);
                         setActive(document.getElementById(link.dataset.target), {
