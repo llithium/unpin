@@ -156,7 +156,7 @@ mod tests {
         // Images are height-bounded via max-* only. An explicit width alongside
         // max-height would make both axes definite and stretch the image, and
         // object-fit would paper over that by letterboxing instead.
-        assert!(html.contains("max-height: min(60vh, 620px)"));
+        assert!(html.contains("max-height: min(68dvh, 720px)"));
         assert!(!html.contains("width: 100%; height: auto"));
         assert!(!html.contains("object-fit"));
         assert!(html.contains("class=\"app-shell\""));
@@ -166,6 +166,21 @@ mod tests {
         assert!(html.contains("document.addEventListener(\"keydown\""));
         assert!(html.contains("event.target instanceof HTMLButtonElement"));
         assert!(html.contains("prefers-reduced-motion: reduce"));
+    }
+
+    #[test]
+    fn html_includes_the_report_design_and_accessibility_baseline() {
+        let html = render_html(&sample_report());
+
+        assert!(html.contains("font-family: Manrope"));
+        assert!(html.contains("min-height: 100dvh"));
+        assert!(!html.contains("radial-gradient"));
+        assert!(!html.contains("font-family:\n                    Inter"));
+        assert!(html.contains("class=\"skip-link\" href=\"#report-content\""));
+        assert!(html.contains("id=\"report-content\" tabindex=\"-1\""));
+        assert!(html.contains("name=\"description\""));
+        assert!(html.contains("name=\"robots\" content=\"noindex, nofollow\""));
+        assert!(html.contains("rel=\"icon\""));
     }
 
     #[test]
