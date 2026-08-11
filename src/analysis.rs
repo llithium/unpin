@@ -24,7 +24,7 @@ use crate::report::{
 /// In-flight image buffers are bounded by this plus [`cpu_concurrency`]. Typical
 /// Pinterest originals are a few megabytes, so the practical ceiling is modest,
 /// but [`MAX_IMAGE_BYTES`] means a pathological board could hold much more.
-const DOWNLOAD_CONCURRENCY: usize = 24;
+const DOWNLOAD_CONCURRENCY: usize = 48;
 const MAX_IMAGE_BYTES: u64 = 100 * 1024 * 1024;
 const STRUCTURAL_SIGNATURE_SIZE: u32 = 64;
 const DIFFERENCE_HASH_WIDTH: u32 = 9;
@@ -956,6 +956,71 @@ mod tests {
         .unwrap();
 
         assert_eq!(result.analyzed, 1);
+        assert!(result.skipped.is_empty());
+    }
+
+    #[tokio::test]
+    async fn image_downloads_are_bounded_by_the_network_concurrency_limit() {
+        use std::time::Instant;
+
+        use wiremock::matchers::{method, path_regex};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        let mut bytes = Cursor::new(Vec::new());
+        DynamicImage::new_rgb8(2, 2)
+            .write_to(&mut bytes, image::ImageFormat::Png)
+            .unwrap();
+        let total = DOWNLOAD_CONCURRENCY * 2 + 1;
+        Mock::given(method("GET"))
+            .and(path_regex(r"/image/\d+\.png"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .insert_header("content-type", "image/png")
+                    .set_body_bytes(bytes.into_inner())
+                    // Keep the first wave in flight long enough to observe it
+                    // before the next request can be admitted.
+                    .set_delay(Duration::from_millis(500)),
+            )
+            .expect(total as u64)
+            .mount(&server)
+            .await;
+
+        let pins = (0..total)
+            .map(|index| Pin {
+                id: format!("pin-{index}"),
+                media_url: format!("{}/image/{index}.png", server.uri()),
+                metadata_width: None,
+                metadata_height: None,
+                board: None,
+            })
+            .collect();
+        let scan = tokio::spawn(async move {
+            let progress = NoProgress;
+            analyze_pins_with_progress_and_cache(pins, true, 5, &progress, None).await
+        });
+
+        let deadline = Instant::now() + Duration::from_secs(3);
+        loop {
+            let received = server.received_requests().await.unwrap().len();
+            if received >= DOWNLOAD_CONCURRENCY {
+                break;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "the first download wave did not start"
+            );
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        let received = server.received_requests().await.unwrap().len();
+        assert_eq!(
+            received, DOWNLOAD_CONCURRENCY,
+            "a request beyond the configured limit started before a response completed"
+        );
+
+        let result = scan.await.unwrap().unwrap();
+        assert_eq!(result.analyzed, total);
         assert!(result.skipped.is_empty());
     }
 

@@ -1,4 +1,6 @@
 use std::collections::HashSet;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
 
 use futures_util::stream::{self, StreamExt};
@@ -26,8 +28,12 @@ const BOARD_PAGE_SIZE: usize = 25;
 /// is refused, giving the round trips back rather than failing the scan.
 const FEED_PAGE_SIZE: usize = 250;
 /// Sections belong to one board that is already sharing the board-level
-/// concurrency budget, so this stays well below it.
-const SECTION_FETCH_CONCURRENCY: usize = 4;
+/// concurrency budget, so this controls how much work can queue behind the
+/// shared request limit.
+const SECTION_FETCH_CONCURRENCY: usize = 8;
+/// Board and section streams share this ceiling, so their fan-out cannot
+/// multiply into an unbounded burst when several boards have sections.
+const API_REQUEST_CONCURRENCY: usize = 48;
 const MAX_REQUEST_ATTEMPTS: usize = 4;
 const RETRY_BASE_DELAY: Duration = Duration::from_millis(250);
 const MAX_RETRY_DELAY: Duration = Duration::from_secs(30);
@@ -323,6 +329,7 @@ pub struct PinterestClient {
     api_root: Url,
     cookie_header: HeaderValue,
     authenticated: bool,
+    request_limiter: Arc<tokio::sync::Semaphore>,
 }
 
 impl PinterestClient {
@@ -362,6 +369,7 @@ impl PinterestClient {
             api_root,
             cookie_header,
             authenticated,
+            request_limiter: Arc::new(tokio::sync::Semaphore::new(API_REQUEST_CONCURRENCY)),
         })
     }
 
@@ -596,27 +604,35 @@ impl PinterestClient {
             // rather than running end to end. Results are reordered back into
             // section order below to keep a scan's pin order deterministic.
             let section_total = section_ids.len();
-            let section_fetches = stream::iter(section_ids.into_iter().enumerate().map(
-                |(index, id)| async move {
-                    progress.emit(ProgressEvent::SectionStarted {
-                        current: index + 1,
-                        total: section_total,
-                    });
-                    let fetched = self
-                        .paginate(
-                            "BoardSectionPins",
-                            json!({
-                                "section_id": id,
-                                "page_size": FEED_PAGE_SIZE,
-                                "bookmarks": null
-                            }),
-                            progress,
-                        )
-                        .await;
-                    (index, fetched)
-                },
-            ))
-            .buffer_unordered(SECTION_FETCH_CONCURRENCY);
+            let section_completed = Arc::new(AtomicUsize::new(0));
+            let section_fetches =
+                stream::iter(section_ids.into_iter().enumerate().map(|(index, id)| {
+                    let section_completed = Arc::clone(&section_completed);
+                    async move {
+                        progress.emit(ProgressEvent::SectionStarted {
+                            current: index + 1,
+                            total: section_total,
+                        });
+                        let fetched = self
+                            .paginate(
+                                "BoardSectionPins",
+                                json!({
+                                    "section_id": id,
+                                    "page_size": FEED_PAGE_SIZE,
+                                    "bookmarks": null
+                                }),
+                                progress,
+                            )
+                            .await;
+                        let completed = section_completed.fetch_add(1, Ordering::Relaxed) + 1;
+                        progress.emit(ProgressEvent::SectionFinished {
+                            completed,
+                            total: section_total,
+                        });
+                        (index, fetched)
+                    }
+                }))
+                .buffer_unordered(SECTION_FETCH_CONCURRENCY);
             futures_util::pin_mut!(section_fetches);
             let mut fetched_sections = section_fetches.collect::<Vec<_>>().await;
             fetched_sections.sort_by_key(|(index, _)| *index);
@@ -753,13 +769,19 @@ impl PinterestClient {
             .map_err(|_| invalid_response(resource, "could not serialize request options"))?;
 
         for attempt in 0..MAX_REQUEST_ATTEMPTS {
-            let response = self
-                .http
-                .get(endpoint.clone())
-                .query(&[("data", data.as_str()), ("source_url", "")])
-                .header("Cookie", self.cookie_header.clone())
-                .send()
-                .await;
+            let response = {
+                let _permit = self
+                    .request_limiter
+                    .acquire()
+                    .await
+                    .expect("the API request limiter is never closed");
+                self.http
+                    .get(endpoint.clone())
+                    .query(&[("data", data.as_str()), ("source_url", "")])
+                    .header("Cookie", self.cookie_header.clone())
+                    .send()
+                    .await
+            };
             let response = match response {
                 Ok(response) => response,
                 Err(source)
@@ -1325,6 +1347,174 @@ mod tests {
         assert!(!header.to_str().unwrap().contains("injected"));
         assert!(header.to_str().unwrap().contains("csrftoken="));
         assert!(!authenticated);
+    }
+
+    #[tokio::test]
+    async fn section_fetches_are_bounded_by_the_section_concurrency_limit() {
+        use std::time::{Duration, Instant};
+
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        let total = SECTION_FETCH_CONCURRENCY * 2 + 1;
+        let sections = (0..total)
+            .map(|index| json!({ "id": format!("section-{index}") }))
+            .collect::<Vec<_>>();
+        let empty_page = json!({
+            "resource_response": { "data": [] },
+            "resource": { "options": { "bookmarks": ["-end-"] } }
+        });
+        Mock::given(method("GET"))
+            .and(path("/resource/BoardFeedResource/get/"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(empty_page.clone()))
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/resource/BoardSectionsResource/get/"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "resource_response": { "data": sections },
+                "resource": { "options": { "bookmarks": ["-end-"] } }
+            })))
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/resource/BoardSectionPinsResource/get/"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .set_body_json(empty_page)
+                    .set_delay(Duration::from_millis(500)),
+            )
+            .expect(total as u64)
+            .mount(&server)
+            .await;
+
+        let client = PinterestClient::with_api_root(
+            Url::parse("https://www.pinterest.com/").unwrap(),
+            Url::parse(&server.uri()).unwrap(),
+        )
+        .unwrap();
+        let board = BoardRef {
+            id: "board-1".into(),
+            name: "Ideas".into(),
+            slug: "ideas".into(),
+            url: "https://www.pinterest.com/alice/ideas/".into(),
+            pins_reported: Some(0),
+            section_count: total as u64,
+            is_secret: false,
+        };
+        let scan = tokio::spawn(async move {
+            let progress = NoProgress;
+            client
+                .fetch_board_pins(&board, &mut HashSet::new(), &progress)
+                .await
+        });
+
+        let deadline = Instant::now() + Duration::from_secs(3);
+        loop {
+            let received = server
+                .received_requests()
+                .await
+                .unwrap()
+                .iter()
+                .filter(|request| request.url.path() == "/resource/BoardSectionPinsResource/get/")
+                .count();
+            if received >= SECTION_FETCH_CONCURRENCY {
+                break;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "the first section-fetch wave did not start"
+            );
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        let received = server
+            .received_requests()
+            .await
+            .unwrap()
+            .iter()
+            .filter(|request| request.url.path() == "/resource/BoardSectionPinsResource/get/")
+            .count();
+        assert_eq!(
+            received, SECTION_FETCH_CONCURRENCY,
+            "a section fetch beyond the configured limit started before a response completed"
+        );
+
+        assert!(scan.await.unwrap().is_ok());
+    }
+
+    #[tokio::test]
+    async fn api_requests_share_the_global_concurrency_limit() {
+        use std::time::{Duration, Instant};
+
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        let total = API_REQUEST_CONCURRENCY * 2 + 1;
+        Mock::given(method("GET"))
+            .and(path("/resource/SlowResource/get/"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .set_body_json(json!({ "ok": true }))
+                    .set_delay(Duration::from_millis(500)),
+            )
+            .expect(total as u64)
+            .mount(&server)
+            .await;
+
+        let client = PinterestClient::with_api_root(
+            Url::parse("https://www.pinterest.com/").unwrap(),
+            Url::parse(&server.uri()).unwrap(),
+        )
+        .unwrap();
+        let tasks = (0..total)
+            .map(|index| {
+                let client = client.clone();
+                tokio::spawn(async move {
+                    let progress = NoProgress;
+                    client
+                        .call("Slow", json!({ "index": index }), &progress)
+                        .await
+                })
+            })
+            .collect::<Vec<_>>();
+
+        let deadline = Instant::now() + Duration::from_secs(3);
+        loop {
+            let received = server
+                .received_requests()
+                .await
+                .unwrap()
+                .iter()
+                .filter(|request| request.url.path() == "/resource/SlowResource/get/")
+                .count();
+            if received >= API_REQUEST_CONCURRENCY {
+                break;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "the first API request wave did not start"
+            );
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        let received = server
+            .received_requests()
+            .await
+            .unwrap()
+            .iter()
+            .filter(|request| request.url.path() == "/resource/SlowResource/get/")
+            .count();
+        assert_eq!(
+            received, API_REQUEST_CONCURRENCY,
+            "an API request beyond the shared limit started before a response completed"
+        );
+
+        for task in tasks {
+            assert!(task.await.unwrap().is_ok());
+        }
     }
 
     #[test]

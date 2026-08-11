@@ -1,3 +1,4 @@
+use std::sync::Mutex;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
@@ -22,9 +23,16 @@ pub enum ProgressEvent {
     /// The board picker is about to take over the terminal.
     SelectionStarted,
     SelectionFinished,
+    /// `current` is the deterministic launch ordinal; completion is reported
+    /// separately because several boards may be in flight at once.
     BoardStarted {
         name: String,
         current: usize,
+        total: usize,
+    },
+    BoardFinished {
+        name: String,
+        completed: usize,
         total: usize,
     },
     PageFetched {
@@ -35,8 +43,13 @@ pub enum ProgressEvent {
     SectionsStarted {
         total: usize,
     },
+    /// `current` is the section's launch ordinal within its board.
     SectionStarted {
         current: usize,
+        total: usize,
+    },
+    SectionFinished {
+        completed: usize,
         total: usize,
     },
     RequestRetry {
@@ -73,6 +86,17 @@ pub struct TerminalProgress {
     bar: ProgressBar,
     visible: bool,
     cursor_hidden: AtomicBool,
+    state: Mutex<ProgressState>,
+}
+
+#[derive(Debug, Default)]
+struct ProgressState {
+    boards_total: usize,
+    boards_started: usize,
+    boards_completed: usize,
+    sections_total: usize,
+    sections_started: usize,
+    sections_completed: usize,
 }
 
 impl TerminalProgress {
@@ -86,6 +110,7 @@ impl TerminalProgress {
             bar,
             visible,
             cursor_hidden: AtomicBool::new(false),
+            state: Mutex::new(ProgressState::default()),
         };
         if visible {
             progress.bar.set_draw_target(ProgressDrawTarget::stderr());
@@ -114,6 +139,15 @@ impl TerminalProgress {
         if self.cursor_hidden.swap(false, Ordering::Relaxed) {
             let _ = Term::stderr().show_cursor();
         }
+    }
+
+    /// Updates aggregate counters and the visible message together. The lock
+    /// keeps concurrent board and section completions from overwriting a newer
+    /// message with stale counts.
+    fn update_message(&self, update: impl FnOnce(&mut ProgressState) -> String) {
+        let mut state = self.state.lock().unwrap();
+        let message = update(&mut state);
+        self.bar.set_message(message);
     }
 }
 
@@ -175,14 +209,40 @@ impl ProgressSink for TerminalProgress {
                 self.bar.set_draw_target(ProgressDrawTarget::stderr());
                 self.resume_spinner();
             }
-            ProgressEvent::BoardStarted {
+            ProgressEvent::BoardStarted { name, total, .. } => {
+                self.resume_spinner();
+                self.update_message(|state| {
+                    if state.boards_total != total {
+                        state.boards_total = total;
+                        state.boards_started = 0;
+                        state.boards_completed = 0;
+                    }
+                    state.boards_started += 1;
+                    let active = state.boards_started.saturating_sub(state.boards_completed);
+                    format!(
+                        "Fetching boards: {}/{} complete ({} active), starting “{name}”",
+                        state.boards_completed, total, active
+                    )
+                });
+            }
+            ProgressEvent::BoardFinished {
                 name,
-                current,
+                completed,
                 total,
             } => {
-                self.resume_spinner();
-                self.bar
-                    .set_message(format!("Board {current}/{total}: “{name}”"));
+                self.update_message(|state| {
+                    state.boards_total = total;
+                    // Completion events carry an atomic snapshot, but a task
+                    // may be paused between taking it and emitting it.
+                    state.boards_completed = state.boards_completed.max(completed);
+                    let completed = state.boards_completed;
+                    let active = state
+                        .boards_started
+                        .saturating_sub(state.boards_completed);
+                    format!(
+                        "Fetching boards: {completed}/{total} complete ({active} active), latest “{name}”"
+                    )
+                });
             }
             ProgressEvent::PageFetched {
                 resource,
@@ -193,12 +253,42 @@ impl ProgressSink for TerminalProgress {
                     .set_message(format!("Fetching {resource}: page {page}, {items} item(s)"));
             }
             ProgressEvent::SectionsStarted { total } => {
-                self.bar
-                    .set_message(format!("Fetching {total} board section(s)"));
+                self.update_message(|state| {
+                    state.sections_total += total;
+                    format!(
+                        "Fetching board sections: {}/{} complete",
+                        state.sections_completed, state.sections_total
+                    )
+                });
             }
-            ProgressEvent::SectionStarted { current, total } => {
-                self.bar
-                    .set_message(format!("Fetching board section {current}/{total}"));
+            ProgressEvent::SectionStarted { total, .. } => {
+                self.update_message(|state| {
+                    state.sections_started += 1;
+                    state.sections_total = state.sections_total.max(total);
+                    let active = state
+                        .sections_started
+                        .saturating_sub(state.sections_completed);
+                    format!(
+                        "Fetching board sections: {}/{} complete ({active} active)",
+                        state.sections_completed, state.sections_total
+                    )
+                });
+            }
+            ProgressEvent::SectionFinished {
+                completed: _,
+                total,
+            } => {
+                self.update_message(|state| {
+                    state.sections_total = state.sections_total.max(total);
+                    state.sections_completed += 1;
+                    let active = state
+                        .sections_started
+                        .saturating_sub(state.sections_completed);
+                    format!(
+                        "Fetching board sections: {}/{} complete ({active} active)",
+                        state.sections_completed, state.sections_total
+                    )
+                });
             }
             ProgressEvent::RequestRetry {
                 resource,
@@ -216,11 +306,14 @@ impl ProgressSink for TerminalProgress {
                 self.bar.set_length(total as u64);
                 self.bar.set_position(0);
                 self.bar.set_style(download_style());
-                self.bar.set_message("Analyzing images");
+                self.bar
+                    .set_message(format!("Analyzing images (0/{total} complete)"));
             }
             ProgressEvent::ImageFinished { completed, total } => {
                 self.bar.set_length(total as u64);
                 self.bar.set_position(completed as u64);
+                self.bar
+                    .set_message(format!("Analyzing images ({completed}/{total} complete)"));
             }
             ProgressEvent::MatchingStarted => {
                 self.resume_spinner();

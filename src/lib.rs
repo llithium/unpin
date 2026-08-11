@@ -10,6 +10,8 @@ pub mod visual;
 use futures_util::stream::{self, StreamExt};
 use std::collections::HashSet;
 use std::io::IsTerminal;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use thiserror::Error;
 use url::Url;
 
@@ -26,9 +28,9 @@ struct ResolvedSources {
 }
 
 /// Board feeds paginate sequentially, so overlapping whole boards is the only
-/// way to shorten a multi-board scan. Kept modest because each board may also be
-/// fanning out across its own sections.
-const BOARD_FETCH_CONCURRENCY: usize = 6;
+/// way to shorten a multi-board scan. Individual requests still share the
+/// client's API request limit.
+const BOARD_FETCH_CONCURRENCY: usize = 12;
 
 #[derive(Debug, Error)]
 pub enum AppError {
@@ -118,8 +120,10 @@ pub async fn run_with_api_root_and_progress(
     let multiple = boards.len() > 1 || user.is_some();
 
     let board_total = boards.len();
+    let board_completed = Arc::new(AtomicUsize::new(0));
     let board_fetches = stream::iter(boards.into_iter().enumerate().map(|(index, board)| {
         let client = client.clone();
+        let board_completed = Arc::clone(&board_completed);
         async move {
             progress.emit(ProgressEvent::BoardStarted {
                 name: board.name.clone(),
@@ -130,6 +134,12 @@ pub async fn run_with_api_root_and_progress(
             let fetched = client
                 .fetch_board_pins(&board, &mut board_pin_ids, progress)
                 .await;
+            let completed = board_completed.fetch_add(1, Ordering::Relaxed) + 1;
+            progress.emit(ProgressEvent::BoardFinished {
+                name: board.name.clone(),
+                completed,
+                total: board_total,
+            });
             (index, board, fetched)
         }
     }))
@@ -430,5 +440,92 @@ mod tests {
         assert_eq!(fetched.pins_found, 1);
         assert_eq!(fetched.warnings.len(), 1);
         assert!(fetched.warnings[0].contains("returned only 1 anonymously"));
+    }
+
+    #[tokio::test]
+    async fn board_fetches_are_bounded_by_the_board_concurrency_limit() {
+        use std::time::{Duration, Instant};
+
+        use clap::Parser;
+        use serde_json::json;
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        let total = BOARD_FETCH_CONCURRENCY * 2 + 1;
+        let boards = (0..total)
+            .map(|index| {
+                json!({
+                    "id": format!("board-{index}"),
+                    "type": "board",
+                    "name": format!("Board {index}"),
+                    "url": format!("/alice/board-{index}/"),
+                    "pin_count": 0,
+                    "section_count": 0,
+                    "privacy": "public"
+                })
+            })
+            .collect::<Vec<_>>();
+        Mock::given(method("GET"))
+            .and(path("/resource/BoardsResource/get/"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "resource_response": { "data": boards },
+                "resource": { "options": { "bookmarks": ["-end-"] } }
+            })))
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/resource/BoardFeedResource/get/"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .set_body_json(json!({
+                        "resource_response": { "data": [] },
+                        "resource": { "options": { "bookmarks": ["-end-"] } }
+                    }))
+                    .set_delay(Duration::from_millis(500)),
+            )
+            .expect(total as u64)
+            .mount(&server)
+            .await;
+
+        let cli = Cli::try_parse_from(["unpin", "alice"]).unwrap();
+        let api_root = Url::parse(&server.uri()).unwrap();
+        let scan = tokio::spawn(async move {
+            let progress = NoProgress;
+            run_with_api_root_and_progress(&cli, Some(api_root), &progress).await
+        });
+
+        let deadline = Instant::now() + Duration::from_secs(3);
+        loop {
+            let received = server
+                .received_requests()
+                .await
+                .unwrap()
+                .iter()
+                .filter(|request| request.url.path() == "/resource/BoardFeedResource/get/")
+                .count();
+            if received >= BOARD_FETCH_CONCURRENCY {
+                break;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "the first board-fetch wave did not start"
+            );
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        let received = server
+            .received_requests()
+            .await
+            .unwrap()
+            .iter()
+            .filter(|request| request.url.path() == "/resource/BoardFeedResource/get/")
+            .count();
+        assert_eq!(
+            received, BOARD_FETCH_CONCURRENCY,
+            "a board fetch beyond the configured limit started before a response completed"
+        );
+
+        assert!(scan.await.unwrap().is_err());
     }
 }

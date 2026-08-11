@@ -66,8 +66,10 @@ Netscape/Mozilla `cookies.txt` format produced by browser cookie exporters and
 curl.
 
 While running in an interactive terminal, `unpin` shows Pinterest acquisition
-status followed by a progress bar for image downloads and analysis. Progress is
-written to stderr, so `--format json` remains clean on stdout.
+status followed by a progress bar for image downloads and analysis. Concurrent
+stages report completed and active work rather than treating launch order as
+progress. Progress is written to stderr, so `--format json` remains clean on
+stdout.
 
 The text report separates byte-identical images from conservative visual
 candidates. Within each match it marks the best-resolution pin as `KEEP` and
@@ -123,8 +125,9 @@ Run `unpin --help` for the complete interface.
 
 - Pinterest board metadata is fetched page by page, including board sections.
   Pins repeated in the main feed and a section are counted once.
-- Up to six selected boards are fetched concurrently, and a board's sections are
-  fetched up to four at a time. Pagination within any single feed remains
+- Up to twelve selected boards are fetched concurrently, and a board's sections
+  are fetched up to eight at a time. All Pinterest API requests share a
+  forty-eight-request ceiling. Pagination within any single feed remains
   sequential, since each page is addressed by the previous page's bookmark, so
   `unpin` asks for 250 pins per page instead of Pinterest's default 25 to keep
   that chain short. The page size is an undocumented option; if Pinterest
@@ -144,7 +147,7 @@ Run `unpin --help` for the complete interface.
 - When Pinterest's reported total is larger than the number returned by its web
   API, text, JSON, and HTML output show both counts and include an incomplete
   scan warning.
-- Ordinary, single-image pins are downloaded with a twenty-four-request
+- Ordinary, single-image pins are downloaded with a forty-eight-request
   concurrency limit and a 100 MiB per-image safety limit. Decoding and hashing
   run on a separate pool sized to the machine's processors, so images keep
   downloading while earlier ones are still being analyzed.

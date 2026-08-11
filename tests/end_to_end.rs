@@ -235,6 +235,15 @@ async fn scans_paginated_board_and_sections_end_to_end() {
         completed: 1,
         total: 1,
     }));
+    assert!(progress.events().contains(&ProgressEvent::SectionFinished {
+        completed: 1,
+        total: 1,
+    }));
+    assert!(progress.events().contains(&ProgressEvent::BoardFinished {
+        name: "Ideas".into(),
+        completed: 1,
+        total: 1,
+    }));
     assert!(progress.events().contains(&ProgressEvent::MatchingStarted));
 
     let visual_path = unpin::visual::create_temporary_report(&report).unwrap();
