@@ -1,9 +1,10 @@
+use std::collections::HashSet;
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
 use console::Term;
-use indicatif::{ProgressBar, ProgressDrawTarget, ProgressStyle};
+use indicatif::{MultiProgress, ProgressBar, ProgressDrawTarget, ProgressStyle};
 
 #[derive(Debug, Clone, Eq, PartialEq)]
 pub enum ProgressEvent {
@@ -83,7 +84,7 @@ impl ProgressSink for NoProgress {
 
 #[derive(Debug)]
 pub struct TerminalProgress {
-    bar: ProgressBar,
+    bars: MultiProgress,
     visible: bool,
     cursor_hidden: AtomicBool,
     state: Mutex<ProgressState>,
@@ -91,41 +92,184 @@ pub struct TerminalProgress {
 
 #[derive(Debug, Default)]
 struct ProgressState {
+    groups: HashSet<ProgressGroup>,
+    setup: Option<ProgressBar>,
+    page: Option<ProgressBar>,
+    page_resource: Option<&'static str>,
+    sections: Option<ProgressBar>,
+    images: Option<ProgressBar>,
+    matching: Option<ProgressBar>,
+    report: Option<ProgressBar>,
+    board_rows: Vec<BoardRow>,
     boards_total: usize,
-    boards_started: usize,
     boards_completed: usize,
     sections_total: usize,
     sections_started: usize,
     sections_completed: usize,
 }
 
+#[derive(Debug)]
+struct BoardRow {
+    name: String,
+    bar: ProgressBar,
+}
+
+#[derive(Debug, Clone, Copy, Eq, Hash, PartialEq)]
+enum ProgressGroup {
+    Setup,
+    Boards,
+    Analysis,
+    Report,
+    Complete,
+}
+
+impl ProgressGroup {
+    fn label(self) -> &'static str {
+        match self {
+            Self::Setup => "> Setup",
+            Self::Boards => "> Boards",
+            Self::Analysis => "> Analysis",
+            Self::Report => "> Report",
+            Self::Complete => "> Complete",
+        }
+    }
+}
+
 impl TerminalProgress {
     pub fn new(visible: bool) -> Self {
-        let bar = if visible {
-            ProgressBar::new_spinner()
+        let bars = if visible {
+            MultiProgress::with_draw_target(ProgressDrawTarget::stderr())
         } else {
-            ProgressBar::hidden()
+            MultiProgress::with_draw_target(ProgressDrawTarget::hidden())
         };
         let progress = Self {
-            bar,
+            bars,
             visible,
             cursor_hidden: AtomicBool::new(false),
             state: Mutex::new(ProgressState::default()),
         };
         if visible {
-            progress.bar.set_draw_target(ProgressDrawTarget::stderr());
-            progress.resume_spinner();
+            progress.bars.set_move_cursor(false);
+            progress.add_header("unpin");
             // indicatif leaves the caret parked at the end of the bar, where it
-            // blinks over the output for the whole scan.
+            // it blinks over the checklist for the whole scan.
             progress.hide_cursor();
         }
         progress
     }
 
-    /// Restores the spinner style and tick after the bar switched away from it.
-    fn resume_spinner(&self) {
-        self.bar.set_style(spinner_style());
-        self.bar.enable_steady_tick(Duration::from_millis(90));
+    fn add_header(&self, message: &str) {
+        let bar = self.bars.add(ProgressBar::new_spinner());
+        bar.set_style(header_style());
+        bar.set_message(message.to_owned());
+        bar.finish();
+    }
+
+    fn add_group(&self, state: &mut ProgressState, group: ProgressGroup) {
+        if state.groups.insert(group) {
+            let bar = self.bars.add(ProgressBar::new_spinner());
+            bar.set_style(group_style());
+            bar.set_message(group.label().to_owned());
+            bar.finish();
+        }
+    }
+
+    fn add_active_row(&self, message: String) -> ProgressBar {
+        let bar = self.bars.add(ProgressBar::new_spinner());
+        bar.set_style(active_style());
+        bar.set_message(message);
+        bar.enable_steady_tick(Duration::from_millis(90));
+        bar
+    }
+
+    fn complete_row(bar: &ProgressBar, message: String) {
+        bar.disable_steady_tick();
+        bar.set_style(completed_style());
+        bar.finish_with_message(message);
+    }
+
+    fn fail_row(bar: &ProgressBar, message: String) {
+        bar.disable_steady_tick();
+        bar.set_style(failed_style());
+        bar.finish_with_message(message);
+    }
+
+    fn finish_slot(slot: &mut Option<ProgressBar>, message: String) {
+        if let Some(bar) = slot.take() {
+            Self::complete_row(&bar, message);
+        }
+    }
+
+    fn fail_slot(slot: &mut Option<ProgressBar>, message: String) {
+        if let Some(bar) = slot.take() {
+            Self::fail_row(&bar, message);
+        }
+    }
+
+    fn ensure_active_slot(&self, slot: &mut Option<ProgressBar>, message: String) -> ProgressBar {
+        if let Some(bar) = slot {
+            bar.set_message(message);
+            bar.clone()
+        } else {
+            let bar = self.add_active_row(message);
+            *slot = Some(bar.clone());
+            bar
+        }
+    }
+
+    fn finish_active_rows(&self, state: &mut ProgressState) {
+        Self::finish_slot(&mut state.setup, "Setup complete".into());
+        Self::finish_slot(&mut state.page, "Pins fetched".into());
+        Self::finish_slot(&mut state.sections, "Board sections fetched".into());
+        Self::finish_slot(&mut state.images, "Images analyzed".into());
+        Self::finish_slot(&mut state.matching, "Matches compared".into());
+        Self::finish_slot(&mut state.report, "Report created".into());
+        for row in &state.board_rows {
+            if !row.bar.is_finished() {
+                Self::complete_row(&row.bar, format!("Scanned board “{}”", row.name));
+            }
+        }
+    }
+
+    fn fail_active_rows(&self, state: &mut ProgressState) {
+        Self::fail_slot(&mut state.setup, "Setup failed".into());
+        Self::fail_slot(&mut state.page, "Fetching pins failed".into());
+        Self::fail_slot(&mut state.sections, "Fetching board sections failed".into());
+        Self::fail_slot(&mut state.images, "Image analysis failed".into());
+        Self::fail_slot(&mut state.matching, "Matching failed".into());
+        Self::fail_slot(&mut state.report, "Report failed".into());
+        for row in &state.board_rows {
+            if !row.bar.is_finished() {
+                Self::fail_row(&row.bar, format!("Scanning board “{}” failed", row.name));
+            }
+        }
+    }
+
+    fn redraw_active_rows(&self, state: &ProgressState) {
+        let mut bars = Vec::new();
+        for bar in [
+            state.setup.as_ref(),
+            state.page.as_ref(),
+            state.sections.as_ref(),
+            state.images.as_ref(),
+            state.matching.as_ref(),
+            state.report.as_ref(),
+        ]
+        .into_iter()
+        .flatten()
+        {
+            bars.push(bar.clone());
+        }
+        bars.extend(
+            state
+                .board_rows
+                .iter()
+                .filter(|row| !row.bar.is_finished())
+                .map(|row| row.bar.clone()),
+        );
+        for bar in bars {
+            bar.tick();
+        }
     }
 
     fn hide_cursor(&self) {
@@ -139,15 +283,6 @@ impl TerminalProgress {
         if self.cursor_hidden.swap(false, Ordering::Relaxed) {
             let _ = Term::stderr().show_cursor();
         }
-    }
-
-    /// Updates aggregate counters and the visible message together. The lock
-    /// keeps concurrent board and section completions from overwriting a newer
-    /// message with stale counts.
-    fn update_message(&self, update: impl FnOnce(&mut ProgressState) -> String) {
-        let mut state = self.state.lock().unwrap();
-        let message = update(&mut state);
-        self.bar.set_message(message);
     }
 }
 
@@ -178,172 +313,243 @@ impl ProgressSink for TerminalProgress {
         }
         match event {
             ProgressEvent::LoadingBrowserCookies { browser } => {
-                self.resume_spinner();
-                self.bar
-                    .set_message(format!("Reading Pinterest cookies from {browser}"));
+                let mut state = self.state.lock().unwrap();
+                self.add_group(&mut state, ProgressGroup::Setup);
+                Self::finish_slot(&mut state.setup, "Setup ready".into());
+                state.setup =
+                    Some(self.add_active_row(format!("Reading Pinterest cookies from {browser}")));
             }
             ProgressEvent::FetchingBoard => {
-                self.resume_spinner();
-                self.bar.set_message("Fetching board metadata");
+                let mut state = self.state.lock().unwrap();
+                self.add_group(&mut state, ProgressGroup::Setup);
+                Self::finish_slot(&mut state.setup, "Pinterest session ready".into());
+                state.setup = Some(self.add_active_row("Fetching board metadata".into()));
             }
             ProgressEvent::BoardResolved { name } => {
-                self.bar.set_message(format!("Found board “{name}”"));
+                let mut state = self.state.lock().unwrap();
+                Self::finish_slot(&mut state.setup, format!("Found board “{name}”"));
             }
             ProgressEvent::FetchingUserBoards { username } => {
-                self.resume_spinner();
-                self.bar
-                    .set_message(format!("Listing boards for {username}"));
+                let mut state = self.state.lock().unwrap();
+                self.add_group(&mut state, ProgressGroup::Setup);
+                Self::finish_slot(&mut state.setup, "Pinterest session ready".into());
+                state.setup = Some(self.add_active_row(format!("Listing boards for {username}")));
             }
             ProgressEvent::UserBoardsResolved { total } => {
-                self.bar.set_message(format!("Found {total} board(s)"));
+                let mut state = self.state.lock().unwrap();
+                Self::finish_slot(&mut state.setup, format!("Found {total} board(s)"));
             }
             // Hide rather than finish the bar: a finished bar never redraws,
             // and the scan continues after the picker closes.
             ProgressEvent::SelectionStarted => {
-                self.bar.disable_steady_tick();
-                self.bar.set_draw_target(ProgressDrawTarget::hidden());
+                self.bars.set_draw_target(ProgressDrawTarget::hidden());
                 self.show_cursor();
             }
             ProgressEvent::SelectionFinished => {
                 self.hide_cursor();
-                self.bar.set_draw_target(ProgressDrawTarget::stderr());
-                self.resume_spinner();
+                self.bars.set_draw_target(ProgressDrawTarget::stderr());
+                let state = self.state.lock().unwrap();
+                self.redraw_active_rows(&state);
             }
-            ProgressEvent::BoardStarted { name, total, .. } => {
-                self.resume_spinner();
-                self.update_message(|state| {
-                    if state.boards_total != total {
-                        state.boards_total = total;
-                        state.boards_started = 0;
-                        state.boards_completed = 0;
-                    }
-                    state.boards_started += 1;
-                    let active = state.boards_started.saturating_sub(state.boards_completed);
-                    format!(
-                        "Fetching boards: {}/{} complete ({} active), starting “{name}”",
-                        state.boards_completed, total, active
-                    )
-                });
+            ProgressEvent::BoardStarted {
+                name,
+                current,
+                total,
+            } => {
+                let mut state = self.state.lock().unwrap();
+                self.add_group(&mut state, ProgressGroup::Boards);
+                if state.boards_total != total {
+                    state.boards_total = total;
+                    state.boards_completed = 0;
+                }
+                let bar =
+                    self.add_active_row(format!("Scanning board “{name}” ({current}/{total})"));
+                state.board_rows.push(BoardRow { name, bar });
             }
             ProgressEvent::BoardFinished {
                 name,
                 completed,
                 total,
             } => {
-                self.update_message(|state| {
-                    state.boards_total = total;
-                    // Completion events carry an atomic snapshot, but a task
-                    // may be paused between taking it and emitting it.
-                    state.boards_completed = state.boards_completed.max(completed);
-                    let completed = state.boards_completed;
-                    let active = state
-                        .boards_started
-                        .saturating_sub(state.boards_completed);
-                    format!(
-                        "Fetching boards: {completed}/{total} complete ({active} active), latest “{name}”"
-                    )
-                });
+                let mut state = self.state.lock().unwrap();
+                state.boards_total = total;
+                // Completion events carry an atomic snapshot, but a task may
+                // be paused between taking it and emitting it.
+                state.boards_completed = state.boards_completed.max(completed);
+                if let Some(row) = state
+                    .board_rows
+                    .iter()
+                    .find(|row| row.name == name && !row.bar.is_finished())
+                {
+                    Self::complete_row(&row.bar, format!("Scanned board “{name}”"));
+                }
             }
             ProgressEvent::PageFetched {
                 resource,
                 page,
                 items,
             } => {
-                self.bar
-                    .set_message(format!("Fetching {resource}: page {page}, {items} item(s)"));
+                let mut state = self.state.lock().unwrap();
+                self.add_group(&mut state, ProgressGroup::Boards);
+                if state.page_resource != Some(resource) {
+                    if let Some(previous) = state.page_resource {
+                        Self::finish_slot(&mut state.page, format!("Fetched {previous}"));
+                    }
+                    state.page_resource = Some(resource);
+                }
+                let message = format!("Fetching {resource}: page {page} · {items} item(s)");
+                self.ensure_active_slot(&mut state.page, message);
             }
             ProgressEvent::SectionsStarted { total } => {
-                self.update_message(|state| {
-                    state.sections_total += total;
-                    format!(
-                        "Fetching board sections: {}/{} complete",
-                        state.sections_completed, state.sections_total
-                    )
-                });
+                let mut state = self.state.lock().unwrap();
+                self.add_group(&mut state, ProgressGroup::Boards);
+                state.sections_total += total;
+                let message = format!(
+                    "Fetching board sections: {}/{} complete",
+                    state.sections_completed, state.sections_total
+                );
+                self.ensure_active_slot(&mut state.sections, message);
+                if total == 0 {
+                    Self::finish_slot(&mut state.sections, "No board sections found".into());
+                }
             }
             ProgressEvent::SectionStarted { total, .. } => {
-                self.update_message(|state| {
-                    state.sections_started += 1;
-                    state.sections_total = state.sections_total.max(total);
-                    let active = state
-                        .sections_started
-                        .saturating_sub(state.sections_completed);
-                    format!(
-                        "Fetching board sections: {}/{} complete ({active} active)",
-                        state.sections_completed, state.sections_total
-                    )
-                });
+                let mut state = self.state.lock().unwrap();
+                self.add_group(&mut state, ProgressGroup::Boards);
+                state.sections_started += 1;
+                state.sections_total = state.sections_total.max(total);
+                let active = state
+                    .sections_started
+                    .saturating_sub(state.sections_completed);
+                let message = format!(
+                    "Fetching board sections: {}/{} complete ({active} active)",
+                    state.sections_completed, state.sections_total
+                );
+                self.ensure_active_slot(&mut state.sections, message);
             }
             ProgressEvent::SectionFinished {
                 completed: _,
                 total,
             } => {
-                self.update_message(|state| {
-                    state.sections_total = state.sections_total.max(total);
-                    state.sections_completed += 1;
-                    let active = state
-                        .sections_started
-                        .saturating_sub(state.sections_completed);
-                    format!(
-                        "Fetching board sections: {}/{} complete ({active} active)",
-                        state.sections_completed, state.sections_total
-                    )
-                });
+                let mut state = self.state.lock().unwrap();
+                state.sections_total = state.sections_total.max(total);
+                state.sections_completed += 1;
+                let active = state
+                    .sections_started
+                    .saturating_sub(state.sections_completed);
+                let message = format!(
+                    "Fetching board sections: {}/{} complete ({active} active)",
+                    state.sections_completed, state.sections_total
+                );
+                if let Some(bar) = state.sections.as_ref() {
+                    bar.set_message(message);
+                }
+                if state.sections_completed >= state.sections_total {
+                    Self::finish_slot(&mut state.sections, "Board sections fetched".into());
+                }
             }
             ProgressEvent::RequestRetry {
                 resource,
                 attempt,
                 delay,
             } => {
-                self.resume_spinner();
-                self.bar.set_message(format!(
+                let mut state = self.state.lock().unwrap();
+                self.add_group(&mut state, ProgressGroup::Boards);
+                if state.page_resource != Some(resource) {
+                    if let Some(previous) = state.page_resource {
+                        Self::finish_slot(&mut state.page, format!("Fetched {previous}"));
+                    }
+                    state.page_resource = Some(resource);
+                }
+                let message = format!(
                     "Retrying Pinterest {resource} request (attempt {attempt}) in {:.1}s",
                     delay.as_secs_f64()
-                ));
+                );
+                self.ensure_active_slot(&mut state.page, message);
             }
             ProgressEvent::ImagesStarted { total } => {
-                self.bar.disable_steady_tick();
-                self.bar.set_length(total as u64);
-                self.bar.set_position(0);
-                self.bar.set_style(download_style());
-                self.bar
-                    .set_message(format!("Analyzing images (0/{total} complete)"));
+                let mut state = self.state.lock().unwrap();
+                self.add_group(&mut state, ProgressGroup::Analysis);
+                Self::finish_slot(&mut state.page, "Pins fetched".into());
+                Self::finish_slot(&mut state.sections, "Board sections fetched".into());
+                let message = format!("Analyzing images (0/{total} complete)");
+                let bar = self.ensure_active_slot(&mut state.images, message);
+                bar.set_length(total as u64);
+                bar.set_position(0);
+                if total == 0 {
+                    Self::finish_slot(&mut state.images, "Images analyzed (0/0)".into());
+                }
             }
             ProgressEvent::ImageFinished { completed, total } => {
-                self.bar.set_length(total as u64);
-                self.bar.set_position(completed as u64);
-                self.bar
-                    .set_message(format!("Analyzing images ({completed}/{total} complete)"));
+                let mut state = self.state.lock().unwrap();
+                if let Some(bar) = state.images.as_ref() {
+                    bar.set_length(total as u64);
+                    bar.set_position(completed as u64);
+                    bar.set_message(format!("Analyzing images ({completed}/{total} complete)"));
+                }
+                if completed >= total {
+                    Self::finish_slot(
+                        &mut state.images,
+                        format!("Analyzed images ({completed}/{total})"),
+                    );
+                }
             }
             ProgressEvent::MatchingStarted => {
-                self.resume_spinner();
-                self.bar.set_message("Comparing image fingerprints");
+                let mut state = self.state.lock().unwrap();
+                self.add_group(&mut state, ProgressGroup::Analysis);
+                Self::finish_slot(&mut state.images, "Images analyzed".into());
+                state.matching = Some(self.add_active_row("Comparing image fingerprints".into()));
             }
             ProgressEvent::ReportStarted => {
-                self.resume_spinner();
-                self.bar.set_message("Creating temporary visual report");
+                let mut state = self.state.lock().unwrap();
+                self.add_group(&mut state, ProgressGroup::Report);
+                Self::finish_slot(&mut state.matching, "Matches compared".into());
+                state.report = Some(self.add_active_row("Creating temporary visual report".into()));
             }
-            ProgressEvent::Finished | ProgressEvent::Failed => {
-                self.bar.disable_steady_tick();
-                self.bar.finish_and_clear();
+            ProgressEvent::Finished => {
+                let mut state = self.state.lock().unwrap();
+                self.finish_active_rows(&mut state);
+                self.add_group(&mut state, ProgressGroup::Complete);
+                let bar = self.add_active_row("Scan complete".into());
+                Self::complete_row(&bar, "Scan complete".into());
+                self.show_cursor();
+            }
+            ProgressEvent::Failed => {
+                let mut state = self.state.lock().unwrap();
+                self.fail_active_rows(&mut state);
+                self.add_group(&mut state, ProgressGroup::Complete);
+                let bar = self.add_active_row("Scan failed".into());
+                Self::fail_row(&bar, "Scan failed".into());
                 self.show_cursor();
             }
         }
     }
 }
 
-fn spinner_style() -> ProgressStyle {
-    ProgressStyle::with_template("{spinner:.cyan} {msg}")
+fn header_style() -> ProgressStyle {
+    ProgressStyle::with_template("{msg:.bold}").expect("the static header template is valid")
+}
+
+fn group_style() -> ProgressStyle {
+    ProgressStyle::with_template("{msg:.magenta}").expect("the static group template is valid")
+}
+
+fn active_style() -> ProgressStyle {
+    ProgressStyle::with_template("  {spinner:.cyan} {msg}")
         .expect("the static spinner template is valid")
         .tick_strings(&["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"])
 }
 
-fn download_style() -> ProgressStyle {
-    ProgressStyle::with_template(
-        "{spinner:.cyan} {msg} [{bar:32.cyan/blue}] {pos}/{len} ({elapsed_precise})",
-    )
-    .expect("the static progress template is valid")
-    .progress_chars("━━╾")
+fn completed_style() -> ProgressStyle {
+    ProgressStyle::with_template("  {spinner:.green} {msg}")
+        .expect("the static completed template is valid")
+        .tick_strings(&["✓", "✓"])
+}
+
+fn failed_style() -> ProgressStyle {
+    ProgressStyle::with_template("  {spinner:.red} {msg}")
+        .expect("the static failed template is valid")
+        .tick_strings(&["!", "!"])
 }
 
 #[cfg(test)]
@@ -395,5 +601,12 @@ pub mod tests {
         // Restoring twice is harmless, which is what makes Drop a safe backstop.
         progress.show_cursor();
         assert!(!progress.cursor_hidden.load(Ordering::Relaxed));
+    }
+
+    #[test]
+    fn checklist_completion_uses_a_checkmark_and_failures_use_an_exclamation() {
+        assert_eq!(completed_style().get_final_tick_str(), "✓");
+        assert_eq!(failed_style().get_final_tick_str(), "!");
+        assert_ne!(active_style().get_tick_str(0), "✓");
     }
 }

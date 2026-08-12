@@ -65,11 +65,12 @@ currently active Chrome profile is tried first. `--cookies` accepts the standard
 Netscape/Mozilla `cookies.txt` format produced by browser cookie exporters and
 curl.
 
-While running in an interactive terminal, `unpin` shows Pinterest acquisition
-status followed by a progress bar for image downloads and analysis. Concurrent
-stages report completed and active work rather than treating launch order as
-progress. Progress is written to stderr, so `--format json` remains clean on
-stdout.
+While running in an interactive terminal, `unpin` shows a persistent,
+grouped checklist of the scan. The active step has an animated spinner; when
+it completes, it remains visible with a checkmark. Concurrent stages report
+their own completed and active work rather than treating launch order as
+progress. The final checklist remains visible, and progress is written to
+stderr, so `--format json` remains clean on stdout.
 
 The text report separates byte-identical images from conservative visual
 candidates. Within each match it marks the best-resolution pin as `KEEP` and
