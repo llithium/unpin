@@ -677,7 +677,7 @@ async fn scans_selected_profile_boards_as_one_pooled_report() {
     assert_eq!(report.summary.pins_found, 2);
     assert_eq!(report.summary.pins_reported, Some(2));
     assert_eq!(report.summary.analyzed, 2);
-    assert_eq!(report.title(), "alice — 2 boards");
+    assert_eq!(report.title(), "alice 2 boards");
 
     // The duplicate spans the two boards, which a per-board scan could not find.
     assert_eq!(report.summary.exact_groups, 1);
@@ -736,7 +736,7 @@ async fn scans_selected_profile_boards_as_one_pooled_report() {
     assert!(text.contains("ACROSS BOARDS"));
     let html =
         std::fs::read_to_string(unpin::visual::create_temporary_report(&report).unwrap()).unwrap();
-    assert!(html.contains("alice — 2 boards"));
+    assert!(html.contains("alice 2 boards"));
     assert!(html.contains("class=\"board\""));
     assert!(html.contains("title=\"Interiors\""));
     assert!(html.contains("badge cross-board"));

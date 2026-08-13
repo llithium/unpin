@@ -158,7 +158,7 @@ impl Report {
             boards => {
                 let count = format!("{} boards", boards.len());
                 match &self.summary.username {
-                    Some(username) => format!("{username} — {count}"),
+                    Some(username) => format!("{username} {count}"),
                     None => count,
                 }
             }
@@ -748,8 +748,8 @@ mod tests {
         };
 
         let multi = report.render_text();
-        assert_eq!(report.title(), "alice — 2 boards");
-        assert!(multi.contains("alice — 2 boards"));
+        assert_eq!(report.title(), "alice 2 boards");
+        assert!(multi.contains("alice 2 boards"));
         assert!(multi.contains("[Interiors]"));
         assert!(multi.contains("[Mood board]"));
         assert!(multi.contains("BOARDS"));
