@@ -241,7 +241,7 @@ fn decode_segment(segment: &str) -> Result<String, PinterestError> {
 }
 
 fn is_pinterest_host(host: &str) -> bool {
-    host.starts_with("pinterest.") || host.contains(".pinterest.")
+    host == "pinterest.com" || host.ends_with(".pinterest.com")
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Eq, PartialEq)]
@@ -1161,6 +1161,10 @@ mod tests {
     fn rejects_unusable_targets() {
         for input in [
             "https://example.com/alice/board/",
+            "https://pinterest.net/alice/board/",
+            "https://pinterest.com.attacker.example/alice/board/",
+            "https://anything.pinterest.com.attacker.example/alice/board/",
+            "https://notpinterest.com/alice/board/",
             "https://www.pinterest.com/pin/123/",
             "https://www.pinterest.com/search/pins/?q=test",
             "https://www.pinterest.com/alice/board/extra/",
