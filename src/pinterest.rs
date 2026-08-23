@@ -1,9 +1,10 @@
 use std::collections::HashSet;
+use std::error::Error as StdError;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
 
-use futures_util::stream::{self, StreamExt};
+use futures_util::stream::{self, StreamExt, TryStreamExt};
 use percent_encoding::percent_decode_str;
 use rand::Rng;
 use reqwest::header::{HeaderMap, HeaderName, HeaderValue};
@@ -16,6 +17,15 @@ use crate::auth::BrowserCookie;
 use crate::progress::{NoProgress, ProgressEvent, ProgressSink};
 
 const MAX_PAGES: usize = 10_000;
+/// A successful API response larger than this is rejected as an invalid
+/// response. The body is checked from `Content-Length` and while streaming, so
+/// a page cannot silently grow without bound; transport failures remain
+/// `PinterestError::Request`.
+const MAX_API_RESPONSE_BYTES: u64 = 16 * 1024 * 1024;
+/// A feed that would retain more than this many result values fails with an
+/// invalid-response limit error before the extra page is appended. It never
+/// returns a silently truncated feed.
+const MAX_FEED_RESULTS: usize = 50_000;
 const DEFAULT_ROOT: &str = "https://www.pinterest.com/";
 const BOARD_PAGE_SIZE: usize = 25;
 /// Pin feeds default to 25 results per page, and pagination is strictly
@@ -307,7 +317,7 @@ pub enum PinterestError {
     Request {
         resource: &'static str,
         #[source]
-        source: reqwest::Error,
+        source: Box<dyn StdError + Send + Sync>,
     },
 
     #[error("Pinterest returned HTTP {status} for {resource}")]
@@ -723,7 +733,20 @@ impl PinterestClient {
             };
             // Read the bookmark before the results are moved out of the response.
             let bookmark = response_bookmark(&response);
-            all_results.extend(response_results(response, resource)?);
+            let page_results = response_results(response, resource)?;
+            let retained_results = all_results
+                .len()
+                .checked_add(page_results.len())
+                .ok_or_else(|| {
+                    invalid_response(resource, "feed result count overflowed its safety check")
+                })?;
+            if retained_results > MAX_FEED_RESULTS {
+                return Err(invalid_response(
+                    resource,
+                    format!("feed exceeded the {MAX_FEED_RESULTS}-result retention safety limit"),
+                ));
+            }
+            all_results.extend(page_results);
             progress.emit(ProgressEvent::PageFetched {
                 resource,
                 page: page_index + 1,
@@ -787,10 +810,10 @@ impl PinterestClient {
                     Ok(response) => {
                         let status = response.status();
                         if status.is_success() {
-                            return response
-                                .json()
-                                .await
-                                .map_err(|source| PinterestError::Request { resource, source });
+                            let body =
+                                read_api_body(response, resource, MAX_API_RESPONSE_BYTES).await?;
+                            return serde_json::from_slice(&body)
+                                .map_err(|source| request_error(resource, source));
                         }
                         if attempt + 1 < MAX_REQUEST_ATTEMPTS && is_retryable_status(status) {
                             retry_delay(attempt, response.headers().get("retry-after"))
@@ -804,7 +827,7 @@ impl PinterestClient {
                     {
                         retry_delay(attempt, None)
                     }
-                    Err(source) => return Err(PinterestError::Request { resource, source }),
+                    Err(source) => return Err(request_error(resource, source)),
                 }
             };
 
@@ -814,6 +837,54 @@ impl PinterestClient {
 
         unreachable!("the request loop always returns on its final attempt")
     }
+}
+
+async fn read_api_body(
+    response: reqwest::Response,
+    resource: &'static str,
+    max_bytes: u64,
+) -> Result<Vec<u8>, PinterestError> {
+    if response
+        .content_length()
+        .is_some_and(|length| length > max_bytes)
+    {
+        return Err(invalid_response(
+            resource,
+            format!("response body exceeded the {max_bytes}-byte safety limit"),
+        ));
+    }
+
+    let capacity = response
+        .content_length()
+        .and_then(|length| usize::try_from(length).ok())
+        .unwrap_or_default();
+    let mut body = Vec::with_capacity(capacity);
+    let mut stream = response.bytes_stream();
+    while let Some(chunk) = stream
+        .try_next()
+        .await
+        .map_err(|source| request_error(resource, source))?
+    {
+        let new_length = u64::try_from(body.len())
+            .ok()
+            .and_then(|length| {
+                u64::try_from(chunk.len())
+                    .ok()
+                    .and_then(|chunk_length| length.checked_add(chunk_length))
+            })
+            .ok_or_else(|| {
+                invalid_response(resource, "response body size overflowed its safety check")
+            })?;
+        if new_length > max_bytes {
+            return Err(invalid_response(
+                resource,
+                format!("response body exceeded the {max_bytes}-byte safety limit"),
+            ));
+        }
+        body.extend_from_slice(&chunk);
+    }
+
+    Ok(body)
 }
 
 pub(crate) fn incomplete_scan_warning(
@@ -1087,6 +1158,16 @@ fn value_usize(value: Option<&Value>) -> Option<usize> {
     }
 }
 
+fn request_error(
+    resource: &'static str,
+    source: impl StdError + Send + Sync + 'static,
+) -> PinterestError {
+    PinterestError::Request {
+        resource,
+        source: Box::new(source),
+    }
+}
+
 fn invalid_response(resource: &'static str, message: impl Into<String>) -> PinterestError {
     PinterestError::InvalidResponse {
         resource,
@@ -1308,6 +1389,98 @@ mod tests {
             }}})),
             None
         );
+    }
+
+    #[tokio::test]
+    async fn oversized_api_response_bodies_are_rejected_before_json_deserialization() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        use tokio::net::TcpListener;
+
+        let listener = TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.unwrap();
+            let mut request = Vec::new();
+            let mut buffer = [0_u8; 1024];
+            while !request.windows(4).any(|window| window == b"\r\n\r\n") {
+                let bytes = stream.read(&mut buffer).await.unwrap();
+                if bytes == 0 {
+                    return;
+                }
+                request.extend_from_slice(&buffer[..bytes]);
+            }
+
+            let response = concat!(
+                "HTTP/1.1 200 OK\r\n",
+                "Content-Type: application/json\r\n",
+                "Transfer-Encoding: chunked\r\n",
+                "Connection: close\r\n\r\n",
+                "5\r\nhello\r\n",
+                "5\r\nworld\r\n",
+                "0\r\n\r\n"
+            );
+            let _ = stream.write_all(response.as_bytes()).await;
+        });
+
+        let client = PinterestClient::with_api_root(
+            Url::parse("https://www.pinterest.com/").unwrap(),
+            Url::parse(&format!("http://{address}/")).unwrap(),
+        )
+        .unwrap();
+        let response = client
+            .http
+            .get(format!("http://{address}/"))
+            .send()
+            .await
+            .unwrap();
+        let error = read_api_body(response, "Feed", 4).await.unwrap_err();
+
+        assert!(matches!(
+            error,
+            PinterestError::InvalidResponse {
+                resource: "Feed",
+                message
+            } if message.contains("safety limit")
+        ));
+        let _ = server.await;
+    }
+
+    #[tokio::test]
+    async fn feeds_exceeding_the_result_limit_return_an_invalid_response() {
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        let results = (0..=MAX_FEED_RESULTS)
+            .map(|id| json!({ "id": id }))
+            .collect::<Vec<_>>();
+        Mock::given(method("GET"))
+            .and(path("/resource/FeedResource/get/"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "resource_response": { "data": results },
+                "resource": { "options": { "bookmarks": ["-end-"] } }
+            })))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let client = PinterestClient::with_api_root(
+            Url::parse("https://www.pinterest.com/").unwrap(),
+            Url::parse(&server.uri()).unwrap(),
+        )
+        .unwrap();
+        let error = client
+            .paginate("Feed", json!({}), &NoProgress)
+            .await
+            .unwrap_err();
+
+        assert!(matches!(
+            error,
+            PinterestError::InvalidResponse {
+                resource: "Feed",
+                message
+            } if message.contains("retention safety limit")
+        ));
     }
 
     #[test]

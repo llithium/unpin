@@ -4,6 +4,7 @@ use std::ffi::OsString;
 use std::fs;
 use std::io::{Cursor, Write};
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use std::time::{Duration, SystemTime};
 
 use futures_util::stream::{self, StreamExt, TryStreamExt};
@@ -14,6 +15,7 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use tempfile::Builder;
 use thiserror::Error;
+use tokio::sync::{OwnedSemaphorePermit, Semaphore};
 
 use crate::pinterest::{Pin, SkippedPin};
 use crate::progress::{NoProgress, ProgressEvent, ProgressSink};
@@ -21,11 +23,19 @@ use crate::report::{
     DuplicateGroup, MatchScope, Recommendation, ReportItem, VisualCandidate, rank_tuple,
 };
 
-/// In-flight image buffers are bounded by this plus [`cpu_concurrency`]. Typical
-/// Pinterest originals are a few megabytes, so the practical ceiling is modest,
-/// but [`MAX_IMAGE_BYTES`] means a pathological board could hold much more.
 const DOWNLOAD_CONCURRENCY: usize = 48;
+/// A response larger than this is reported as a skipped pin. The body is checked
+/// both from its advertised length and while it streams, because image servers
+/// do not always send a trustworthy `Content-Length`.
 const MAX_IMAGE_BYTES: u64 = 100 * 1024 * 1024;
+/// Downloaded image buffers reserve one semaphore permit per byte and keep that
+/// reservation through decoding. This prevents completed downloads from
+/// accumulating to `DOWNLOAD_CONCURRENCY * MAX_IMAGE_BYTES` while CPU work lags.
+const MAX_IN_FLIGHT_IMAGE_BYTES: u64 = 512 * 1024 * 1024;
+/// Images above 16 megapixels are skipped before full-resolution decoding. The
+/// image decoder also receives a matching allocation ceiling as defense in depth;
+/// a breach remains an ordinary skipped-pin reason.
+const MAX_DECODED_PIXELS: u64 = 16 * 1024 * 1024;
 const STRUCTURAL_SIGNATURE_SIZE: u32 = 64;
 const DIFFERENCE_HASH_WIDTH: u32 = 9;
 const DIFFERENCE_HASH_HEIGHT: u32 = 8;
@@ -33,6 +43,12 @@ const MIN_STRUCTURAL_SIMILARITY: f64 = 0.97;
 const CACHE_FORMAT_VERSION: u8 = 2;
 const CACHE_MAX_AGE: Duration = Duration::from_secs(30 * 24 * 60 * 60);
 const CACHE_ENTRY_SUBDIRECTORY: &str = "fingerprints-v2";
+
+struct ImageAnalysisLimits {
+    max_image_bytes: u64,
+    max_decoded_pixels: u64,
+    image_buffer_budget: Arc<Semaphore>,
+}
 
 /// Decoding and downscaling are CPU-bound and run on the blocking pool, so the
 /// number in flight is tied to the machine rather than to the network limit.
@@ -294,6 +310,38 @@ pub(crate) async fn analyze_pins_with_progress_and_cache(
     progress: &dyn ProgressSink,
     cache_directory: Option<PathBuf>,
 ) -> Result<AnalysisResult, AnalysisError> {
+    let image_buffer_budget = Arc::new(Semaphore::new(
+        usize::try_from(MAX_IN_FLIGHT_IMAGE_BYTES)
+            .expect("the image buffer budget must fit in usize"),
+    ));
+    analyze_pins_with_limits(
+        pins,
+        exact_only,
+        similarity_threshold,
+        progress,
+        cache_directory,
+        ImageAnalysisLimits {
+            max_image_bytes: MAX_IMAGE_BYTES,
+            max_decoded_pixels: MAX_DECODED_PIXELS,
+            image_buffer_budget,
+        },
+    )
+    .await
+}
+
+async fn analyze_pins_with_limits(
+    pins: Vec<Pin>,
+    exact_only: bool,
+    similarity_threshold: u8,
+    progress: &dyn ProgressSink,
+    cache_directory: Option<PathBuf>,
+    limits: ImageAnalysisLimits,
+) -> Result<AnalysisResult, AnalysisError> {
+    let ImageAnalysisLimits {
+        max_image_bytes,
+        max_decoded_pixels,
+        image_buffer_budget,
+    } = limits;
     let http = Client::builder()
         .timeout(Duration::from_secs(30))
         .user_agent("unpin/0.1")
@@ -341,8 +389,10 @@ pub(crate) async fn analyze_pins_with_progress_and_cache(
     // decoding an image no longer occupies a slot that could be pulling bytes.
     let fingerprints = stream::iter(misses.into_iter().map(|(media_url, pins)| {
         let http = http.clone();
+        let image_buffer_budget = Arc::clone(&image_buffer_budget);
         async move {
-            let bytes = download_bytes(&http, &media_url).await;
+            let bytes =
+                download_bytes(&http, &media_url, &image_buffer_budget, max_image_bytes).await;
             (media_url, pins, bytes)
         }
     }))
@@ -351,10 +401,13 @@ pub(crate) async fn analyze_pins_with_progress_and_cache(
         let cache = cache.clone();
         async move {
             let fingerprint = match bytes {
-                Ok(bytes) => {
+                Ok((bytes, buffer_permit)) => {
                     let cached_url = media_url.clone();
                     tokio::task::spawn_blocking(move || {
-                        let fingerprint = fingerprint_image(&bytes)?;
+                        // Keep the compressed-buffer reservation until the
+                        // decoded image and its derived hashes are finished.
+                        let _buffer_permit = buffer_permit;
+                        let fingerprint = fingerprint_image(&bytes, max_decoded_pixels)?;
                         if let Some(cache) = &cache {
                             cache.put(&cached_url, &fingerprint);
                         }
@@ -450,9 +503,10 @@ fn analyzed_images(
 }
 
 /// Decodes and hashes downloaded bytes. Runs on the blocking pool.
-fn fingerprint_image(bytes: &[u8]) -> Result<ImageFingerprint, String> {
-    let image = decode_image(bytes)?;
+fn fingerprint_image(bytes: &[u8], max_decoded_pixels: u64) -> Result<ImageFingerprint, String> {
+    let image = decode_image(bytes, max_decoded_pixels)?;
     let (width, height) = image.dimensions();
+    checked_pixel_count(width, height, max_decoded_pixels)?;
     if width == 0 || height == 0 {
         return Err("decoded image has zero width or height".into());
     }
@@ -470,7 +524,12 @@ fn fingerprint_image(bytes: &[u8]) -> Result<ImageFingerprint, String> {
     })
 }
 
-async fn download_bytes(http: &Client, media_url: &str) -> Result<Vec<u8>, String> {
+async fn download_bytes(
+    http: &Client,
+    media_url: &str,
+    image_buffer_budget: &Arc<Semaphore>,
+    max_image_bytes: u64,
+) -> Result<(Vec<u8>, OwnedSemaphorePermit), String> {
     let response = http
         .get(media_url)
         .send()
@@ -485,41 +544,99 @@ async fn download_bytes(http: &Client, media_url: &str) -> Result<Vec<u8>, Strin
     }
     if response
         .content_length()
-        .is_some_and(|length| length > MAX_IMAGE_BYTES)
+        .is_some_and(|length| length > max_image_bytes)
     {
-        return Err(format!(
-            "image exceeds the {} MiB safety limit",
-            MAX_IMAGE_BYTES / 1024 / 1024
-        ));
+        return Err(image_size_limit_error(max_image_bytes));
     }
 
-    let mut bytes = Vec::new();
+    // Reserve the advertised size when available. Chunked/unknown-length
+    // responses reserve the full per-image ceiling before their first body
+    // chunk, so a slow decoder cannot be surrounded by many growing buffers.
+    let reserved_bytes = response.content_length().unwrap_or(max_image_bytes);
+    let reserved_permits = u32::try_from(reserved_bytes)
+        .map_err(|_| "image safety limit cannot be represented by the buffer budget".to_owned())?;
+    let buffer_permit = Arc::clone(image_buffer_budget)
+        .acquire_many_owned(reserved_permits)
+        .await
+        .map_err(|_| "image buffer budget is unavailable".to_owned())?;
+    let capacity = usize::try_from(reserved_bytes)
+        .map_err(|_| "image safety limit cannot fit in memory on this platform".to_owned())?;
+    let mut bytes = Vec::with_capacity(capacity);
     let mut stream = response.bytes_stream();
     while let Some(chunk) = stream
         .try_next()
         .await
         .map_err(|error| format!("image download failed: {}", concise_reqwest_error(&error)))?
     {
-        let new_length = bytes.len() as u64 + chunk.len() as u64;
-        if new_length > MAX_IMAGE_BYTES {
-            return Err(format!(
-                "image exceeds the {} MiB safety limit",
-                MAX_IMAGE_BYTES / 1024 / 1024
-            ));
+        let new_length = u64::try_from(bytes.len())
+            .ok()
+            .and_then(|length| {
+                u64::try_from(chunk.len())
+                    .ok()
+                    .and_then(|chunk_length| length.checked_add(chunk_length))
+            })
+            .ok_or_else(|| "image response size overflowed its safety check".to_owned())?;
+        if new_length > max_image_bytes {
+            return Err(image_size_limit_error(max_image_bytes));
         }
         bytes.extend_from_slice(&chunk);
     }
 
-    Ok(bytes)
+    Ok((bytes, buffer_permit))
 }
 
-fn decode_image(bytes: &[u8]) -> Result<DynamicImage, String> {
-    let reader = ImageReader::new(Cursor::new(bytes))
+fn image_reader(bytes: &[u8]) -> Result<ImageReader<Cursor<&[u8]>>, String> {
+    ImageReader::new(Cursor::new(bytes))
         .with_guessed_format()
-        .map_err(|error| format!("could not identify image format: {error}"))?;
+        .map_err(|error| format!("could not identify image format: {error}"))
+}
+
+fn decode_image(bytes: &[u8], max_decoded_pixels: u64) -> Result<DynamicImage, String> {
+    // Read only the format header first. This rejects a decompression bomb
+    // before `DynamicImage::from_decoder` allocates the full raster.
+    let (width, height) = image_reader(bytes)?
+        .into_dimensions()
+        .map_err(|error| format!("could not read image dimensions: {error}"))?;
+    checked_pixel_count(width, height, max_decoded_pixels)?;
+
+    // `max_alloc` is non-strict for some codecs, so the explicit dimension
+    // check above and the post-decode check in `fingerprint_image` remain
+    // mandatory. It still protects codecs that honor the decoder allocation
+    // limit, including the PNG path used by the regression tests.
+    let max_alloc = max_decoded_pixels
+        .checked_mul(4)
+        .ok_or_else(|| "decoded pixel limit overflowed its allocation check".to_owned())?;
+    let mut reader = image_reader(bytes)?;
+    let mut limits = image::Limits::default();
+    limits.max_alloc = Some(max_alloc);
+    reader.limits(limits);
     reader
         .decode()
         .map_err(|error| format!("could not decode image: {error}"))
+}
+
+fn checked_pixel_count(width: u32, height: u32, max_decoded_pixels: u64) -> Result<u64, String> {
+    let pixels = u64::from(width)
+        .checked_mul(u64::from(height))
+        .ok_or_else(|| "decoded image dimensions overflowed the pixel check".to_owned())?;
+    if pixels > max_decoded_pixels {
+        return Err(format!(
+            "decoded image has {pixels} pixels, exceeding the {max_decoded_pixels}-pixel safety limit"
+        ));
+    }
+    Ok(pixels)
+}
+
+fn image_size_limit_error(max_image_bytes: u64) -> String {
+    const MIB: u64 = 1024 * 1024;
+    if max_image_bytes.is_multiple_of(MIB) {
+        format!(
+            "image exceeds the {} MiB safety limit",
+            max_image_bytes / MIB
+        )
+    } else {
+        format!("image exceeds the {max_image_bytes}-byte safety limit")
+    }
 }
 
 fn concise_reqwest_error(error: &reqwest::Error) -> &'static str {
@@ -957,6 +1074,145 @@ mod tests {
 
         assert_eq!(result.analyzed, 1);
         assert!(result.skipped.is_empty());
+    }
+
+    #[tokio::test]
+    async fn image_streams_over_the_byte_limit_are_skipped() {
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/oversized"))
+            .respond_with(ResponseTemplate::new(200).set_body_bytes(vec![0_u8; 5]))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let pin = Pin {
+            id: "oversized-pin".into(),
+            media_url: format!("{}/oversized", server.uri()),
+            metadata_width: None,
+            metadata_height: None,
+            board: None,
+        };
+        let result = analyze_pins_with_limits(
+            vec![pin],
+            true,
+            5,
+            &NoProgress,
+            None,
+            ImageAnalysisLimits {
+                max_image_bytes: 4,
+                max_decoded_pixels: MAX_DECODED_PIXELS,
+                image_buffer_budget: Arc::new(Semaphore::new(16)),
+            },
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(result.analyzed, 0);
+        assert_eq!(result.skipped.len(), 1);
+        assert!(result.skipped[0].reason.contains("safety limit"));
+    }
+
+    #[tokio::test]
+    async fn images_over_the_decoded_pixel_limit_are_skipped_before_fingerprinting() {
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let mut encoded = Cursor::new(Vec::new());
+        DynamicImage::new_rgb8(3, 2)
+            .write_to(&mut encoded, image::ImageFormat::Png)
+            .unwrap();
+        let encoded = encoded.into_inner();
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/too-many-pixels.png"))
+            .respond_with(ResponseTemplate::new(200).set_body_bytes(encoded.clone()))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let pin = Pin {
+            id: "too-many-pixels".into(),
+            media_url: format!("{}/too-many-pixels.png", server.uri()),
+            metadata_width: None,
+            metadata_height: None,
+            board: None,
+        };
+        let result = analyze_pins_with_limits(
+            vec![pin],
+            true,
+            5,
+            &NoProgress,
+            None,
+            ImageAnalysisLimits {
+                max_image_bytes: u64::try_from(encoded.len()).unwrap(),
+                max_decoded_pixels: 5,
+                image_buffer_budget: Arc::new(Semaphore::new(encoded.len() + 1)),
+            },
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(result.analyzed, 0);
+        assert_eq!(result.skipped.len(), 1);
+        assert!(
+            result.skipped[0].reason.contains("6 pixels")
+                && result.skipped[0].reason.contains("5-pixel safety limit"),
+            "{}",
+            result.skipped[0].reason
+        );
+    }
+
+    #[tokio::test]
+    async fn image_buffer_budget_does_not_allow_completed_downloads_to_accumulate() {
+        use tokio::time::timeout;
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/small"))
+            .respond_with(ResponseTemplate::new(200).set_body_bytes(vec![1_u8; 4]))
+            .expect(2)
+            .mount(&server)
+            .await;
+
+        let http = Client::builder().build().unwrap();
+        let image_buffer_budget = Arc::new(Semaphore::new(4));
+        let first = download_bytes(
+            &http,
+            &format!("{}/small", server.uri()),
+            &image_buffer_budget,
+            4,
+        )
+        .await
+        .unwrap();
+        assert_eq!(first.0.len(), 4);
+        assert_eq!(image_buffer_budget.available_permits(), 0);
+
+        let mut second = tokio::spawn({
+            let http = http.clone();
+            let image_buffer_budget = Arc::clone(&image_buffer_budget);
+            let url = format!("{}/small", server.uri());
+            async move { download_bytes(&http, &url, &image_buffer_budget, 4).await }
+        });
+        assert!(
+            timeout(Duration::from_millis(100), &mut second)
+                .await
+                .is_err()
+        );
+
+        drop(first);
+        let second = timeout(Duration::from_secs(1), second)
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
+        assert_eq!(second.0.len(), 4);
+        drop(second);
     }
 
     #[tokio::test]
