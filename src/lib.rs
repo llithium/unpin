@@ -7,30 +7,16 @@ pub mod report;
 pub mod select;
 pub mod visual;
 
-use futures_util::stream::{self, StreamExt};
-use std::collections::HashSet;
-use std::io::IsTerminal;
-use std::sync::Arc;
-use std::sync::atomic::{AtomicUsize, Ordering};
+mod intake;
+
 use thiserror::Error;
 use url::Url;
 
 use crate::cli::Cli;
-use crate::pinterest::{BoardRef, PinterestClient, PinterestError, Target};
+use crate::intake::{IntakeError, IntakeRequest, SourceOutcome, SourceSelection};
+use crate::pinterest::{PinterestClient, PinterestError, Target};
 use crate::progress::{NoProgress, ProgressEvent, ProgressSink};
 use crate::report::{Report, ScannedBoard, Summary};
-
-struct ResolvedSources {
-    user: Option<crate::pinterest::UserTarget>,
-    boards: Vec<BoardRef>,
-    include_unorganized: bool,
-    prefetched_unorganized: Option<Result<crate::pinterest::BoardPins, PinterestError>>,
-}
-
-/// Board feeds paginate sequentially, so overlapping whole boards is the only
-/// way to shorten a multi-board scan. Individual requests still share the
-/// client's API request limit.
-const BOARD_FETCH_CONCURRENCY: usize = 12;
 
 #[derive(Debug, Error)]
 pub enum AppError {
@@ -52,13 +38,28 @@ pub enum AppError {
     #[error("--boards and --interactive only apply to a username or profile URL")]
     BoardFlagsWithBoardUrl,
 
-    /// Every selected board failed to fetch, so the per-board reasons are the
-    /// only useful thing to report.
+    /// Every selected source failed to fetch, so the per-source reasons are
+    /// the only useful thing to report.
     #[error("no board could be scanned{}", listed(reasons))]
     AllBoardsFailed { reasons: Vec<String> },
 
     #[error("no analyzable static image pins were found{}", listed(reasons))]
     NoAnalyzablePins { reasons: Vec<String> },
+}
+
+fn map_intake_error(error: IntakeError) -> AppError {
+    match error {
+        IntakeError::Pinterest(error) => AppError::Pinterest(error),
+        IntakeError::Select(error) => AppError::Select(error),
+        IntakeError::BoardSelectionNotInteractive => AppError::BoardSelectionNotInteractive,
+        IntakeError::BoardFlagsWithBoardUrl => AppError::BoardFlagsWithBoardUrl,
+        IntakeError::AllSourcesFailed { failures } => AppError::AllBoardsFailed {
+            reasons: failures
+                .into_iter()
+                .map(|failure| failure.warning())
+                .collect(),
+        },
+    }
 }
 
 /// Renders collected reasons as an indented list under an error message.
@@ -102,125 +103,42 @@ pub async fn run_with_api_root_and_progress(
         None => PinterestClient::with_cookies(root, cookies)?,
     };
 
-    let resolved = resolve_boards(cli, &target, &client, progress).await?;
-    let user = resolved.user;
-    let boards = resolved.boards;
-    let username = user.as_ref().map(|user| user.username.clone());
+    let selection = if cli.interactive {
+        SourceSelection::Interactive
+    } else if cli.boards.is_empty() {
+        SourceSelection::Default
+    } else {
+        SourceSelection::Requested(cli.boards.clone())
+    };
+    let intake = intake::collect(IntakeRequest { target, selection }, &client, progress)
+        .await
+        .map_err(map_intake_error)?;
 
-    // Pins from every selected board are pooled into one analysis so that
-    // duplicates spanning two boards are found as well.
-    let mut seen_pin_ids = HashSet::new();
+    let username = intake.username;
     let mut scanned_boards = Vec::new();
-    let mut pins = Vec::new();
-    let mut skipped = Vec::new();
+    let pins = intake.pins;
+    let mut skipped = intake.skipped;
     let mut warnings = Vec::new();
-    // A profile feed is another independent source, even when the user has
-    // only one visible board. Do not let one board failure prevent its
-    // unorganized pins from being scanned.
-    let multiple = boards.len() > 1 || user.is_some();
-
-    let board_total = boards.len();
-    let board_completed = Arc::new(AtomicUsize::new(0));
-    let board_fetches = stream::iter(boards.into_iter().enumerate().map(|(index, board)| {
-        let client = client.clone();
-        let board_completed = Arc::clone(&board_completed);
-        async move {
-            progress.emit(ProgressEvent::BoardStarted {
-                name: board.name.clone(),
-                current: index + 1,
-                total: board_total,
-            });
-            let mut board_pin_ids = HashSet::new();
-            let fetched = client
-                .fetch_board_pins(&board, &mut board_pin_ids, progress)
-                .await;
-            let completed = board_completed.fetch_add(1, Ordering::Relaxed) + 1;
-            progress.emit(ProgressEvent::BoardFinished {
-                name: board.name.clone(),
-                completed,
-                total: board_total,
-            });
-            (index, board, fetched)
-        }
-    }))
-    .buffer_unordered(BOARD_FETCH_CONCURRENCY);
-    futures_util::pin_mut!(board_fetches);
-    let mut board_results = board_fetches.collect::<Vec<_>>().await;
-    board_results.sort_by_key(|(index, _, _)| *index);
-
-    for (_, board, fetched) in board_results {
-        let mut fetched = match fetched {
-            Ok(fetched) => fetched,
-            // One unreachable board should not throw away every other board's
-            // results; a lone board has nothing to fall back on.
-            Err(error) if multiple => {
-                warnings.push(format!("{}: skipped, {error}", board.name));
-                continue;
-            }
-            Err(error) => return Err(error.into()),
-        };
-        retain_unseen_board_items(&mut fetched, &mut seen_pin_ids, client.is_authenticated());
-
-        scanned_boards.push(ScannedBoard {
-            name: fetched.board_name.clone(),
-            url: board.url.clone(),
-            pins_reported: fetched.pins_reported,
-            pins_found: fetched.pins_found,
-        });
-        pins.append(&mut fetched.pins);
-        skipped.append(&mut fetched.skipped);
-        // Only a multi-board scan needs to say which board a warning is about.
-        warnings.extend(fetched.warnings.into_iter().map(|warning| {
-            if multiple {
-                format!("{}: {warning}", board.name)
-            } else {
-                warning
-            }
-        }));
-    }
-
-    // Pins saved straight to a profile are displayed by Pinterest as
-    // "Unorganized ideas", not as a board. Include them in every profile scan
-    // so they participate in the same duplicate analysis as board pins.
-    if let Some(user) = user
-        && resolved.include_unorganized
-    {
-        let fetched = match resolved.prefetched_unorganized {
-            Some(fetched) => fetched,
-            None => {
-                client
-                    .fetch_user_pins(&user, &mut seen_pin_ids, progress)
-                    .await
-            }
-        };
-        match fetched {
-            Ok(mut fetched) => {
+    for outcome in intake.sources {
+        match outcome {
+            SourceOutcome::Collected {
+                source,
+                warnings: source_warnings,
+            } => {
                 scanned_boards.push(ScannedBoard {
-                    name: fetched.board_name.clone(),
-                    url: format!("https://www.pinterest.com/{}/", user.username),
-                    pins_reported: fetched.pins_reported,
-                    pins_found: fetched.pins_found,
+                    name: source.name,
+                    url: source.url,
+                    pins_reported: source.pins_reported,
+                    pins_found: source.pins_found,
                 });
-                pins.append(&mut fetched.pins);
-                skipped.append(&mut fetched.skipped);
-                warnings.extend(fetched.warnings);
+                warnings.extend(source_warnings.into_iter().map(|warning| warning.render()));
             }
-            // Board results remain useful if Pinterest denies just the profile
-            // feed (for example, for a private profile viewed anonymously).
-            // When every source fails, the common check below turns these
-            // source-specific reasons into one actionable error.
-            Err(error) => {
-                warnings.push(format!("Unorganized ideas: skipped, {error}"));
+            SourceOutcome::Failed { source, error } => {
+                warnings.push(format!("{}: skipped, {error}", source.name));
             }
         }
     }
 
-    // Distinguish "nothing could be fetched" from "fetched, but nothing was
-    // analyzable": only the first carries the per-board failure reasons, and
-    // reporting it as the second would be both wrong and unactionable.
-    if scanned_boards.is_empty() {
-        return Err(AppError::AllBoardsFailed { reasons: warnings });
-    }
     if pins.is_empty() {
         return Err(AppError::NoAnalyzablePins { reasons: warnings });
     }
@@ -280,252 +198,4 @@ pub async fn run_with_api_root_and_progress(
         warnings,
         visual_report: None,
     })
-}
-
-fn retain_unseen_board_items(
-    fetched: &mut crate::pinterest::BoardPins,
-    seen_pin_ids: &mut HashSet<String>,
-    authenticated: bool,
-) {
-    fetched
-        .pins
-        .retain(|pin| seen_pin_ids.insert(pin.id.clone()));
-    fetched.skipped.retain(|pin| {
-        pin.pin_id
-            .as_ref()
-            .is_none_or(|id| seen_pin_ids.insert(id.clone()))
-    });
-    fetched.pins_found = fetched.pins.len() + fetched.skipped.len();
-    fetched
-        .warnings
-        .retain(|warning| !warning.starts_with("Pinterest reports "));
-    if let Some(warning) = crate::pinterest::incomplete_scan_warning(
-        authenticated,
-        fetched.pins_reported,
-        fetched.pins_found,
-    ) {
-        fetched.warnings.push(warning);
-    }
-}
-
-/// Works out which boards to scan, prompting when a profile needs a choice.
-async fn resolve_boards(
-    cli: &Cli,
-    target: &Target,
-    client: &PinterestClient,
-    progress: &dyn ProgressSink,
-) -> Result<ResolvedSources, AppError> {
-    let selecting = !cli.boards.is_empty() || cli.interactive;
-
-    let user = match target {
-        Target::Board(board) => {
-            if selecting {
-                return Err(AppError::BoardFlagsWithBoardUrl);
-            }
-            let board = client.resolve_board(board, progress).await?;
-            return Ok(ResolvedSources {
-                user: None,
-                boards: vec![board],
-                include_unorganized: false,
-                prefetched_unorganized: None,
-            });
-        }
-        Target::User(user) => user,
-    };
-
-    // Decide how boards will be chosen before fetching them, so a run that
-    // cannot prompt fails immediately instead of after a network round trip.
-    if cli.interactive && !(std::io::stdin().is_terminal() && std::io::stderr().is_terminal()) {
-        return Err(AppError::BoardSelectionNotInteractive);
-    }
-
-    let boards = client.fetch_user_boards(user, progress).await?;
-    if boards.is_empty() && !cli.boards.is_empty() {
-        return Err(select::SelectError::NoBoards {
-            username: user.username.clone(),
-        }
-        .into());
-    }
-
-    let mut include_unorganized = cli.boards.is_empty();
-    let mut prefetched_unorganized = None;
-    let selected = if !cli.boards.is_empty() {
-        include_unorganized = false;
-        select::resolve_requested(&cli.boards, &boards)?
-    } else if cli.interactive {
-        let fetched = client
-            .fetch_user_pins(user, &mut HashSet::new(), progress)
-            .await;
-        let unorganized_count = fetched.as_ref().ok().map(|pins| pins.pins_found);
-        let mut choices = boards.clone();
-        choices.push(BoardRef {
-            id: "__unorganized__".into(),
-            name: "Unorganized ideas".into(),
-            slug: "_quick_saves".into(),
-            url: format!("https://www.pinterest.com/{}/", user.username),
-            pins_reported: unorganized_count,
-            section_count: 0,
-            is_secret: false,
-        });
-        progress.emit(ProgressEvent::SelectionStarted);
-        let chosen = select::choose_boards(&user.username, &choices);
-        progress.emit(ProgressEvent::SelectionFinished);
-        let chosen = chosen?;
-        include_unorganized = chosen.contains(&boards.len());
-        if include_unorganized {
-            prefetched_unorganized = Some(fetched);
-        }
-        chosen
-            .into_iter()
-            .filter(|index| *index < boards.len())
-            .collect()
-    } else {
-        (0..boards.len()).collect()
-    };
-
-    let boards = selected
-        .into_iter()
-        .map(|index| boards[index].clone())
-        .collect();
-    Ok(ResolvedSources {
-        user: Some(user.clone()),
-        boards,
-        include_unorganized,
-        prefetched_unorganized,
-    })
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::pinterest::{BoardPins, Pin, SkippedPin};
-
-    #[test]
-    fn concurrent_board_merge_deduplicates_in_original_order() {
-        let mut seen = HashSet::from(["already-seen".to_owned()]);
-        let mut fetched = BoardPins {
-            board_name: "Second board".into(),
-            pins_reported: Some(3),
-            pins_found: 3,
-            pins: vec![
-                Pin {
-                    id: "already-seen".into(),
-                    media_url: "https://example.com/duplicate.jpg".into(),
-                    metadata_width: None,
-                    metadata_height: None,
-                    board: Some("Second board".into()),
-                },
-                Pin {
-                    id: "new-pin".into(),
-                    media_url: "https://example.com/new.jpg".into(),
-                    metadata_width: None,
-                    metadata_height: None,
-                    board: Some("Second board".into()),
-                },
-            ],
-            skipped: vec![SkippedPin {
-                pin_id: Some("already-seen".into()),
-                pin_url: None,
-                reason: "unsupported".into(),
-                board: Some("Second board".into()),
-            }],
-            warnings: Vec::new(),
-        };
-
-        retain_unseen_board_items(&mut fetched, &mut seen, false);
-
-        assert_eq!(fetched.pins.len(), 1);
-        assert_eq!(fetched.pins[0].id, "new-pin");
-        assert!(fetched.skipped.is_empty());
-        assert_eq!(fetched.pins_found, 1);
-        assert_eq!(fetched.warnings.len(), 1);
-        assert!(fetched.warnings[0].contains("returned only 1 anonymously"));
-    }
-
-    #[tokio::test]
-    async fn board_fetches_are_bounded_by_the_board_concurrency_limit() {
-        use std::time::{Duration, Instant};
-
-        use clap::Parser;
-        use serde_json::json;
-        use wiremock::matchers::{method, path};
-        use wiremock::{Mock, MockServer, ResponseTemplate};
-
-        let server = MockServer::start().await;
-        let total = BOARD_FETCH_CONCURRENCY * 2 + 1;
-        let boards = (0..total)
-            .map(|index| {
-                json!({
-                    "id": format!("board-{index}"),
-                    "type": "board",
-                    "name": format!("Board {index}"),
-                    "url": format!("/alice/board-{index}/"),
-                    "pin_count": 0,
-                    "section_count": 0,
-                    "privacy": "public"
-                })
-            })
-            .collect::<Vec<_>>();
-        Mock::given(method("GET"))
-            .and(path("/resource/BoardsResource/get/"))
-            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
-                "resource_response": { "data": boards },
-                "resource": { "options": { "bookmarks": ["-end-"] } }
-            })))
-            .mount(&server)
-            .await;
-        Mock::given(method("GET"))
-            .and(path("/resource/BoardFeedResource/get/"))
-            .respond_with(
-                ResponseTemplate::new(200)
-                    .set_body_json(json!({
-                        "resource_response": { "data": [] },
-                        "resource": { "options": { "bookmarks": ["-end-"] } }
-                    }))
-                    .set_delay(Duration::from_millis(500)),
-            )
-            .expect(total as u64)
-            .mount(&server)
-            .await;
-
-        let cli = Cli::try_parse_from(["unpin", "alice"]).unwrap();
-        let api_root = Url::parse(&server.uri()).unwrap();
-        let scan = tokio::spawn(async move {
-            let progress = NoProgress;
-            run_with_api_root_and_progress(&cli, Some(api_root), &progress).await
-        });
-
-        let deadline = Instant::now() + Duration::from_secs(3);
-        loop {
-            let received = server
-                .received_requests()
-                .await
-                .unwrap()
-                .iter()
-                .filter(|request| request.url.path() == "/resource/BoardFeedResource/get/")
-                .count();
-            if received >= BOARD_FETCH_CONCURRENCY {
-                break;
-            }
-            assert!(
-                Instant::now() < deadline,
-                "the first board-fetch wave did not start"
-            );
-            tokio::time::sleep(Duration::from_millis(5)).await;
-        }
-        tokio::time::sleep(Duration::from_millis(50)).await;
-        let received = server
-            .received_requests()
-            .await
-            .unwrap()
-            .iter()
-            .filter(|request| request.url.path() == "/resource/BoardFeedResource/get/")
-            .count();
-        assert_eq!(
-            received, BOARD_FETCH_CONCURRENCY,
-            "a board fetch beyond the configured limit started before a response completed"
-        );
-
-        assert!(scan.await.unwrap().is_err());
-    }
 }
