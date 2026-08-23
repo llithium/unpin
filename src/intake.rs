@@ -149,10 +149,7 @@ pub(crate) async fn collect(
                     current: index + 1,
                     total: board_total,
                 });
-                let mut source_pin_ids = HashSet::new();
-                let fetched = client
-                    .fetch_board_pins(&board, &mut source_pin_ids, progress)
-                    .await;
+                let fetched = client.collect_board_source(&board, progress).await;
                 let completed = board_completed.fetch_add(1, Ordering::Relaxed) + 1;
                 progress.emit(ProgressEvent::BoardFinished {
                     name: board.name.clone(),
@@ -209,11 +206,7 @@ pub(crate) async fn collect(
     {
         let fetched = match resolved.prefetched_unorganized {
             Some(fetched) => fetched,
-            None => {
-                client
-                    .fetch_user_pins(&user, &mut HashSet::new(), progress)
-                    .await
-            }
+            None => client.collect_unorganized_source(&user, progress).await,
         };
         match fetched {
             Ok(mut fetched) => {
@@ -330,7 +323,7 @@ async fn resolve_sources(
             if !matches!(&selection, SourceSelection::Default) {
                 return Err(IntakeError::BoardFlagsWithBoardUrl);
             }
-            let board = client.resolve_board(board, progress).await?;
+            let board = client.resolve_board_source(board, progress).await?;
             return Ok(ResolvedSources {
                 user: None,
                 boards: vec![board],
@@ -347,7 +340,7 @@ async fn resolve_sources(
         return Err(IntakeError::BoardSelectionNotInteractive);
     }
 
-    let boards = client.fetch_user_boards(user, progress).await?;
+    let boards = client.list_profile_sources(user, progress).await?;
     if boards.is_empty() && matches!(&selection, SourceSelection::Requested(_)) {
         return Err(select::SelectError::NoBoards {
             username: user.username.clone(),
@@ -360,9 +353,7 @@ async fn resolve_sources(
             (select::resolve_requested(&requested, &boards)?, false, None)
         }
         SourceSelection::Interactive => {
-            let fetched = client
-                .fetch_user_pins(user, &mut HashSet::new(), progress)
-                .await;
+            let fetched = client.collect_unorganized_source(user, progress).await;
             let unorganized_count = fetched.as_ref().ok().map(|pins| pins.pins_found);
             let mut choices = boards.clone();
             choices.push(BoardRef {

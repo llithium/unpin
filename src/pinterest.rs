@@ -400,13 +400,34 @@ impl PinterestClient {
         target: &BoardTarget,
         progress: &dyn ProgressSink,
     ) -> Result<BoardPins, PinterestError> {
-        let board = self.resolve_board(target, progress).await?;
-        self.fetch_board_pins(&board, &mut HashSet::new(), progress)
+        let board = self.resolve_board_source(target, progress).await?;
+        self.collect_board_source(&board, progress).await
+    }
+
+    /// Collects one board source, owning deduplication across its main feed and
+    /// sections so callers never manage provider-fetch state.
+    pub(crate) async fn collect_board_source(
+        &self,
+        board: &BoardRef,
+        progress: &dyn ProgressSink,
+    ) -> Result<BoardPins, PinterestError> {
+        self.fetch_board_pins(board, &mut HashSet::new(), progress)
             .await
     }
 
-    /// Looks up a board named by URL, which is the only way to learn its ID.
-    pub async fn resolve_board(
+    /// Collects pins saved directly to a profile as one source.
+    pub(crate) async fn collect_unorganized_source(
+        &self,
+        target: &UserTarget,
+        progress: &dyn ProgressSink,
+    ) -> Result<BoardPins, PinterestError> {
+        self.fetch_user_pins(target, &mut HashSet::new(), progress)
+            .await
+    }
+
+    /// Resolves a direct-board Scan source without exposing provider response
+    /// mechanics to Scan intake.
+    pub(crate) async fn resolve_board_source(
         &self,
         target: &BoardTarget,
         progress: &dyn ProgressSink,
@@ -449,8 +470,8 @@ impl PinterestClient {
         })
     }
 
-    /// Lists the boards on a profile so the caller can choose among them.
-    pub async fn fetch_user_boards(
+    /// Lists the stable board sources offered by a profile.
+    pub(crate) async fn list_profile_sources(
         &self,
         target: &UserTarget,
         progress: &dyn ProgressSink,
@@ -536,7 +557,7 @@ impl PinterestClient {
     ///
     /// Pinterest presents these as "Unorganized ideas" in the Saved Ideas
     /// view. They are not board records, so they never appear in `Boards`.
-    pub async fn fetch_user_pins(
+    async fn fetch_user_pins(
         &self,
         target: &UserTarget,
         seen_pin_ids: &mut HashSet<String>,
@@ -568,9 +589,9 @@ impl PinterestClient {
 
     /// Fetches every pin in a board, including its sections.
     ///
-    /// `seen_pin_ids` is shared across boards so a pin repeated in a board's
-    /// main feed and one of its sections is counted once.
-    pub async fn fetch_board_pins(
+    /// `seen_pin_ids` spans the board's main feed and sections so a repeated
+    /// pin is counted once.
+    async fn fetch_board_pins(
         &self,
         board: &BoardRef,
         seen_pin_ids: &mut HashSet<String>,
@@ -1524,6 +1545,49 @@ mod tests {
         assert!(!header.to_str().unwrap().contains("injected"));
         assert!(header.to_str().unwrap().contains("csrftoken="));
         assert!(!authenticated);
+    }
+
+    #[tokio::test]
+    async fn board_source_collection_owns_source_local_deduplication() {
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/resource/BoardFeedResource/get/"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "resource_response": { "data": [
+                    { "id": "shared", "images": { "orig": { "url": "https://example.com/a.png" } } },
+                    { "id": "shared", "images": { "orig": { "url": "https://example.com/a.png" } } }
+                ] },
+                "resource": { "options": { "bookmarks": ["-end-"] } }
+            })))
+            .mount(&server)
+            .await;
+
+        let client = PinterestClient::with_api_root(
+            Url::parse("https://www.pinterest.com/").unwrap(),
+            Url::parse(&server.uri()).unwrap(),
+        )
+        .unwrap();
+        let board = BoardRef {
+            id: "board-1".into(),
+            name: "Ideas".into(),
+            slug: "ideas".into(),
+            url: "https://www.pinterest.com/alice/ideas/".into(),
+            pins_reported: Some(2),
+            section_count: 0,
+            is_secret: false,
+        };
+
+        let collected = client
+            .collect_board_source(&board, &NoProgress)
+            .await
+            .unwrap();
+
+        assert_eq!(collected.pins_found, 1);
+        assert_eq!(collected.pins.len(), 1);
+        assert_eq!(collected.pins[0].id, "shared");
     }
 
     #[tokio::test]
