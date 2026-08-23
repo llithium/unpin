@@ -1569,8 +1569,6 @@
 
         <p class="sr-only" id="interaction-status" aria-live="polite"></p>
 
-        <script src="https://cdn.jsdelivr.net/npm/gsap@3.13.0/dist/gsap.min.js"></script>
-        <script src="https://cdn.jsdelivr.net/npm/gsap@3.13.0/dist/ScrollTrigger.min.js"></script>
         <script>
             (() => {
                 const groups = Array.from(
@@ -1791,18 +1789,6 @@
 
                 applyFilter();
                 updateProgress();
-
-                if (window.gsap && window.ScrollTrigger && !window.matchMedia("(prefers-reduced-motion: reduce)").matches) {
-                    gsap.registerPlugin(ScrollTrigger);
-                    gsap.from(".rail-intro > *", { y: 24, opacity: 0, duration: 1, stagger: 0.12, ease: "power3.out" });
-                    document.querySelectorAll(".image-stage").forEach((stage) => {
-                        gsap.fromTo(stage, { scale: 0.9, opacity: 0.45 }, {
-                            scale: 1, opacity: 1, ease: "none",
-                            scrollTrigger: { trigger: stage, start: "top 92%", end: "center 52%", scrub: 0.8 },
-                        });
-                    });
-                    overview?.addEventListener("click", () => requestAnimationFrame(() => ScrollTrigger.refresh()));
-                }
             })();
         </script>
     </body>

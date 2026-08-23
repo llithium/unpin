@@ -184,6 +184,16 @@ mod tests {
     }
 
     #[test]
+    fn html_does_not_load_remote_scripts() {
+        let html = render_html(&sample_report());
+
+        assert!(!html.contains("<script src="));
+        assert!(!html.contains("cdn.jsdelivr.net"));
+        assert!(!html.contains("gsap"));
+        assert!(!html.contains("ScrollTrigger"));
+    }
+
+    #[test]
     fn scope_badges_appear_only_for_multi_board_scans() {
         let mut report = sample_report();
         // The single-board sample must not claim a scope at all.

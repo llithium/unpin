@@ -182,8 +182,9 @@ individual skipped-pin record.
 - Pinterest's web resources are undocumented and may change without notice.
 - Visual matches are candidates for human review, not proof that two images are
   interchangeable.
-- HTML reports reference Pinterest's remote originals and require network
-  access when viewed.
+- HTML reports embed their controls and styling, but reference Pinterest's
+  remote originals and pin links, so network access is still required when
+  viewing images or opening those links.
 - Temporary reports remain after `unpin` exits so the browser can load them
   safely. The operating system eventually cleans them up; copy the printed file
   if you want to retain one.
