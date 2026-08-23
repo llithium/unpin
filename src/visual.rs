@@ -264,9 +264,16 @@ mod tests {
         let multi = render_html(&multi_board_report());
         assert!(multi.contains("role=\"group\""));
         // One exact group (cross) and one visual candidate (same).
-        assert!(multi.contains("for=\"filter-all\">All 2</label>"));
-        assert!(multi.contains("for=\"filter-same\">Same 1</label>"));
-        assert!(multi.contains("for=\"filter-cross\">Cross 1</label>"));
+        assert!(multi.contains("Board scope</span>"));
+        assert!(multi.contains(
+            "for=\"filter-all\"><span>All</span><span class=\"filter-count\">2</span></label>"
+        ));
+        assert!(multi.contains(
+            "for=\"filter-same\"><span>Same</span><span class=\"filter-count\">1</span></label>"
+        ));
+        assert!(multi.contains(
+            "for=\"filter-cross\"><span>Cross</span><span class=\"filter-count\">1</span></label>"
+        ));
         assert!(multi.contains("id=\"filter-all\""));
         assert!(multi.contains("class=\"filter-input\""));
         assert!(multi.contains("checked"));
@@ -277,9 +284,16 @@ mod tests {
         let mixed = render_html(&sample_report());
         assert!(mixed.contains("aria-label=\"Filter matches by type\""));
         assert!(mixed.contains("id=\"kind-all\""));
-        assert!(mixed.contains("for=\"kind-all\">All 2</label>"));
-        assert!(mixed.contains("for=\"kind-exact\">Exact 1</label>"));
-        assert!(mixed.contains("for=\"kind-visual\">Visual 1</label>"));
+        assert!(mixed.contains("Match type</span>"));
+        assert!(mixed.contains(
+            "for=\"kind-all\"><span>All</span><span class=\"filter-count\">2</span></label>"
+        ));
+        assert!(mixed.contains(
+            "for=\"kind-exact\"><span>Exact</span><span class=\"filter-count\">1</span></label>"
+        ));
+        assert!(mixed.contains(
+            "for=\"kind-visual\"><span>Visual</span><span class=\"filter-count\">1</span></label>"
+        ));
 
         let mut exact_only = sample_report();
         exact_only.visual_candidates.clear();
@@ -392,8 +406,12 @@ mod tests {
         report.visual_candidates[0].scope = MatchScope::CrossBoard;
         let cross_only = render_html(&report);
 
-        assert!(cross_only.contains("for=\"filter-same\">Same 0</label>"));
-        assert!(cross_only.contains("for=\"filter-cross\">Cross 2</label>"));
+        assert!(cross_only.contains(
+            "for=\"filter-same\"><span>Same</span><span class=\"filter-count\">0</span></label>"
+        ));
+        assert!(cross_only.contains(
+            "for=\"filter-cross\"><span>Cross</span><span class=\"filter-count\">2</span></label>"
+        ));
         assert!(cross_only.contains("No matches in the current filters."));
         assert!(cross_only.contains("visible.length === 0"));
     }
@@ -429,7 +447,8 @@ mod tests {
         assert!(html.contains("setReviewed(reviewedGroup, reviewed)"));
         assert!(html.contains("${reviewStatus}. ${visibleGroups().length} matches shown"));
         assert!(html.contains("selected. ${visibleGroups().length} matches shown"));
-        assert!(html.contains("${title}, ${detail}, reviewed"));
+        assert!(html.contains("`${title}, reviewed`"));
+        assert!(!html.contains("class=\"match-link-meta\""));
         assert!(html.contains("const acknowledgeReview"));
         assert!(html.contains("progressBlock.classList.add(\"is-updated\")"));
         assert!(html.contains("@keyframes review-confirmation"));

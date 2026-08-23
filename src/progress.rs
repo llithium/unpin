@@ -194,6 +194,14 @@ impl TerminalProgress {
         bar
     }
 
+    fn add_active_row_before(&self, before: &ProgressBar, message: String) -> ProgressBar {
+        let bar = self.bars.insert_before(before, ProgressBar::new_spinner());
+        bar.set_style(active_style());
+        bar.set_message(message);
+        bar.enable_steady_tick(Duration::from_millis(90));
+        bar
+    }
+
     fn complete_row(bar: &ProgressBar, message: String) {
         bar.disable_steady_tick();
         bar.set_style(completed_style());
@@ -269,6 +277,24 @@ impl TerminalProgress {
             *slot = Some(bar.clone());
             bar
         }
+    }
+
+    fn ensure_sections_slot(&self, state: &mut ProgressState, message: String) -> ProgressBar {
+        if let Some(bar) = state.sections.as_ref() {
+            bar.set_message(message);
+            return bar.clone();
+        }
+
+        // Section progress starts after pagination in some scan paths. Insert
+        // it above the rolling page row so that row can stay last without ever
+        // being detached and re-added during an update (which visibly flashes).
+        let bar = if let Some(page) = state.page.as_ref() {
+            self.add_active_row_before(page, message)
+        } else {
+            self.add_active_row(message)
+        };
+        state.sections = Some(bar.clone());
+        bar
     }
 
     fn finish_active_rows(&self, state: &mut ProgressState) {
@@ -456,8 +482,13 @@ impl Progress for TerminalProgress {
                     state.boards_total = total;
                     state.boards_completed = 0;
                 }
-                let bar =
-                    self.add_active_row(format!("Scanning board “{name}” ({current}/{total})"));
+                let message = format!("Scanning board “{name}” ({current}/{total})");
+                let trailing_fetch_row = state.sections.as_ref().or(state.page.as_ref());
+                let bar = if let Some(before) = trailing_fetch_row {
+                    self.add_active_row_before(before, message)
+                } else {
+                    self.add_active_row(message)
+                };
                 state.board_rows.push(BoardRow {
                     name,
                     bar,
@@ -526,7 +557,7 @@ impl Progress for TerminalProgress {
                     "Fetching board sections: {}/{} complete",
                     state.sections_completed, state.sections_total
                 );
-                self.ensure_active_slot(&mut state.sections, message);
+                self.ensure_sections_slot(&mut state, message);
             }
             ProgressStep::SectionCollection {
                 total,
@@ -545,7 +576,7 @@ impl Progress for TerminalProgress {
                     state.sections_total,
                     active,
                 );
-                self.ensure_active_slot(&mut state.sections, message);
+                self.ensure_sections_slot(&mut state, message);
             }
             ProgressStep::SectionCollection {
                 total,
