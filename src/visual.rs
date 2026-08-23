@@ -258,8 +258,8 @@ mod tests {
     #[test]
     fn filter_tabs_appear_only_for_multi_board_scans() {
         let single = render_html(&sample_report());
-        assert!(!single.contains("class=\"filters\""));
         assert!(!single.contains("id=\"filter-all\""));
+        assert!(!single.contains("aria-label=\"Filter matches by board scope\""));
 
         let multi = render_html(&multi_board_report());
         assert!(multi.contains("role=\"group\""));
@@ -270,6 +270,73 @@ mod tests {
         assert!(multi.contains("id=\"filter-all\""));
         assert!(multi.contains("class=\"filter-input\""));
         assert!(multi.contains("checked"));
+    }
+
+    #[test]
+    fn kind_filters_appear_only_for_mixed_match_types() {
+        let mixed = render_html(&sample_report());
+        assert!(mixed.contains("aria-label=\"Filter matches by type\""));
+        assert!(mixed.contains("id=\"kind-all\""));
+        assert!(mixed.contains("for=\"kind-all\">All 2</label>"));
+        assert!(mixed.contains("for=\"kind-exact\">Exact 1</label>"));
+        assert!(mixed.contains("for=\"kind-visual\">Visual 1</label>"));
+
+        let mut exact_only = sample_report();
+        exact_only.visual_candidates.clear();
+        assert!(!render_html(&exact_only).contains("id=\"kind-all\""));
+
+        let mut visual_only = sample_report();
+        visual_only.exact_groups.clear();
+        assert!(!render_html(&visual_only).contains("id=\"kind-all\""));
+    }
+
+    #[test]
+    fn unreviewed_filter_and_visible_count_follow_queue_presence() {
+        let populated = render_html(&sample_report());
+        assert!(populated.contains("id=\"unreviewed-only\""));
+        assert!(populated.contains("Unreviewed only"));
+        assert!(populated.contains("id=\"visible-count\""));
+        assert!(populated.contains("2 / 2 shown"));
+
+        let mut empty = sample_report();
+        empty.exact_groups.clear();
+        empty.visual_candidates.clear();
+        let empty = render_html(&empty);
+        assert!(!empty.contains("id=\"unreviewed-only\""));
+        assert!(!empty.contains("id=\"visible-count\""));
+    }
+
+    #[test]
+    fn match_navigation_and_sections_carry_kind_metadata() {
+        let html = render_html(&sample_report());
+
+        assert!(html.contains("data-target=\"exact-1\"\n                            data-scope=\"same-board\"\n                            data-kind=\"exact\""));
+        assert!(html.contains("id=\"exact-1\"\n                        data-group\n                        data-scope=\"same-board\"\n                        data-kind=\"exact\""));
+        assert!(html.contains("data-target=\"visual-1\"\n                            data-scope=\"same-board\"\n                            data-kind=\"visual\""));
+        assert!(html.contains("id=\"visual-1\"\n                        data-group\n                        data-scope=\"same-board\"\n                        data-kind=\"visual\""));
+    }
+
+    #[test]
+    fn filter_controller_composes_scope_kind_and_review_state() {
+        let html = render_html(&multi_board_report());
+
+        assert!(html.contains("const scopeMatches ="));
+        assert!(html.contains("const kindMatches ="));
+        assert!(html.contains("const reviewMatches ="));
+        assert!(html.contains("!(scopeMatches && kindMatches && reviewMatches)"));
+        assert!(html.contains("const link = links.find("));
+        assert!(
+            html.contains("applyFilter(preferredActive);\n                    updateProgress();")
+        );
+        assert!(
+            html.contains("preferredActive = visible[index + 1] || visible[index - 1] || null")
+        );
+        assert!(
+            html.contains(
+                "visibleCount.textContent = `${visible.length} / ${groups.length} shown`"
+            )
+        );
+        assert!(html.contains("No matches in the current filters."));
     }
 
     /// Focus view renders whichever match carries `is-active`, so exactly one
@@ -327,7 +394,7 @@ mod tests {
 
         assert!(cross_only.contains("for=\"filter-same\">Same 0</label>"));
         assert!(cross_only.contains("for=\"filter-cross\">Cross 2</label>"));
-        assert!(cross_only.contains("No matches in this board scope."));
+        assert!(cross_only.contains("No matches in the current filters."));
         assert!(cross_only.contains("visible.length === 0"));
     }
 
@@ -360,6 +427,8 @@ mod tests {
         assert!(html.contains("if (key === \"e\" && active)"));
         assert!(html.contains("if (key === \"o\")"));
         assert!(html.contains("setReviewed(reviewedGroup, reviewed)"));
+        assert!(html.contains("${reviewStatus}. ${visibleGroups().length} matches shown"));
+        assert!(html.contains("selected. ${visibleGroups().length} matches shown"));
         assert!(html.contains("${title}, ${detail}, reviewed"));
         assert!(html.contains("const acknowledgeReview"));
         assert!(html.contains("progressBlock.classList.add(\"is-updated\")"));

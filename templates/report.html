@@ -323,6 +323,59 @@
                 border-bottom: 1px solid var(--line);
             }
 
+            .filter-controls {
+                border-bottom: 1px solid var(--line);
+            }
+
+            .filter-controls .filters {
+                border-bottom: 0;
+            }
+
+            .filter-controls-meta {
+                display: flex;
+                align-items: center;
+                justify-content: space-between;
+                gap: 12px;
+                padding: 10px 16px;
+                border-top: 1px solid var(--line);
+                color: var(--muted);
+                font-family: "Geist Mono", ui-monospace, monospace;
+                font-size: 10px;
+                font-weight: 700;
+                line-height: 16px;
+                letter-spacing: 0.08em;
+                text-transform: uppercase;
+            }
+
+            .unreviewed-filter {
+                display: inline-flex;
+                align-items: center;
+                gap: 8px;
+                color: var(--muted-strong);
+                cursor: pointer;
+            }
+
+            .unreviewed-filter:hover {
+                color: var(--ink);
+            }
+
+            .unreviewed-filter input {
+                width: 14px;
+                height: 14px;
+                margin: 0;
+                accent-color: #f2f0eb;
+            }
+
+            .unreviewed-filter input:focus-visible {
+                outline: 2px solid var(--focus);
+                outline-offset: 2px;
+            }
+
+            .visible-count {
+                flex: none;
+                white-space: nowrap;
+            }
+
             .filter-input {
                 position: absolute;
                 width: 1px;
@@ -364,9 +417,20 @@
 
             #filter-all:focus-visible ~ .filters label[for="filter-all"],
             #filter-same:focus-visible ~ .filters label[for="filter-same"],
-            #filter-cross:focus-visible ~ .filters label[for="filter-cross"] {
+            #filter-cross:focus-visible ~ .filters label[for="filter-cross"],
+            #kind-all:focus-visible ~ .filters label[for="kind-all"],
+            #kind-exact:focus-visible ~ .filters label[for="kind-exact"],
+            #kind-visual:focus-visible ~ .filters label[for="kind-visual"] {
                 outline: 2px solid var(--focus);
                 outline-offset: 2px;
+            }
+
+            #kind-all:checked ~ .filters label[for="kind-all"],
+            #kind-exact:checked ~ .filters label[for="kind-exact"],
+            #kind-visual:checked ~ .filters label[for="kind-visual"] {
+                border-color: var(--line-strong);
+                background: var(--ink);
+                color: var(--canvas);
             }
 
             .match-nav {
@@ -997,9 +1061,12 @@
             .workspace { grid-template-columns: minmax(300px, 25vw) minmax(0, 1fr); }
             .rail { top: 78px; display: flex; flex-direction: column; height: calc(100dvh - 78px); overflow: hidden; border-color: #393939; background: rgb(9 9 9 / 94%); }
             .match-kicker { color: var(--red); }
+            .filter-controls { border-color: #393939; }
             .filters { gap: 0; padding: 0; border-color: #393939; }
             .filters label { padding: 14px 4px; border-radius: 0; border-right: 1px solid #393939; }
             #filter-all:checked ~ .filters label[for="filter-all"], #filter-same:checked ~ .filters label[for="filter-same"], #filter-cross:checked ~ .filters label[for="filter-cross"] { border-color: var(--red); background: var(--red); color: white; }
+            #kind-all:checked ~ .filters label[for="kind-all"], #kind-exact:checked ~ .filters label[for="kind-exact"], #kind-visual:checked ~ .filters label[for="kind-visual"] { border-color: #f2f0eb; background: #f2f0eb; color: #080808; }
+            .filter-controls-meta { border-color: #393939; }
             .match-nav { min-height: 0; flex: 1; gap: 0; overflow-y: auto; padding: 0; }
             .match-link { grid-template-columns: 40px minmax(0, 1fr) auto; padding: 18px 20px; border-width: 0 0 1px; border-color: #292929; border-radius: 0; }
             .match-link:hover { padding-left: 26px; transform: none; }
@@ -1225,6 +1292,9 @@
             <div class="workspace">
                 <aside class="rail" aria-label="Match navigation">
 
+                    {% if !report.exact_groups.is_empty() ||
+                    !report.visual_candidates.is_empty() %}
+                    <div class="filter-controls">
                     {% if show_filters %}
                     <input
                         type="radio"
@@ -1259,6 +1329,63 @@
                     </div>
                     {% endif %}
 
+                    {% if !report.exact_groups.is_empty() &&
+                    !report.visual_candidates.is_empty() %}
+                    <input
+                        type="radio"
+                        name="kind-filter"
+                        id="kind-all"
+                        class="filter-input"
+                        value="all"
+                        checked
+                    />
+                    <input
+                        type="radio"
+                        name="kind-filter"
+                        id="kind-exact"
+                        class="filter-input"
+                        value="exact"
+                    />
+                    <input
+                        type="radio"
+                        name="kind-filter"
+                        id="kind-visual"
+                        class="filter-input"
+                        value="visual"
+                    />
+                    <div
+                        class="filters"
+                        role="group"
+                        aria-label="Filter matches by type"
+                    >
+                        <label for="kind-all">All {{ report.exact_groups.len() + report.visual_candidates.len() }}</label>
+                        <label for="kind-exact">Exact {{ report.exact_groups.len() }}</label>
+                        <label for="kind-visual">Visual {{ report.visual_candidates.len() }}</label>
+                    </div>
+                    {% endif %}
+
+                    <div class="filter-controls-meta">
+                        <label class="unreviewed-filter" for="unreviewed-only">
+                            <input
+                                type="checkbox"
+                                id="unreviewed-only"
+                            />
+                            <span>Unreviewed only</span>
+                        </label>
+                        <span
+                            class="visible-count"
+                            id="visible-count"
+                            role="status"
+                            aria-live="polite"
+                            >{{ report.exact_groups.len() +
+                            report.visual_candidates.len() }} / {{
+                            report.exact_groups.len() +
+                            report.visual_candidates.len() }} shown</span
+                        >
+                    </div>
+                    </div>
+                    {% endif %}
+
                     <nav class="match-nav" aria-label="Duplicate matches">
                         {% for group in report.exact_groups %}
                         <button
@@ -1266,6 +1393,7 @@
                             type="button"
                             data-target="exact-{{ loop.index }}"
                             data-scope="{{ group.scope.css_class() }}"
+                            data-kind="exact"
                         >
                             <span class="match-number">E{{ loop.index }}</span>
                             <span class="match-link-copy">
@@ -1288,6 +1416,7 @@
                             type="button"
                             data-target="visual-{{ loop.index }}"
                             data-scope="{{ candidate.scope.css_class() }}"
+                            data-kind="visual"
                         >
                             <span class="match-number">V{{ loop.index }}</span>
                             <span class="match-link-copy">
@@ -1322,7 +1451,7 @@
                     {% endif %}
 
                     <div class="filter-empty" id="filter-empty" role="status">
-                        No matches in this board scope.
+                        No matches in the current filters.
                     </div>
 
                     {% for group in report.exact_groups %}
@@ -1331,6 +1460,7 @@
                         id="exact-{{ loop.index }}"
                         data-group
                         data-scope="{{ group.scope.css_class() }}"
+                        data-kind="exact"
                         data-reviewed="false"
                     >
                         <div class="match-heading">
@@ -1373,6 +1503,7 @@
                         id="visual-{{ loop.index }}"
                         data-group
                         data-scope="{{ candidate.scope.css_class() }}"
+                        data-kind="visual"
                         data-reviewed="false"
                     >
                         <div class="match-heading">
@@ -1485,9 +1616,14 @@
                 const links = Array.from(
                     document.querySelectorAll(".match-link[data-target]"),
                 );
-                const filters = Array.from(
+                const scopeFilters = Array.from(
                     document.querySelectorAll('input[name="scope-filter"]'),
                 );
+                const kindFilters = Array.from(
+                    document.querySelectorAll('input[name="kind-filter"]'),
+                );
+                const unreviewedOnly = document.querySelector("#unreviewed-only");
+                const visibleCount = document.querySelector("#visible-count");
                 const previous = document.querySelector("#previous-match");
                 const next = document.querySelector("#next-match");
                 const overview = document.querySelector("#overview-toggle");
@@ -1576,7 +1712,7 @@
                     warmNearbyImages();
                     if (options.announce) {
                         announce(
-                            `${active.querySelector("h1, h2")?.textContent || "Match"} selected`,
+                            `${active.querySelector("h1, h2")?.textContent || "Match"} selected. ${visibleGroups().length} matches shown`,
                         );
                     }
                 };
@@ -1600,6 +1736,12 @@
 
                 const setReviewed = (group, reviewed) => {
                     if (!group) return;
+                    let preferredActive = null;
+                    if (reviewed && unreviewedOnly?.checked && group === active) {
+                        const visible = visibleGroups();
+                        const index = visible.indexOf(group);
+                        preferredActive = visible[index + 1] || visible[index - 1] || null;
+                    }
                     group.dataset.reviewed = reviewed ? "true" : "false";
                     const button = group.querySelector("[data-review-button]");
                     button?.setAttribute("aria-pressed", reviewed ? "true" : "false");
@@ -1618,9 +1760,11 @@
                         }
                         else link.removeAttribute("aria-label");
                     }
+                    applyFilter(preferredActive);
                     updateProgress();
                     if (reviewed) acknowledgeReview();
-                    announce(reviewed ? "Marked reviewed" : "Review mark removed");
+                    const reviewStatus = reviewed ? "Marked reviewed" : "Review mark removed";
+                    announce(`${reviewStatus}. ${visibleGroups().length} matches shown`);
                 };
 
                 const advanceAfterReview = (group) => {
@@ -1631,21 +1775,27 @@
                     setActive(visible[index + 1], { announce: true });
                 };
 
-                const applyFilter = () => {
-                    const scope = filters.find((filter) => filter.checked)?.value || "all";
+                const applyFilter = (preferredActive = null) => {
+                    const scope = scopeFilters.find((filter) => filter.checked)?.value || "all";
+                    const kind = kindFilters.find((filter) => filter.checked)?.value || "all";
                     groups.forEach((group) => {
-                        group.classList.toggle(
-                            "is-filtered",
-                            scope !== "all" && group.dataset.scope !== scope,
+                        const scopeMatches = !(
+                            scope !== "all" && group.dataset.scope !== scope
                         );
-                    });
-                    links.forEach((link) => {
-                        link.classList.toggle(
-                            "is-filtered",
-                            scope !== "all" && link.dataset.scope !== scope,
+                        const kindMatches = kind === "all" || group.dataset.kind === kind;
+                        const reviewMatches =
+                            !unreviewedOnly?.checked || group.dataset.reviewed !== "true";
+                        const hidden = !(scopeMatches && kindMatches && reviewMatches);
+                        group.classList.toggle("is-filtered", hidden);
+                        const link = links.find(
+                            (item) => item.dataset.target === group.id,
                         );
+                        link?.classList.toggle("is-filtered", hidden);
                     });
                     const visible = visibleGroups();
+                    if (visibleCount) {
+                        visibleCount.textContent = `${visible.length} / ${groups.length} shown`;
+                    }
                     empty?.classList.toggle("is-visible", groups.length > 0 && visible.length === 0);
                     if (!visible.includes(active)) {
                         // Clear the outgoing match here rather than leaving it to
@@ -1654,6 +1804,7 @@
                         // group so it reappears beside the real one under "All".
                         active?.classList.remove("is-active");
                         active = visible[0] || null;
+                        if (visible.includes(preferredActive)) active = preferredActive;
                     }
                     if (active) setActive(active);
                     else updateControls();
@@ -1682,7 +1833,10 @@
                     });
                 });
 
-                filters.forEach((filter) => filter.addEventListener("change", applyFilter));
+                [...scopeFilters, ...kindFilters].forEach((filter) =>
+                    filter.addEventListener("change", () => applyFilter()),
+                );
+                unreviewedOnly?.addEventListener("change", () => applyFilter());
                 previous?.addEventListener("click", () => move(-1));
                 next?.addEventListener("click", () => move(1));
                 overview?.addEventListener("click", () => {
