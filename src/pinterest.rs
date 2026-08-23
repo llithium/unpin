@@ -769,47 +769,47 @@ impl PinterestClient {
             .map_err(|_| invalid_response(resource, "could not serialize request options"))?;
 
         for attempt in 0..MAX_REQUEST_ATTEMPTS {
-            let response = {
+            let delay = {
                 let _permit = self
                     .request_limiter
                     .acquire()
                     .await
                     .expect("the API request limiter is never closed");
-                self.http
+                let response = self
+                    .http
                     .get(endpoint.clone())
                     .query(&[("data", data.as_str()), ("source_url", "")])
                     .header("Cookie", self.cookie_header.clone())
                     .send()
-                    .await
-            };
-            let response = match response {
-                Ok(response) => response,
-                Err(source)
-                    if attempt + 1 < MAX_REQUEST_ATTEMPTS
-                        && (source.is_connect() || source.is_timeout()) =>
-                {
-                    let delay = retry_delay(attempt, None);
-                    emit_retry(progress, resource, attempt, delay);
-                    tokio::time::sleep(delay).await;
-                    continue;
+                    .await;
+
+                match response {
+                    Ok(response) => {
+                        let status = response.status();
+                        if status.is_success() {
+                            return response
+                                .json()
+                                .await
+                                .map_err(|source| PinterestError::Request { resource, source });
+                        }
+                        if attempt + 1 < MAX_REQUEST_ATTEMPTS && is_retryable_status(status) {
+                            retry_delay(attempt, response.headers().get("retry-after"))
+                        } else {
+                            return Err(PinterestError::Http { resource, status });
+                        }
+                    }
+                    Err(source)
+                        if attempt + 1 < MAX_REQUEST_ATTEMPTS
+                            && (source.is_connect() || source.is_timeout()) =>
+                    {
+                        retry_delay(attempt, None)
+                    }
+                    Err(source) => return Err(PinterestError::Request { resource, source }),
                 }
-                Err(source) => return Err(PinterestError::Request { resource, source }),
             };
 
-            let status = response.status();
-            if status.is_success() {
-                return response
-                    .json()
-                    .await
-                    .map_err(|source| PinterestError::Request { resource, source });
-            }
-            if attempt + 1 < MAX_REQUEST_ATTEMPTS && is_retryable_status(status) {
-                let delay = retry_delay(attempt, response.headers().get("retry-after"));
-                emit_retry(progress, resource, attempt, delay);
-                tokio::time::sleep(delay).await;
-                continue;
-            }
-            return Err(PinterestError::Http { resource, status });
+            emit_retry(progress, resource, attempt, delay);
+            tokio::time::sleep(delay).await;
         }
 
         unreachable!("the request loop always returns on its final attempt")
@@ -1519,6 +1519,120 @@ mod tests {
         for task in tasks {
             assert!(task.await.unwrap().is_ok());
         }
+    }
+
+    #[tokio::test]
+    async fn api_requests_share_the_global_concurrency_limit_through_body_consumption() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        use tokio::net::TcpListener;
+        use tokio::sync::Notify;
+        use tokio::time::timeout;
+
+        let listener = TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let headers_ready = Arc::new(Notify::new());
+        let started = Arc::new(AtomicUsize::new(0));
+        let (body_release, _) = tokio::sync::watch::channel(false);
+        let server = tokio::spawn({
+            let body_release = body_release.clone();
+            let headers_ready = Arc::clone(&headers_ready);
+            let started = Arc::clone(&started);
+            async move {
+                loop {
+                    let (mut stream, _) = listener.accept().await.unwrap();
+                    let headers_ready = Arc::clone(&headers_ready);
+                    let started = Arc::clone(&started);
+                    let mut body_released = body_release.subscribe();
+                    tokio::spawn(async move {
+                        let mut request = Vec::new();
+                        let mut buffer = [0_u8; 1024];
+                        loop {
+                            let bytes = match stream.read(&mut buffer).await {
+                                Ok(bytes) => bytes,
+                                Err(_) => return,
+                            };
+                            if bytes == 0 {
+                                return;
+                            }
+                            request.extend_from_slice(&buffer[..bytes]);
+                            if request.windows(4).any(|window| window == b"\r\n\r\n") {
+                                break;
+                            }
+                        }
+
+                        const BODY: &[u8] = br#"{"ok":true}"#;
+                        let response_headers = format!(
+                            "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                            BODY.len()
+                        );
+                        if stream.write_all(response_headers.as_bytes()).await.is_err() {
+                            return;
+                        }
+
+                        let request_count = started.fetch_add(1, Ordering::SeqCst) + 1;
+                        if request_count == API_REQUEST_CONCURRENCY {
+                            headers_ready.notify_one();
+                        }
+
+                        loop {
+                            if *body_released.borrow() {
+                                break;
+                            }
+                            if body_released.changed().await.is_err() {
+                                return;
+                            }
+                        }
+                        let _ = stream.write_all(BODY).await;
+                    });
+                }
+            }
+        });
+
+        let client = PinterestClient::with_api_root(
+            Url::parse("https://www.pinterest.com/").unwrap(),
+            Url::parse(&format!("http://{address}/")).unwrap(),
+        )
+        .unwrap();
+        let tasks = (0..=API_REQUEST_CONCURRENCY)
+            .map(|index| {
+                let client = client.clone();
+                tokio::spawn(async move {
+                    let progress = NoProgress;
+                    client
+                        .call("Slow", json!({ "index": index }), &progress)
+                        .await
+                })
+            })
+            .collect::<Vec<_>>();
+
+        let headers_ready_before_release =
+            timeout(Duration::from_secs(3), headers_ready.notified())
+                .await
+                .is_ok();
+        let started_before_release = started.load(Ordering::SeqCst);
+        let permits_before_release = client.request_limiter.available_permits();
+
+        let _ = body_release.send(true);
+        for task in tasks {
+            assert!(task.await.unwrap().is_ok());
+        }
+        server.abort();
+        let _ = server.await;
+
+        assert!(
+            headers_ready_before_release,
+            "the first API response-header wave did not start"
+        );
+        assert_eq!(
+            started_before_release, API_REQUEST_CONCURRENCY,
+            "an API request beyond the shared limit started before a response body was released"
+        );
+        assert_eq!(
+            permits_before_release, 0,
+            "a permit was released before a response body was consumed"
+        );
     }
 
     #[test]
