@@ -67,6 +67,9 @@ pub enum ProgressEvent {
     },
     MatchingStarted,
     ReportStarted,
+    ReportCreated {
+        path: String,
+    },
     Finished,
     Failed,
 }
@@ -96,6 +99,7 @@ struct ProgressState {
     setup: Option<ProgressBar>,
     page: Option<ProgressBar>,
     page_resource: Option<&'static str>,
+    pages_fetched: usize,
     sections: Option<ProgressBar>,
     images: Option<ProgressBar>,
     matching: Option<ProgressBar>,
@@ -112,6 +116,7 @@ struct ProgressState {
 struct BoardRow {
     name: String,
     bar: ProgressBar,
+    finished: bool,
 }
 
 #[derive(Debug, Clone, Copy, Eq, Hash, PartialEq)]
@@ -206,6 +211,48 @@ impl TerminalProgress {
         }
     }
 
+    fn finish_page(&self, state: &mut ProgressState, message: &str) {
+        let message = if state.pages_fetched == 0 {
+            message.to_owned()
+        } else {
+            format!(
+                "{message} ({} {})",
+                state.pages_fetched,
+                page_word(state.pages_fetched)
+            )
+        };
+        Self::finish_slot(&mut state.page, message);
+        state.page_resource = None;
+        state.pages_fetched = 0;
+    }
+
+    fn fail_page(&self, state: &mut ProgressState, message: &str) {
+        Self::fail_slot(&mut state.page, message.to_owned());
+        state.page_resource = None;
+        state.pages_fetched = 0;
+    }
+
+    fn finish_sections(&self, state: &mut ProgressState) {
+        let message = if state.sections_total == 0 {
+            "No board sections found".to_owned()
+        } else {
+            format!(
+                "Board sections fetched ({}/{})",
+                state.sections_completed, state.sections_total
+            )
+        };
+        Self::finish_slot(&mut state.sections, message);
+    }
+
+    fn maybe_finish_sections(&self, state: &mut ProgressState) {
+        if state.boards_total > 0
+            && state.boards_completed >= state.boards_total
+            && state.sections_completed >= state.sections_total
+        {
+            self.finish_sections(state);
+        }
+    }
+
     fn ensure_active_slot(&self, slot: &mut Option<ProgressBar>, message: String) -> ProgressBar {
         if let Some(bar) = slot {
             bar.set_message(message);
@@ -219,13 +266,14 @@ impl TerminalProgress {
 
     fn finish_active_rows(&self, state: &mut ProgressState) {
         Self::finish_slot(&mut state.setup, "Setup complete".into());
-        Self::finish_slot(&mut state.page, "Pins fetched".into());
-        Self::finish_slot(&mut state.sections, "Board sections fetched".into());
+        self.finish_page(state, "Pinterest data fetched");
+        self.finish_sections(state);
         Self::finish_slot(&mut state.images, "Images analyzed".into());
         Self::finish_slot(&mut state.matching, "Matches compared".into());
         Self::finish_slot(&mut state.report, "Report created".into());
-        for row in &state.board_rows {
-            if !row.bar.is_finished() {
+        for row in &mut state.board_rows {
+            if !row.finished {
+                row.finished = true;
                 Self::complete_row(&row.bar, format!("Scanned board “{}”", row.name));
             }
         }
@@ -233,13 +281,14 @@ impl TerminalProgress {
 
     fn fail_active_rows(&self, state: &mut ProgressState) {
         Self::fail_slot(&mut state.setup, "Setup failed".into());
-        Self::fail_slot(&mut state.page, "Fetching pins failed".into());
+        self.fail_page(state, "Fetching Pinterest data failed");
         Self::fail_slot(&mut state.sections, "Fetching board sections failed".into());
         Self::fail_slot(&mut state.images, "Image analysis failed".into());
         Self::fail_slot(&mut state.matching, "Matching failed".into());
         Self::fail_slot(&mut state.report, "Report failed".into());
-        for row in &state.board_rows {
-            if !row.bar.is_finished() {
+        for row in &mut state.board_rows {
+            if !row.finished {
+                row.finished = true;
                 Self::fail_row(&row.bar, format!("Scanning board “{}” failed", row.name));
             }
         }
@@ -264,7 +313,7 @@ impl TerminalProgress {
             state
                 .board_rows
                 .iter()
-                .filter(|row| !row.bar.is_finished())
+                .filter(|row| !row.finished)
                 .map(|row| row.bar.clone()),
         );
         for bar in bars {
@@ -338,6 +387,9 @@ impl ProgressSink for TerminalProgress {
             ProgressEvent::UserBoardsResolved { total } => {
                 let mut state = self.state.lock().unwrap();
                 Self::finish_slot(&mut state.setup, format!("Found {total} board(s)"));
+                if state.page_resource == Some("Boards") {
+                    self.finish_page(&mut state, "Fetched boards");
+                }
             }
             // Hide rather than finish the bar: a finished bar never redraws,
             // and the scan continues after the picker closes.
@@ -364,7 +416,11 @@ impl ProgressSink for TerminalProgress {
                 }
                 let bar =
                     self.add_active_row(format!("Scanning board “{name}” ({current}/{total})"));
-                state.board_rows.push(BoardRow { name, bar });
+                state.board_rows.push(BoardRow {
+                    name,
+                    bar,
+                    finished: false,
+                });
             }
             ProgressEvent::BoardFinished {
                 name,
@@ -378,11 +434,13 @@ impl ProgressSink for TerminalProgress {
                 state.boards_completed = state.boards_completed.max(completed);
                 if let Some(row) = state
                     .board_rows
-                    .iter()
-                    .find(|row| row.name == name && !row.bar.is_finished())
+                    .iter_mut()
+                    .find(|row| row.name == name && !row.finished)
                 {
+                    row.finished = true;
                     Self::complete_row(&row.bar, format!("Scanned board “{name}”"));
                 }
+                self.maybe_finish_sections(&mut state);
             }
             ProgressEvent::PageFetched {
                 resource,
@@ -391,12 +449,8 @@ impl ProgressSink for TerminalProgress {
             } => {
                 let mut state = self.state.lock().unwrap();
                 self.add_group(&mut state, ProgressGroup::Boards);
-                if state.page_resource != Some(resource) {
-                    if let Some(previous) = state.page_resource {
-                        Self::finish_slot(&mut state.page, format!("Fetched {previous}"));
-                    }
-                    state.page_resource = Some(resource);
-                }
+                state.page_resource = Some(resource);
+                state.pages_fetched += 1;
                 let message = format!("Fetching {resource}: page {page} · {items} item(s)");
                 self.ensure_active_slot(&mut state.page, message);
             }
@@ -409,9 +463,6 @@ impl ProgressSink for TerminalProgress {
                     state.sections_completed, state.sections_total
                 );
                 self.ensure_active_slot(&mut state.sections, message);
-                if total == 0 {
-                    Self::finish_slot(&mut state.sections, "No board sections found".into());
-                }
             }
             ProgressEvent::SectionStarted { total, .. } => {
                 let mut state = self.state.lock().unwrap();
@@ -421,9 +472,10 @@ impl ProgressSink for TerminalProgress {
                 let active = state
                     .sections_started
                     .saturating_sub(state.sections_completed);
-                let message = format!(
-                    "Fetching board sections: {}/{} complete ({active} active)",
-                    state.sections_completed, state.sections_total
+                let message = section_progress_message(
+                    state.sections_completed,
+                    state.sections_total,
+                    active,
                 );
                 self.ensure_active_slot(&mut state.sections, message);
             }
@@ -437,16 +489,15 @@ impl ProgressSink for TerminalProgress {
                 let active = state
                     .sections_started
                     .saturating_sub(state.sections_completed);
-                let message = format!(
-                    "Fetching board sections: {}/{} complete ({active} active)",
-                    state.sections_completed, state.sections_total
+                let message = section_progress_message(
+                    state.sections_completed,
+                    state.sections_total,
+                    active,
                 );
                 if let Some(bar) = state.sections.as_ref() {
                     bar.set_message(message);
                 }
-                if state.sections_completed >= state.sections_total {
-                    Self::finish_slot(&mut state.sections, "Board sections fetched".into());
-                }
+                self.maybe_finish_sections(&mut state);
             }
             ProgressEvent::RequestRetry {
                 resource,
@@ -455,12 +506,7 @@ impl ProgressSink for TerminalProgress {
             } => {
                 let mut state = self.state.lock().unwrap();
                 self.add_group(&mut state, ProgressGroup::Boards);
-                if state.page_resource != Some(resource) {
-                    if let Some(previous) = state.page_resource {
-                        Self::finish_slot(&mut state.page, format!("Fetched {previous}"));
-                    }
-                    state.page_resource = Some(resource);
-                }
+                state.page_resource = Some(resource);
                 let message = format!(
                     "Retrying Pinterest {resource} request (attempt {attempt}) in {:.1}s",
                     delay.as_secs_f64()
@@ -470,8 +516,8 @@ impl ProgressSink for TerminalProgress {
             ProgressEvent::ImagesStarted { total } => {
                 let mut state = self.state.lock().unwrap();
                 self.add_group(&mut state, ProgressGroup::Analysis);
-                Self::finish_slot(&mut state.page, "Pins fetched".into());
-                Self::finish_slot(&mut state.sections, "Board sections fetched".into());
+                self.finish_page(&mut state, "Pinterest data fetched");
+                self.finish_sections(&mut state);
                 let message = format!("Analyzing images (0/{total} complete)");
                 let bar = self.ensure_active_slot(&mut state.images, message);
                 bar.set_length(total as u64);
@@ -505,6 +551,17 @@ impl ProgressSink for TerminalProgress {
                 self.add_group(&mut state, ProgressGroup::Report);
                 Self::finish_slot(&mut state.matching, "Matches compared".into());
                 state.report = Some(self.add_active_row("Creating temporary visual report".into()));
+            }
+            ProgressEvent::ReportCreated { path } => {
+                let mut state = self.state.lock().unwrap();
+                self.add_group(&mut state, ProgressGroup::Report);
+                let message = format!("HTML report: {path}");
+                if let Some(bar) = state.report.take() {
+                    Self::complete_row(&bar, message);
+                } else {
+                    let bar = self.add_active_row(message.clone());
+                    Self::complete_row(&bar, message);
+                }
             }
             ProgressEvent::Finished => {
                 let mut state = self.state.lock().unwrap();
@@ -552,11 +609,32 @@ fn failed_style() -> ProgressStyle {
         .tick_strings(&["!", "!"])
 }
 
+fn page_word(count: usize) -> &'static str {
+    if count == 1 { "page" } else { "pages" }
+}
+
+fn section_progress_message(completed: usize, total: usize, active: usize) -> String {
+    if active == 0 {
+        format!("Fetching board sections: {completed}/{total} complete")
+    } else {
+        format!("Fetching board sections: {completed}/{total} complete ({active} active)")
+    }
+}
+
 #[cfg(test)]
 pub mod tests {
     use std::sync::Mutex;
 
     use super::*;
+
+    fn silent_visible_progress() -> TerminalProgress {
+        TerminalProgress {
+            bars: MultiProgress::with_draw_target(ProgressDrawTarget::hidden()),
+            visible: true,
+            cursor_hidden: AtomicBool::new(false),
+            state: Mutex::new(ProgressState::default()),
+        }
+    }
 
     #[derive(Debug, Default)]
     pub struct RecordingProgress {
@@ -608,5 +686,106 @@ pub mod tests {
         assert_eq!(completed_style().get_final_tick_str(), "✓");
         assert_eq!(failed_style().get_final_tick_str(), "!");
         assert_ne!(active_style().get_tick_str(0), "✓");
+    }
+
+    #[test]
+    fn pagination_keeps_one_rolling_row_across_interleaved_resources() {
+        let progress = silent_visible_progress();
+
+        progress.emit(ProgressEvent::PageFetched {
+            resource: "BoardFeed",
+            page: 1,
+            items: 250,
+        });
+        progress.emit(ProgressEvent::PageFetched {
+            resource: "BoardSectionPins",
+            page: 1,
+            items: 40,
+        });
+        progress.emit(ProgressEvent::PageFetched {
+            resource: "BoardFeed",
+            page: 2,
+            items: 500,
+        });
+
+        let state = progress.state.lock().unwrap();
+        assert!(state.page.is_some());
+        assert_eq!(state.page_resource, Some("BoardFeed"));
+        assert_eq!(state.pages_fetched, 3);
+        drop(state);
+
+        progress.emit(ProgressEvent::ImagesStarted { total: 0 });
+
+        let state = progress.state.lock().unwrap();
+        assert!(state.page.is_none());
+        assert_eq!(state.pages_fetched, 0);
+        assert_eq!(state.page_resource, None);
+    }
+
+    #[test]
+    fn section_progress_stays_rolling_until_all_boards_finish() {
+        let progress = silent_visible_progress();
+
+        progress.emit(ProgressEvent::BoardStarted {
+            name: "Faces".into(),
+            current: 1,
+            total: 1,
+        });
+        progress.emit(ProgressEvent::SectionsStarted { total: 1 });
+        progress.emit(ProgressEvent::SectionStarted {
+            current: 1,
+            total: 1,
+        });
+        progress.emit(ProgressEvent::SectionFinished {
+            completed: 1,
+            total: 1,
+        });
+
+        let state = progress.state.lock().unwrap();
+        assert_eq!(state.sections_total, 1);
+        assert_eq!(state.sections_completed, 1);
+        assert!(
+            state.sections.is_some(),
+            "the shared section row must not finish for one board"
+        );
+        drop(state);
+
+        progress.emit(ProgressEvent::BoardFinished {
+            name: "Faces".into(),
+            completed: 1,
+            total: 1,
+        });
+
+        let state = progress.state.lock().unwrap();
+        assert!(state.sections.is_none());
+    }
+
+    #[test]
+    fn finalizing_marks_board_rows_so_they_are_not_finished_twice() {
+        let progress = silent_visible_progress();
+
+        progress.emit(ProgressEvent::BoardStarted {
+            name: "Faces".into(),
+            current: 1,
+            total: 1,
+        });
+        progress.emit(ProgressEvent::Finished);
+
+        let state = progress.state.lock().unwrap();
+        assert_eq!(state.board_rows.len(), 1);
+        assert!(state.board_rows[0].finished);
+    }
+
+    #[test]
+    fn report_path_finishes_the_report_row() {
+        let progress = silent_visible_progress();
+
+        progress.emit(ProgressEvent::ReportStarted);
+        progress.emit(ProgressEvent::ReportCreated {
+            path: "/tmp/unpin-report.html".into(),
+        });
+
+        let state = progress.state.lock().unwrap();
+        assert!(state.report.is_none());
     }
 }

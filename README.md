@@ -70,14 +70,16 @@ grouped checklist of the scan. The active step has an animated spinner; when
 it completes, it remains visible with a checkmark. Concurrent stages report
 their own completed and active work rather than treating launch order as
 progress. The final checklist remains visible, and progress is written to
-stderr, so `--no-visual --format json` remains clean on stdout.
+stderr, so `--no-visual --format json` remains clean on stdout. Paginated
+requests share one rolling status row, keeping large scans readable while
+still showing the latest resource, page, and item count.
 
 By default, every successful run creates a unique `unpin-*.html` comparison
 report in your operating system's temporary directory and opens it in the
 default browser. The report places matching images side by side with
 resolutions, recommendations, and links to the original pin and image. HTML
 and CLI reports are mutually exclusive; use `--no-visual` to print the CLI
-report instead. The HTML path is printed to stderr.
+report instead. The HTML path appears as a completed progress step on stderr.
 
 The CLI report separates byte-identical images from conservative visual
 candidates. Within each match it marks the best-resolution pin as `KEEP` and
