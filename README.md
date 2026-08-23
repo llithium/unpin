@@ -70,24 +70,25 @@ grouped checklist of the scan. The active step has an animated spinner; when
 it completes, it remains visible with a checkmark. Concurrent stages report
 their own completed and active work rather than treating launch order as
 progress. The final checklist remains visible, and progress is written to
-stderr, so `--format json` remains clean on stdout.
+stderr, so `--no-visual --format json` remains clean on stdout.
 
-The text report separates byte-identical images from conservative visual
+By default, every successful run creates a unique `unpin-*.html` comparison
+report in your operating system's temporary directory and opens it in the
+default browser. The report places matching images side by side with
+resolutions, recommendations, and links to the original pin and image. HTML
+and CLI reports are mutually exclusive; use `--no-visual` to print the CLI
+report instead. The HTML path is printed to stderr.
+
+The CLI report separates byte-identical images from conservative visual
 candidates. Within each match it marks the best-resolution pin as `KEEP` and
 the others as `DELETE?`. When the best copies have identical dimensions and
 file sizes, they are marked `TIE`.
-
-Every successful run also creates a unique `unpin-*.html` comparison report in
-your operating system's temporary directory and opens it in the default
-browser. The report places matching images side by side with resolutions,
-recommendations, and links to the original pin and image. Its path is printed
-in text output and included as `visual_report` in JSON.
 
 Useful options:
 
 ```console
 # Machine-readable output
-unpin https://www.pinterest.com/username/board-name/ --format json
+unpin https://www.pinterest.com/username/board-name/ --no-visual --format json
 
 # Suppress perceptual matches and report identical image files only
 unpin https://www.pinterest.com/username/board-name/ --exact-only
@@ -98,7 +99,7 @@ unpin https://www.pinterest.com/username/board-name/ --similarity-threshold 8
 # Create the temporary visual without opening a browser
 unpin https://www.pinterest.com/username/board-name/ --no-open
 
-# Do not create a visual report
+# Use the CLI report instead of creating a visual report
 unpin https://www.pinterest.com/username/board-name/ --no-visual
 
 # Suppress interactive progress

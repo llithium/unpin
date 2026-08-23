@@ -30,7 +30,7 @@ pub struct Cli {
     #[arg(long, conflicts_with = "same_board_only")]
     pub cross_board_only: bool,
 
-    /// Report format.
+    /// CLI report format when `--no-visual` is used.
     #[arg(long, value_enum, default_value_t = OutputFormat::Text)]
     pub format: OutputFormat,
 
@@ -42,7 +42,7 @@ pub struct Cli {
     #[arg(long, default_value_t = 5, value_parser = clap::value_parser!(u8).range(0..=64))]
     pub similarity_threshold: u8,
 
-    /// Do not create an HTML comparison report.
+    /// Print the CLI report instead of creating an HTML comparison report.
     #[arg(long)]
     pub no_visual: bool,
 
@@ -154,7 +154,7 @@ mod tests {
     }
 
     #[test]
-    fn visual_progress_and_opening_are_enabled_by_default() {
+    fn html_report_is_default_and_cli_report_is_opt_in() {
         let cli =
             Cli::try_parse_from(["unpin", "https://www.pinterest.com/alice/interiors/"]).unwrap();
 
@@ -169,6 +169,14 @@ mod tests {
         assert!(!cli.interactive);
         assert!(!cli.same_board_only);
         assert!(!cli.cross_board_only);
+
+        let cli = Cli::try_parse_from([
+            "unpin",
+            "https://www.pinterest.com/alice/interiors/",
+            "--no-visual",
+        ])
+        .unwrap();
+        assert!(cli.no_visual);
     }
 
     #[test]
