@@ -194,9 +194,11 @@ individual skipped-pin record.
 
 ```console
 cargo fmt --all -- --check
-cargo test
+cargo test --locked
 cargo clippy --all-targets --all-features -- -D warnings
 ```
+
+Pull requests run this same verification gate in CI.
 
 Tests use local mock HTTP servers and do not contact Pinterest. A live smoke
 test can be added separately and should remain opt-in.
