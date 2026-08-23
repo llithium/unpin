@@ -8,7 +8,7 @@ use serde_json::json;
 use unpin::auth::BrowserCookie;
 use unpin::cli::Cli;
 use unpin::pinterest::{BoardTarget, PinterestClient, PinterestError};
-use unpin::progress::{ProgressEvent, ProgressSink};
+use unpin::progress::{Lifecycle, Progress, ProgressStep, SetupTask};
 use unpin::report::MatchScope;
 use url::Url;
 use wiremock::matchers::{header, header_regex, method, path, query_param};
@@ -16,18 +16,18 @@ use wiremock::{Mock, MockServer, ResponseTemplate};
 
 #[derive(Debug, Default)]
 struct RecordingProgress {
-    events: Mutex<Vec<ProgressEvent>>,
+    steps: Mutex<Vec<ProgressStep>>,
 }
 
-impl ProgressSink for RecordingProgress {
-    fn emit(&self, event: ProgressEvent) {
-        self.events.lock().unwrap().push(event);
+impl Progress for RecordingProgress {
+    fn step(&self, step: ProgressStep) {
+        self.steps.lock().unwrap().push(step);
     }
 }
 
 impl RecordingProgress {
-    fn events(&self) -> Vec<ProgressEvent> {
-        self.events.lock().unwrap().clone()
+    fn steps(&self) -> Vec<ProgressStep> {
+        self.steps.lock().unwrap().clone()
     }
 }
 
@@ -215,36 +215,98 @@ async fn scans_paginated_board_and_sections_end_to_end() {
     assert!(report.warnings[0].contains("returned only 3 anonymously"));
     assert_eq!(report.exact_groups[0].items.len(), 2);
     assert!(report.skipped[0].reason.contains("video"));
-    assert!(progress.events().contains(&ProgressEvent::FetchingBoard));
-    assert!(progress.events().contains(&ProgressEvent::PageFetched {
+    assert!(progress.steps().contains(&ProgressStep::Setup {
+        task: SetupTask::BoardMetadata { name: None },
+        lifecycle: Lifecycle::Started,
+    }));
+    assert!(progress.steps().contains(&ProgressStep::PageCollection {
         resource: "BoardFeed",
         page: 2,
         items: 2,
+        lifecycle: Lifecycle::Completed,
     }));
-    assert!(
-        progress
-            .events()
-            .contains(&ProgressEvent::SectionsStarted { total: 1 })
-    );
-    assert!(
-        progress
-            .events()
-            .contains(&ProgressEvent::ImagesStarted { total: 1 })
-    );
-    assert!(progress.events().contains(&ProgressEvent::ImageFinished {
+    assert!(progress.steps().contains(&ProgressStep::SectionCollection {
+        current: 0,
+        completed: 0,
+        total: 1,
+        lifecycle: Lifecycle::Started
+    }));
+    assert!(progress.steps().contains(&ProgressStep::ImageAnalysis {
+        completed: 0,
+        total: 1,
+        lifecycle: Lifecycle::Started
+    }));
+    assert!(progress.steps().contains(&ProgressStep::ImageAnalysis {
         completed: 1,
         total: 1,
+        lifecycle: Lifecycle::Completed,
     }));
-    assert!(progress.events().contains(&ProgressEvent::SectionFinished {
+    assert!(progress.steps().contains(&ProgressStep::SectionCollection {
+        current: 1,
         completed: 1,
         total: 1,
+        lifecycle: Lifecycle::Completed,
     }));
-    assert!(progress.events().contains(&ProgressEvent::BoardFinished {
+    assert!(progress.steps().contains(&ProgressStep::SourceCollection {
         name: "Ideas".into(),
+        current: 1,
         completed: 1,
         total: 1,
+        lifecycle: Lifecycle::Completed,
     }));
-    assert!(progress.events().contains(&ProgressEvent::MatchingStarted));
+    assert!(progress.steps().contains(&ProgressStep::Matching {
+        lifecycle: Lifecycle::Started
+    }));
+    let steps = progress.steps();
+    let image_started = steps
+        .iter()
+        .position(|step| {
+            matches!(
+                step,
+                ProgressStep::ImageAnalysis {
+                    lifecycle: Lifecycle::Started,
+                    ..
+                }
+            )
+        })
+        .unwrap();
+    let image_completed = steps
+        .iter()
+        .position(|step| {
+            matches!(
+                step,
+                ProgressStep::ImageAnalysis {
+                    lifecycle: Lifecycle::Completed,
+                    ..
+                }
+            )
+        })
+        .unwrap();
+    let matching_started = steps
+        .iter()
+        .position(|step| {
+            matches!(
+                step,
+                ProgressStep::Matching {
+                    lifecycle: Lifecycle::Started
+                }
+            )
+        })
+        .unwrap();
+    let matching_completed = steps
+        .iter()
+        .position(|step| {
+            matches!(
+                step,
+                ProgressStep::Matching {
+                    lifecycle: Lifecycle::Completed
+                }
+            )
+        })
+        .unwrap();
+    assert!(image_started < image_completed);
+    assert!(image_completed < matching_started);
+    assert!(matching_started < matching_completed);
 
     let visual_path = unpin::visual::create_temporary_report(&report).unwrap();
     assert!(visual_path.starts_with(std::env::temp_dir()));
@@ -662,11 +724,13 @@ async fn scans_selected_profile_boards_as_one_pooled_report() {
     assert_eq!(report.summary.boards.len(), 2, "Recipes was not selected");
     // The non-board grid entry must never reach BoardFeed; wiremock has no
     // stub for it, so scanning it would have failed this run outright.
-    assert!(
-        progress
-            .events()
-            .contains(&ProgressEvent::UserBoardsResolved { total: 3 })
-    );
+    assert!(progress.steps().contains(&ProgressStep::Setup {
+        task: SetupTask::UserBoards {
+            username: "alice".into(),
+            total: Some(3)
+        },
+        lifecycle: Lifecycle::Completed,
+    }));
     assert_eq!(report.summary.boards[0].name, "Interiors");
     assert_eq!(report.summary.boards[1].name, "Mood board");
     // Board links point at Pinterest itself, never at the API root in use.
@@ -691,35 +755,49 @@ async fn scans_selected_profile_boards_as_one_pooled_report() {
     assert_eq!(boards, ["Interiors", "Mood board"]);
     assert_eq!(report.exact_groups[0].scope, MatchScope::CrossBoard);
 
-    assert!(
-        progress
-            .events()
-            .contains(&ProgressEvent::FetchingUserBoards {
-                username: "alice".into(),
-            })
-    );
-    assert!(
-        progress
-            .events()
-            .contains(&ProgressEvent::UserBoardsResolved { total: 3 })
-    );
-    assert!(progress.events().contains(&ProgressEvent::BoardStarted {
+    assert!(progress.steps().contains(&ProgressStep::Setup {
+        task: SetupTask::UserBoards {
+            username: "alice".into(),
+            total: None
+        },
+        lifecycle: Lifecycle::Started,
+    }));
+    assert!(progress.steps().contains(&ProgressStep::Setup {
+        task: SetupTask::UserBoards {
+            username: "alice".into(),
+            total: Some(3)
+        },
+        lifecycle: Lifecycle::Completed,
+    }));
+    assert!(progress.steps().contains(&ProgressStep::SourceCollection {
         name: "Mood board".into(),
         current: 2,
+        completed: 0,
         total: 2,
+        lifecycle: Lifecycle::Started,
     }));
-    let events = progress.events();
-    let second_board_started = events
+    let steps = progress.steps();
+    let second_board_started = steps
         .iter()
-        .position(|event| matches!(event, ProgressEvent::BoardStarted { current: 2, .. }))
-        .unwrap();
-    let first_board_page = events
-        .iter()
-        .position(|event| {
+        .position(|step| {
             matches!(
-                event,
-                ProgressEvent::PageFetched {
+                step,
+                ProgressStep::SourceCollection {
+                    current: 2,
+                    lifecycle: Lifecycle::Started,
+                    ..
+                }
+            )
+        })
+        .unwrap();
+    let first_board_page = steps
+        .iter()
+        .position(|step| {
+            matches!(
+                step,
+                ProgressStep::PageCollection {
                     resource: "BoardFeed",
+                    lifecycle: Lifecycle::Completed,
                     ..
                 }
             )
@@ -851,7 +929,7 @@ async fn retries_throttled_pinterest_requests_using_retry_after() {
 
     assert_eq!(attempts.load(Ordering::SeqCst), 2);
     assert_eq!(result.board_name, "Ideas");
-    assert!(progress.events().contains(&ProgressEvent::RequestRetry {
+    assert!(progress.steps().contains(&ProgressStep::PageRetry {
         resource: "Board",
         attempt: 2,
         delay: std::time::Duration::ZERO,

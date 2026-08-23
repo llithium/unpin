@@ -14,7 +14,7 @@ use thiserror::Error;
 use url::Url;
 
 use crate::auth::BrowserCookie;
-use crate::progress::{NoProgress, ProgressEvent, ProgressSink};
+use crate::progress::{Lifecycle, NoProgress, Progress, ProgressStep, SetupTask};
 
 const MAX_PAGES: usize = 10_000;
 /// A successful API response larger than this is rejected as an invalid
@@ -398,7 +398,7 @@ impl PinterestClient {
     pub async fn fetch_board_with_progress(
         &self,
         target: &BoardTarget,
-        progress: &dyn ProgressSink,
+        progress: &dyn Progress,
     ) -> Result<BoardPins, PinterestError> {
         let board = self.resolve_board_source(target, progress).await?;
         self.collect_board_source(&board, progress).await
@@ -409,7 +409,7 @@ impl PinterestClient {
     pub(crate) async fn collect_board_source(
         &self,
         board: &BoardRef,
-        progress: &dyn ProgressSink,
+        progress: &dyn Progress,
     ) -> Result<BoardPins, PinterestError> {
         self.fetch_board_pins(board, &mut HashSet::new(), progress)
             .await
@@ -419,7 +419,7 @@ impl PinterestClient {
     pub(crate) async fn collect_unorganized_source(
         &self,
         target: &UserTarget,
-        progress: &dyn ProgressSink,
+        progress: &dyn Progress,
     ) -> Result<BoardPins, PinterestError> {
         self.fetch_user_pins(target, &mut HashSet::new(), progress)
             .await
@@ -430,9 +430,12 @@ impl PinterestClient {
     pub(crate) async fn resolve_board_source(
         &self,
         target: &BoardTarget,
-        progress: &dyn ProgressSink,
+        progress: &dyn Progress,
     ) -> Result<BoardRef, PinterestError> {
-        progress.emit(ProgressEvent::FetchingBoard);
+        progress.step(ProgressStep::Setup {
+            task: SetupTask::BoardMetadata { name: None },
+            lifecycle: Lifecycle::Started,
+        });
         let board_response = self
             .call(
                 "Board",
@@ -452,7 +455,12 @@ impl PinterestClient {
             .and_then(Value::as_str)
             .unwrap_or(&target.board_slug)
             .to_owned();
-        progress.emit(ProgressEvent::BoardResolved { name: name.clone() });
+        progress.step(ProgressStep::Setup {
+            task: SetupTask::BoardMetadata {
+                name: Some(name.clone()),
+            },
+            lifecycle: Lifecycle::Completed,
+        });
 
         Ok(BoardRef {
             id,
@@ -474,10 +482,14 @@ impl PinterestClient {
     pub(crate) async fn list_profile_sources(
         &self,
         target: &UserTarget,
-        progress: &dyn ProgressSink,
+        progress: &dyn Progress,
     ) -> Result<Vec<BoardRef>, PinterestError> {
-        progress.emit(ProgressEvent::FetchingUserBoards {
-            username: target.username.clone(),
+        progress.step(ProgressStep::Setup {
+            task: SetupTask::UserBoards {
+                username: target.username.clone(),
+                total: None,
+            },
+            lifecycle: Lifecycle::Started,
         });
         let raw_boards = self
             .paginate(
@@ -547,8 +559,12 @@ impl PinterestClient {
             });
         }
 
-        progress.emit(ProgressEvent::UserBoardsResolved {
-            total: boards.len(),
+        progress.step(ProgressStep::Setup {
+            task: SetupTask::UserBoards {
+                username: target.username.clone(),
+                total: Some(boards.len()),
+            },
+            lifecycle: Lifecycle::Completed,
         });
         Ok(boards)
     }
@@ -561,7 +577,7 @@ impl PinterestClient {
         &self,
         target: &UserTarget,
         seen_pin_ids: &mut HashSet<String>,
-        progress: &dyn ProgressSink,
+        progress: &dyn Progress,
     ) -> Result<BoardPins, PinterestError> {
         let raw_pins = self
             .paginate(
@@ -595,7 +611,7 @@ impl PinterestClient {
         &self,
         board: &BoardRef,
         seen_pin_ids: &mut HashSet<String>,
-        progress: &dyn ProgressSink,
+        progress: &dyn Progress,
     ) -> Result<BoardPins, PinterestError> {
         let mut raw_pins = self
             .paginate(
@@ -627,8 +643,11 @@ impl PinterestClient {
             }
             // Announced after filtering so the total matches the number of
             // sections that will actually report progress.
-            progress.emit(ProgressEvent::SectionsStarted {
+            progress.step(ProgressStep::SectionCollection {
+                current: 0,
+                completed: 0,
                 total: section_ids.len(),
+                lifecycle: Lifecycle::Started,
             });
 
             // Each section is an independent paginated feed, so they overlap
@@ -640,9 +659,11 @@ impl PinterestClient {
                 stream::iter(section_ids.into_iter().enumerate().map(|(index, id)| {
                     let section_completed = Arc::clone(&section_completed);
                     async move {
-                        progress.emit(ProgressEvent::SectionStarted {
+                        progress.step(ProgressStep::SectionCollection {
                             current: index + 1,
+                            completed: section_completed.load(Ordering::Relaxed),
                             total: section_total,
+                            lifecycle: Lifecycle::Started,
                         });
                         let fetched = self
                             .paginate(
@@ -656,9 +677,11 @@ impl PinterestClient {
                             )
                             .await;
                         let completed = section_completed.fetch_add(1, Ordering::Relaxed) + 1;
-                        progress.emit(ProgressEvent::SectionFinished {
+                        progress.step(ProgressStep::SectionCollection {
+                            current: index + 1,
                             completed,
                             total: section_total,
+                            lifecycle: Lifecycle::Completed,
                         });
                         (index, fetched)
                     }
@@ -732,12 +755,18 @@ impl PinterestClient {
         &self,
         resource: &'static str,
         mut options: Value,
-        progress: &dyn ProgressSink,
+        progress: &dyn Progress,
     ) -> Result<Vec<Value>, PinterestError> {
         let mut all_results = Vec::new();
         let mut seen_bookmarks = HashSet::new();
 
         for page_index in 0..MAX_PAGES {
+            progress.step(ProgressStep::PageCollection {
+                resource,
+                page: page_index + 1,
+                items: all_results.len(),
+                lifecycle: Lifecycle::Started,
+            });
             let response = match self.call(resource, options.clone(), progress).await {
                 Ok(response) => response,
                 // An oversized `page_size` is refused outright, and the value
@@ -768,10 +797,11 @@ impl PinterestClient {
                 ));
             }
             all_results.extend(page_results);
-            progress.emit(ProgressEvent::PageFetched {
+            progress.step(ProgressStep::PageCollection {
                 resource,
                 page: page_index + 1,
                 items: all_results.len(),
+                lifecycle: Lifecycle::Completed,
             });
 
             let Some(bookmark) = bookmark else {
@@ -803,7 +833,7 @@ impl PinterestClient {
         &self,
         resource: &'static str,
         options: Value,
-        progress: &dyn ProgressSink,
+        progress: &dyn Progress,
     ) -> Result<Value, PinterestError> {
         let endpoint = self
             .api_root
@@ -952,13 +982,8 @@ fn is_retryable_status(status: reqwest::StatusCode) -> bool {
     status == reqwest::StatusCode::TOO_MANY_REQUESTS || status.is_server_error()
 }
 
-fn emit_retry(
-    progress: &dyn ProgressSink,
-    resource: &'static str,
-    attempt: usize,
-    delay: Duration,
-) {
-    progress.emit(ProgressEvent::RequestRetry {
+fn emit_retry(progress: &dyn Progress, resource: &'static str, attempt: usize, delay: Duration) {
+    progress.step(ProgressStep::PageRetry {
         resource,
         attempt: attempt + 2,
         delay,

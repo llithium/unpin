@@ -18,7 +18,7 @@ use thiserror::Error;
 use tokio::sync::{OwnedSemaphorePermit, Semaphore};
 
 use crate::pinterest::{Pin, SkippedPin};
-use crate::progress::{NoProgress, ProgressEvent, ProgressSink};
+use crate::progress::{Lifecycle, NoProgress, Progress, ProgressStep};
 use crate::report::{
     DuplicateGroup, MatchScope, Recommendation, ReportItem, VisualCandidate, rank_tuple,
 };
@@ -297,7 +297,7 @@ pub async fn analyze_pins_with_progress(
     pins: Vec<Pin>,
     exact_only: bool,
     similarity_threshold: u8,
-    progress: &dyn ProgressSink,
+    progress: &dyn Progress,
 ) -> Result<AnalysisResult, AnalysisError> {
     analyze_pins_with_progress_and_cache(pins, exact_only, similarity_threshold, progress, None)
         .await
@@ -307,7 +307,7 @@ pub(crate) async fn analyze_pins_with_progress_and_cache(
     pins: Vec<Pin>,
     exact_only: bool,
     similarity_threshold: u8,
-    progress: &dyn ProgressSink,
+    progress: &dyn Progress,
     cache_directory: Option<PathBuf>,
 ) -> Result<AnalysisResult, AnalysisError> {
     let image_buffer_budget = Arc::new(Semaphore::new(
@@ -333,7 +333,7 @@ async fn analyze_pins_with_limits(
     pins: Vec<Pin>,
     exact_only: bool,
     similarity_threshold: u8,
-    progress: &dyn ProgressSink,
+    progress: &dyn Progress,
     cache_directory: Option<PathBuf>,
     limits: ImageAnalysisLimits,
 ) -> Result<AnalysisResult, AnalysisError> {
@@ -358,8 +358,10 @@ async fn analyze_pins_with_limits(
     }
     let entries = pins_by_media_url.into_iter().collect::<Vec<_>>();
     let download_total = entries.len();
-    progress.emit(ProgressEvent::ImagesStarted {
+    progress.step(ProgressStep::ImageAnalysis {
+        completed: 0,
         total: download_total,
+        lifecycle: Lifecycle::Started,
     });
 
     let mut images = Vec::new();
@@ -376,9 +378,14 @@ async fn analyze_pins_with_limits(
             Some(fingerprint) => {
                 images.extend(analyzed_images(&media_url, pins, &fingerprint));
                 completed += 1;
-                progress.emit(ProgressEvent::ImageFinished {
+                progress.step(ProgressStep::ImageAnalysis {
                     completed,
                     total: download_total,
+                    lifecycle: if completed >= download_total {
+                        Lifecycle::Completed
+                    } else {
+                        Lifecycle::Advanced
+                    },
                 });
             }
             None => misses.push((media_url, pins)),
@@ -435,20 +442,30 @@ async fn analyze_pins_with_limits(
             })),
         }
         completed += 1;
-        progress.emit(ProgressEvent::ImageFinished {
+        progress.step(ProgressStep::ImageAnalysis {
             completed,
             total: download_total,
+            lifecycle: if completed >= download_total {
+                Lifecycle::Completed
+            } else {
+                Lifecycle::Advanced
+            },
         });
     }
     images.sort_by(|left, right| left.pin_id.cmp(&right.pin_id));
 
-    progress.emit(ProgressEvent::MatchingStarted);
+    progress.step(ProgressStep::Matching {
+        lifecycle: Lifecycle::Started,
+    });
     let exact_groups = build_exact_groups(&images);
     let visual_candidates = if exact_only {
         Vec::new()
     } else {
         build_visual_candidates(&images, similarity_threshold)
     };
+    progress.step(ProgressStep::Matching {
+        lifecycle: Lifecycle::Completed,
+    });
 
     Ok(AnalysisResult {
         analyzed: images.len(),

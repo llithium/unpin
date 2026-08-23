@@ -7,82 +7,89 @@ use console::Term;
 use indicatif::{MultiProgress, ProgressBar, ProgressDrawTarget, ProgressStyle};
 
 #[derive(Debug, Clone, Eq, PartialEq)]
-pub enum ProgressEvent {
-    LoadingBrowserCookies {
+pub enum Lifecycle {
+    Started,
+    Advanced,
+    Completed,
+    Failed,
+}
+
+#[derive(Debug, Clone, Eq, PartialEq)]
+pub enum SetupTask {
+    BrowserCookies {
         browser: String,
     },
-    FetchingBoard,
-    BoardResolved {
-        name: String,
+    BoardMetadata {
+        name: Option<String>,
     },
-    FetchingUserBoards {
+    UserBoards {
         username: String,
+        total: Option<usize>,
     },
-    UserBoardsResolved {
-        total: usize,
+}
+
+#[derive(Debug, Clone, Eq, PartialEq)]
+/// A named scan stage together with its semantic lifecycle state.
+pub enum ProgressStep {
+    Setup {
+        task: SetupTask,
+        lifecycle: Lifecycle,
     },
-    /// The board picker is about to take over the terminal.
-    SelectionStarted,
-    SelectionFinished,
-    /// `current` is the deterministic launch ordinal; completion is reported
-    /// separately because several boards may be in flight at once.
-    BoardStarted {
+    SourceCollection {
         name: String,
         current: usize,
-        total: usize,
-    },
-    BoardFinished {
-        name: String,
         completed: usize,
         total: usize,
+        lifecycle: Lifecycle,
     },
-    PageFetched {
+    PageCollection {
         resource: &'static str,
         page: usize,
         items: usize,
+        lifecycle: Lifecycle,
     },
-    SectionsStarted {
-        total: usize,
-    },
-    /// `current` is the section's launch ordinal within its board.
-    SectionStarted {
+    SectionCollection {
         current: usize,
-        total: usize,
-    },
-    SectionFinished {
         completed: usize,
         total: usize,
+        lifecycle: Lifecycle,
     },
-    RequestRetry {
+    PageRetry {
         resource: &'static str,
         attempt: usize,
         delay: Duration,
     },
-    ImagesStarted {
-        total: usize,
-    },
-    ImageFinished {
+    ImageAnalysis {
         completed: usize,
         total: usize,
+        lifecycle: Lifecycle,
     },
-    MatchingStarted,
-    ReportStarted,
-    ReportCreated {
-        path: String,
+    Matching {
+        lifecycle: Lifecycle,
     },
-    Finished,
-    Failed,
+    ReportCreation {
+        path: Option<String>,
+        lifecycle: Lifecycle,
+    },
+    /// Control is handed to or returned from the interactive selector.
+    SelectionHandoff {
+        lifecycle: Lifecycle,
+    },
+    Scan {
+        lifecycle: Lifecycle,
+    },
 }
 
-pub trait ProgressSink: Send + Sync {
-    fn emit(&self, event: ProgressEvent);
+/// The single observation seam for scan lifecycle progress.
+pub trait Progress: Send + Sync {
+    fn step(&self, step: ProgressStep);
 }
 
 #[derive(Debug, Default)]
 pub struct NoProgress;
 
-impl ProgressSink for NoProgress {
-    fn emit(&self, _event: ProgressEvent) {}
+impl Progress for NoProgress {
+    fn step(&self, _step: ProgressStep) {}
 }
 
 #[derive(Debug)]
@@ -355,36 +362,65 @@ pub fn restore_cursor_on_interrupt() {
     });
 }
 
-impl ProgressSink for TerminalProgress {
-    fn emit(&self, event: ProgressEvent) {
+impl Progress for TerminalProgress {
+    fn step(&self, step: ProgressStep) {
         if !self.visible {
             return;
         }
-        match event {
-            ProgressEvent::LoadingBrowserCookies { browser } => {
+        match step {
+            ProgressStep::Setup {
+                task: SetupTask::BrowserCookies { browser },
+                lifecycle: Lifecycle::Started,
+            } => {
                 let mut state = self.state.lock().unwrap();
                 self.add_group(&mut state, ProgressGroup::Setup);
                 Self::finish_slot(&mut state.setup, "Setup ready".into());
                 state.setup =
                     Some(self.add_active_row(format!("Reading Pinterest cookies from {browser}")));
             }
-            ProgressEvent::FetchingBoard => {
+            ProgressStep::Setup {
+                task: SetupTask::BrowserCookies { .. },
+                lifecycle: Lifecycle::Completed,
+            } => {
+                let mut state = self.state.lock().unwrap();
+                Self::finish_slot(&mut state.setup, "Pinterest cookies ready".into());
+            }
+            ProgressStep::Setup {
+                task: SetupTask::BoardMetadata { name: None },
+                lifecycle: Lifecycle::Started,
+            } => {
                 let mut state = self.state.lock().unwrap();
                 self.add_group(&mut state, ProgressGroup::Setup);
                 Self::finish_slot(&mut state.setup, "Pinterest session ready".into());
                 state.setup = Some(self.add_active_row("Fetching board metadata".into()));
             }
-            ProgressEvent::BoardResolved { name } => {
+            ProgressStep::Setup {
+                task: SetupTask::BoardMetadata { name: Some(name) },
+                lifecycle: Lifecycle::Completed,
+            } => {
                 let mut state = self.state.lock().unwrap();
                 Self::finish_slot(&mut state.setup, format!("Found board “{name}”"));
             }
-            ProgressEvent::FetchingUserBoards { username } => {
+            ProgressStep::Setup {
+                task:
+                    SetupTask::UserBoards {
+                        username,
+                        total: None,
+                    },
+                lifecycle: Lifecycle::Started,
+            } => {
                 let mut state = self.state.lock().unwrap();
                 self.add_group(&mut state, ProgressGroup::Setup);
                 Self::finish_slot(&mut state.setup, "Pinterest session ready".into());
                 state.setup = Some(self.add_active_row(format!("Listing boards for {username}")));
             }
-            ProgressEvent::UserBoardsResolved { total } => {
+            ProgressStep::Setup {
+                task:
+                    SetupTask::UserBoards {
+                        total: Some(total), ..
+                    },
+                lifecycle: Lifecycle::Completed,
+            } => {
                 let mut state = self.state.lock().unwrap();
                 Self::finish_slot(&mut state.setup, format!("Found {total} board(s)"));
                 if state.page_resource == Some("Boards") {
@@ -393,20 +429,26 @@ impl ProgressSink for TerminalProgress {
             }
             // Hide rather than finish the bar: a finished bar never redraws,
             // and the scan continues after the picker closes.
-            ProgressEvent::SelectionStarted => {
+            ProgressStep::SelectionHandoff {
+                lifecycle: Lifecycle::Started,
+            } => {
                 self.bars.set_draw_target(ProgressDrawTarget::hidden());
                 self.show_cursor();
             }
-            ProgressEvent::SelectionFinished => {
+            ProgressStep::SelectionHandoff {
+                lifecycle: Lifecycle::Completed,
+            } => {
                 self.hide_cursor();
                 self.bars.set_draw_target(ProgressDrawTarget::stderr());
                 let state = self.state.lock().unwrap();
                 self.redraw_active_rows(&state);
             }
-            ProgressEvent::BoardStarted {
+            ProgressStep::SourceCollection {
                 name,
                 current,
+                completed: _,
                 total,
+                lifecycle: Lifecycle::Started,
             } => {
                 let mut state = self.state.lock().unwrap();
                 self.add_group(&mut state, ProgressGroup::Boards);
@@ -422,15 +464,17 @@ impl ProgressSink for TerminalProgress {
                     finished: false,
                 });
             }
-            ProgressEvent::BoardFinished {
+            ProgressStep::SourceCollection {
                 name,
+                current: _,
                 completed,
                 total,
+                lifecycle: Lifecycle::Completed,
             } => {
                 let mut state = self.state.lock().unwrap();
                 state.boards_total = total;
-                // Completion events carry an atomic snapshot, but a task may
-                // be paused between taking it and emitting it.
+                // Completion steps carry an atomic snapshot, but a task may
+                // be paused between taking it and reporting it.
                 state.boards_completed = state.boards_completed.max(completed);
                 if let Some(row) = state
                     .board_rows
@@ -442,10 +486,11 @@ impl ProgressSink for TerminalProgress {
                 }
                 self.maybe_finish_sections(&mut state);
             }
-            ProgressEvent::PageFetched {
+            ProgressStep::PageCollection {
                 resource,
                 page,
                 items,
+                lifecycle: Lifecycle::Completed,
             } => {
                 let mut state = self.state.lock().unwrap();
                 self.add_group(&mut state, ProgressGroup::Boards);
@@ -454,7 +499,26 @@ impl ProgressSink for TerminalProgress {
                 let message = format!("Fetching {resource}: page {page} · {items} item(s)");
                 self.ensure_active_slot(&mut state.page, message);
             }
-            ProgressEvent::SectionsStarted { total } => {
+            ProgressStep::PageCollection {
+                resource,
+                page,
+                items: _,
+                lifecycle: Lifecycle::Started,
+            } => {
+                let mut state = self.state.lock().unwrap();
+                self.add_group(&mut state, ProgressGroup::Boards);
+                state.page_resource = Some(resource);
+                self.ensure_active_slot(
+                    &mut state.page,
+                    format!("Fetching {resource}: page {page}"),
+                );
+            }
+            ProgressStep::SectionCollection {
+                current: 0,
+                completed: 0,
+                total,
+                lifecycle: Lifecycle::Started,
+            } => {
                 let mut state = self.state.lock().unwrap();
                 self.add_group(&mut state, ProgressGroup::Boards);
                 state.sections_total += total;
@@ -464,7 +528,11 @@ impl ProgressSink for TerminalProgress {
                 );
                 self.ensure_active_slot(&mut state.sections, message);
             }
-            ProgressEvent::SectionStarted { total, .. } => {
+            ProgressStep::SectionCollection {
+                total,
+                lifecycle: Lifecycle::Started,
+                ..
+            } => {
                 let mut state = self.state.lock().unwrap();
                 self.add_group(&mut state, ProgressGroup::Boards);
                 state.sections_started += 1;
@@ -479,9 +547,10 @@ impl ProgressSink for TerminalProgress {
                 );
                 self.ensure_active_slot(&mut state.sections, message);
             }
-            ProgressEvent::SectionFinished {
-                completed: _,
+            ProgressStep::SectionCollection {
                 total,
+                lifecycle: Lifecycle::Completed,
+                ..
             } => {
                 let mut state = self.state.lock().unwrap();
                 state.sections_total = state.sections_total.max(total);
@@ -499,7 +568,7 @@ impl ProgressSink for TerminalProgress {
                 }
                 self.maybe_finish_sections(&mut state);
             }
-            ProgressEvent::RequestRetry {
+            ProgressStep::PageRetry {
                 resource,
                 attempt,
                 delay,
@@ -513,7 +582,11 @@ impl ProgressSink for TerminalProgress {
                 );
                 self.ensure_active_slot(&mut state.page, message);
             }
-            ProgressEvent::ImagesStarted { total } => {
+            ProgressStep::ImageAnalysis {
+                completed: 0,
+                total,
+                lifecycle: Lifecycle::Started,
+            } => {
                 let mut state = self.state.lock().unwrap();
                 self.add_group(&mut state, ProgressGroup::Analysis);
                 self.finish_page(&mut state, "Pinterest data fetched");
@@ -526,7 +599,11 @@ impl ProgressSink for TerminalProgress {
                     Self::finish_slot(&mut state.images, "Images analyzed (0/0)".into());
                 }
             }
-            ProgressEvent::ImageFinished { completed, total } => {
+            ProgressStep::ImageAnalysis {
+                completed,
+                total,
+                lifecycle: Lifecycle::Advanced | Lifecycle::Completed,
+            } => {
                 let mut state = self.state.lock().unwrap();
                 if let Some(bar) = state.images.as_ref() {
                     bar.set_length(total as u64);
@@ -540,19 +617,33 @@ impl ProgressSink for TerminalProgress {
                     );
                 }
             }
-            ProgressEvent::MatchingStarted => {
+            ProgressStep::Matching {
+                lifecycle: Lifecycle::Started,
+            } => {
                 let mut state = self.state.lock().unwrap();
                 self.add_group(&mut state, ProgressGroup::Analysis);
                 Self::finish_slot(&mut state.images, "Images analyzed".into());
                 state.matching = Some(self.add_active_row("Comparing image fingerprints".into()));
             }
-            ProgressEvent::ReportStarted => {
+            ProgressStep::Matching {
+                lifecycle: Lifecycle::Completed,
+            } => {
+                let mut state = self.state.lock().unwrap();
+                Self::finish_slot(&mut state.matching, "Matches compared".into());
+            }
+            ProgressStep::ReportCreation {
+                path: None,
+                lifecycle: Lifecycle::Started,
+            } => {
                 let mut state = self.state.lock().unwrap();
                 self.add_group(&mut state, ProgressGroup::Report);
                 Self::finish_slot(&mut state.matching, "Matches compared".into());
                 state.report = Some(self.add_active_row("Creating temporary visual report".into()));
             }
-            ProgressEvent::ReportCreated { path } => {
+            ProgressStep::ReportCreation {
+                path: Some(path),
+                lifecycle: Lifecycle::Completed,
+            } => {
                 let mut state = self.state.lock().unwrap();
                 self.add_group(&mut state, ProgressGroup::Report);
                 let message = format!("HTML report: {path}");
@@ -563,7 +654,9 @@ impl ProgressSink for TerminalProgress {
                     Self::complete_row(&bar, message);
                 }
             }
-            ProgressEvent::Finished => {
+            ProgressStep::Scan {
+                lifecycle: Lifecycle::Completed,
+            } => {
                 let mut state = self.state.lock().unwrap();
                 self.finish_active_rows(&mut state);
                 self.add_group(&mut state, ProgressGroup::Complete);
@@ -571,7 +664,9 @@ impl ProgressSink for TerminalProgress {
                 Self::complete_row(&bar, "Scan complete".into());
                 self.show_cursor();
             }
-            ProgressEvent::Failed => {
+            ProgressStep::Scan {
+                lifecycle: Lifecycle::Failed,
+            } => {
                 let mut state = self.state.lock().unwrap();
                 self.fail_active_rows(&mut state);
                 self.add_group(&mut state, ProgressGroup::Complete);
@@ -579,6 +674,7 @@ impl ProgressSink for TerminalProgress {
                 Self::fail_row(&bar, "Scan failed".into());
                 self.show_cursor();
             }
+            _ => {}
         }
     }
 }
@@ -638,32 +734,65 @@ pub mod tests {
 
     #[derive(Debug, Default)]
     pub struct RecordingProgress {
-        events: Mutex<Vec<ProgressEvent>>,
+        steps: Mutex<Vec<ProgressStep>>,
     }
 
     impl RecordingProgress {
-        pub fn events(&self) -> Vec<ProgressEvent> {
-            self.events.lock().unwrap().clone()
+        pub fn steps(&self) -> Vec<ProgressStep> {
+            self.steps.lock().unwrap().clone()
         }
     }
 
-    impl ProgressSink for RecordingProgress {
-        fn emit(&self, event: ProgressEvent) {
-            self.events.lock().unwrap().push(event);
+    impl Progress for RecordingProgress {
+        fn step(&self, step: ProgressStep) {
+            self.steps.lock().unwrap().push(step);
         }
     }
 
     #[test]
+    fn recording_progress_observes_lifecycle_steps() {
+        let progress = RecordingProgress::default();
+
+        progress.step(ProgressStep::Matching {
+            lifecycle: Lifecycle::Started,
+        });
+        progress.step(ProgressStep::Scan {
+            lifecycle: Lifecycle::Completed,
+        });
+
+        assert_eq!(
+            progress.steps(),
+            vec![
+                ProgressStep::Matching {
+                    lifecycle: Lifecycle::Started,
+                },
+                ProgressStep::Scan {
+                    lifecycle: Lifecycle::Completed,
+                }
+            ]
+        );
+    }
+
+    #[test]
     fn non_interactive_runs_never_touch_the_cursor() {
-        // Piped or --no-progress runs must not emit terminal escapes at all.
+        // Piped or --no-progress runs must not write terminal escapes at all.
         let progress = TerminalProgress::new(false);
-        for event in [
-            ProgressEvent::FetchingBoard,
-            ProgressEvent::SelectionStarted,
-            ProgressEvent::SelectionFinished,
-            ProgressEvent::Finished,
+        for step in [
+            ProgressStep::Setup {
+                task: SetupTask::BoardMetadata { name: None },
+                lifecycle: Lifecycle::Started,
+            },
+            ProgressStep::SelectionHandoff {
+                lifecycle: Lifecycle::Started,
+            },
+            ProgressStep::SelectionHandoff {
+                lifecycle: Lifecycle::Completed,
+            },
+            ProgressStep::Scan {
+                lifecycle: Lifecycle::Completed,
+            },
         ] {
-            progress.emit(event);
+            progress.step(step);
             assert!(!progress.cursor_hidden.load(Ordering::Relaxed));
         }
     }
@@ -692,20 +821,23 @@ pub mod tests {
     fn pagination_keeps_one_rolling_row_across_interleaved_resources() {
         let progress = silent_visible_progress();
 
-        progress.emit(ProgressEvent::PageFetched {
+        progress.step(ProgressStep::PageCollection {
             resource: "BoardFeed",
             page: 1,
             items: 250,
+            lifecycle: Lifecycle::Completed,
         });
-        progress.emit(ProgressEvent::PageFetched {
+        progress.step(ProgressStep::PageCollection {
             resource: "BoardSectionPins",
             page: 1,
             items: 40,
+            lifecycle: Lifecycle::Completed,
         });
-        progress.emit(ProgressEvent::PageFetched {
+        progress.step(ProgressStep::PageCollection {
             resource: "BoardFeed",
             page: 2,
             items: 500,
+            lifecycle: Lifecycle::Completed,
         });
 
         let state = progress.state.lock().unwrap();
@@ -714,7 +846,11 @@ pub mod tests {
         assert_eq!(state.pages_fetched, 3);
         drop(state);
 
-        progress.emit(ProgressEvent::ImagesStarted { total: 0 });
+        progress.step(ProgressStep::ImageAnalysis {
+            completed: 0,
+            total: 0,
+            lifecycle: Lifecycle::Started,
+        });
 
         let state = progress.state.lock().unwrap();
         assert!(state.page.is_none());
@@ -726,19 +862,30 @@ pub mod tests {
     fn section_progress_stays_rolling_until_all_boards_finish() {
         let progress = silent_visible_progress();
 
-        progress.emit(ProgressEvent::BoardStarted {
+        progress.step(ProgressStep::SourceCollection {
             name: "Faces".into(),
             current: 1,
+            completed: 0,
             total: 1,
+            lifecycle: Lifecycle::Started,
         });
-        progress.emit(ProgressEvent::SectionsStarted { total: 1 });
-        progress.emit(ProgressEvent::SectionStarted {
+        progress.step(ProgressStep::SectionCollection {
+            current: 0,
+            completed: 0,
+            total: 1,
+            lifecycle: Lifecycle::Started,
+        });
+        progress.step(ProgressStep::SectionCollection {
             current: 1,
+            completed: 0,
             total: 1,
+            lifecycle: Lifecycle::Started,
         });
-        progress.emit(ProgressEvent::SectionFinished {
+        progress.step(ProgressStep::SectionCollection {
+            current: 1,
             completed: 1,
             total: 1,
+            lifecycle: Lifecycle::Completed,
         });
 
         let state = progress.state.lock().unwrap();
@@ -750,10 +897,12 @@ pub mod tests {
         );
         drop(state);
 
-        progress.emit(ProgressEvent::BoardFinished {
+        progress.step(ProgressStep::SourceCollection {
             name: "Faces".into(),
+            current: 1,
             completed: 1,
             total: 1,
+            lifecycle: Lifecycle::Completed,
         });
 
         let state = progress.state.lock().unwrap();
@@ -764,12 +913,16 @@ pub mod tests {
     fn finalizing_marks_board_rows_so_they_are_not_finished_twice() {
         let progress = silent_visible_progress();
 
-        progress.emit(ProgressEvent::BoardStarted {
+        progress.step(ProgressStep::SourceCollection {
             name: "Faces".into(),
             current: 1,
+            completed: 0,
             total: 1,
+            lifecycle: Lifecycle::Started,
         });
-        progress.emit(ProgressEvent::Finished);
+        progress.step(ProgressStep::Scan {
+            lifecycle: Lifecycle::Completed,
+        });
 
         let state = progress.state.lock().unwrap();
         assert_eq!(state.board_rows.len(), 1);
@@ -780,9 +933,13 @@ pub mod tests {
     fn report_path_finishes_the_report_row() {
         let progress = silent_visible_progress();
 
-        progress.emit(ProgressEvent::ReportStarted);
-        progress.emit(ProgressEvent::ReportCreated {
-            path: "/tmp/unpin-report.html".into(),
+        progress.step(ProgressStep::ReportCreation {
+            path: None,
+            lifecycle: Lifecycle::Started,
+        });
+        progress.step(ProgressStep::ReportCreation {
+            path: Some("/tmp/unpin-report.html".into()),
+            lifecycle: Lifecycle::Completed,
         });
 
         let state = progress.state.lock().unwrap();

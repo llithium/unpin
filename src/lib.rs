@@ -15,7 +15,7 @@ use url::Url;
 use crate::cli::Cli;
 use crate::intake::{IntakeError, IntakeRequest, SourceOutcome, SourceSelection};
 use crate::pinterest::{PinterestClient, PinterestError, Target};
-use crate::progress::{NoProgress, ProgressEvent, ProgressSink};
+use crate::progress::{Lifecycle, NoProgress, Progress, ProgressStep, SetupTask};
 use crate::report::{Report, ScannedBoard, Summary};
 
 #[derive(Debug, Error)]
@@ -81,16 +81,27 @@ pub async fn run_with_api_root(cli: &Cli, api_root: Option<Url>) -> Result<Repor
 pub async fn run_with_api_root_and_progress(
     cli: &Cli,
     api_root: Option<Url>,
-    progress: &dyn ProgressSink,
+    progress: &dyn Progress,
 ) -> Result<Report, AppError> {
     let target = Target::parse(&cli.target)?;
     let cookies = if let Some(path) = &cli.cookies {
         auth::load_pinterest_cookies_file(path)?
     } else if let Some(browser) = cli.cookies_from_browser {
-        progress.emit(ProgressEvent::LoadingBrowserCookies {
-            browser: browser.to_string(),
+        let browser_name = browser.to_string();
+        progress.step(ProgressStep::Setup {
+            task: SetupTask::BrowserCookies {
+                browser: browser_name.clone(),
+            },
+            lifecycle: Lifecycle::Started,
         });
-        auth::load_pinterest_cookies(browser).await?
+        let cookies = auth::load_pinterest_cookies(browser).await?;
+        progress.step(ProgressStep::Setup {
+            task: SetupTask::BrowserCookies {
+                browser: browser_name,
+            },
+            lifecycle: Lifecycle::Completed,
+        });
+        cookies
     } else {
         Vec::new()
     };

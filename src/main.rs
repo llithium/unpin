@@ -3,7 +3,7 @@ use std::process::ExitCode;
 
 use clap::Parser;
 use unpin::cli::{Cli, OutputFormat};
-use unpin::progress::{ProgressEvent, ProgressSink, TerminalProgress};
+use unpin::progress::{Progress, ProgressStep, TerminalProgress};
 
 #[tokio::main]
 async fn main() -> ExitCode {
@@ -16,23 +16,31 @@ async fn main() -> ExitCode {
     let report = match unpin::run_with_api_root_and_progress(&cli, None, &progress).await {
         Ok(report) => report,
         Err(error) => {
-            progress.emit(ProgressEvent::Failed);
+            progress.step(ProgressStep::Scan {
+                lifecycle: unpin::progress::Lifecycle::Failed,
+            });
             eprintln!("error: {error}");
             return ExitCode::FAILURE;
         }
     };
     let (report_to_open, cli_output) = if !cli.no_visual {
-        progress.emit(ProgressEvent::ReportStarted);
+        progress.step(ProgressStep::ReportCreation {
+            path: None,
+            lifecycle: unpin::progress::Lifecycle::Started,
+        });
         let report_path = match unpin::visual::create_temporary_report(&report) {
             Ok(path) => path,
             Err(error) => {
-                progress.emit(ProgressEvent::Failed);
+                progress.step(ProgressStep::Scan {
+                    lifecycle: unpin::progress::Lifecycle::Failed,
+                });
                 eprintln!("error: {error}");
                 return ExitCode::FAILURE;
             }
         };
-        progress.emit(ProgressEvent::ReportCreated {
-            path: report_path.display().to_string(),
+        progress.step(ProgressStep::ReportCreation {
+            path: Some(report_path.display().to_string()),
+            lifecycle: unpin::progress::Lifecycle::Completed,
         });
         (Some(report_path), None)
     } else {
@@ -45,7 +53,9 @@ async fn main() -> ExitCode {
             OutputFormat::Json => match report.render_json() {
                 Ok(json) => format!("{json}\n"),
                 Err(error) => {
-                    progress.emit(ProgressEvent::Failed);
+                    progress.step(ProgressStep::Scan {
+                        lifecycle: unpin::progress::Lifecycle::Failed,
+                    });
                     eprintln!("error: failed to serialize report: {error}");
                     return ExitCode::FAILURE;
                 }
@@ -53,7 +63,9 @@ async fn main() -> ExitCode {
         };
         (None, Some(rendered))
     };
-    progress.emit(ProgressEvent::Finished);
+    progress.step(ProgressStep::Scan {
+        lifecycle: unpin::progress::Lifecycle::Completed,
+    });
 
     if let Some(output) = cli_output {
         print!("{output}");

@@ -11,7 +11,7 @@ use thiserror::Error;
 use crate::pinterest::{
     BoardPins, BoardRef, Pin, PinterestClient, PinterestError, SkippedPin, Target, UserTarget,
 };
-use crate::progress::{ProgressEvent, ProgressSink};
+use crate::progress::{Lifecycle, Progress, ProgressStep};
 use crate::select;
 
 /// Board feeds paginate sequentially, so overlapping whole boards is the only
@@ -124,7 +124,7 @@ struct ResolvedSources {
 pub(crate) async fn collect(
     request: IntakeRequest,
     client: &PinterestClient,
-    progress: &dyn ProgressSink,
+    progress: &dyn Progress,
 ) -> Result<ScanIntakeResult, IntakeError> {
     let resolved = resolve_sources(&request.target, request.selection, client, progress).await?;
     let username = resolved.user.as_ref().map(|user| user.username.clone());
@@ -144,17 +144,21 @@ pub(crate) async fn collect(
             let client = client.clone();
             let board_completed = Arc::clone(&board_completed);
             async move {
-                progress.emit(ProgressEvent::BoardStarted {
+                progress.step(ProgressStep::SourceCollection {
                     name: board.name.clone(),
                     current: index + 1,
+                    completed: board_completed.load(Ordering::Relaxed),
                     total: board_total,
+                    lifecycle: Lifecycle::Started,
                 });
                 let fetched = client.collect_board_source(&board, progress).await;
                 let completed = board_completed.fetch_add(1, Ordering::Relaxed) + 1;
-                progress.emit(ProgressEvent::BoardFinished {
+                progress.step(ProgressStep::SourceCollection {
                     name: board.name.clone(),
+                    current: index + 1,
                     completed,
                     total: board_total,
+                    lifecycle: Lifecycle::Completed,
                 });
                 (index, board, fetched)
             }
@@ -316,7 +320,7 @@ async fn resolve_sources(
     target: &Target,
     selection: SourceSelection,
     client: &PinterestClient,
-    progress: &dyn ProgressSink,
+    progress: &dyn Progress,
 ) -> Result<ResolvedSources, IntakeError> {
     let user = match target {
         Target::Board(board) => {
@@ -365,9 +369,13 @@ async fn resolve_sources(
                 section_count: 0,
                 is_secret: false,
             });
-            progress.emit(ProgressEvent::SelectionStarted);
+            progress.step(ProgressStep::SelectionHandoff {
+                lifecycle: Lifecycle::Started,
+            });
             let chosen = select::choose_boards(&user.username, &choices);
-            progress.emit(ProgressEvent::SelectionFinished);
+            progress.step(ProgressStep::SelectionHandoff {
+                lifecycle: Lifecycle::Completed,
+            });
             let chosen = chosen?;
             let include_unorganized = chosen.contains(&boards.len());
             let prefetched_unorganized = include_unorganized.then_some(fetched);
