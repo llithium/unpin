@@ -19,23 +19,23 @@
         <style>
             :root {
                 color-scheme: dark;
-                --canvas: #000000;
-                --shell: #131209;
-                --surface: #181818;
-                --surface-raised: #1f1f1f;
-                --surface-hover: #272727;
-                --line: #272727;
-                --line-strong: #313131;
-                --ink: #f4f4f2;
-                --muted: #92979e;
-                --muted-strong: #b8bcc1;
-                --accent: #f4f4f2;
-                --accent-soft: #272727;
-                --green: #68d8ad;
-                --amber: #f2c66d;
-                --red: #ff808b;
-                --focus: #f2c66d;
-                font-family: Manrope, ui-sans-serif, sans-serif;
+                --canvas: #080808;
+                --shell: #0b0b0b;
+                --surface: #111111;
+                --surface-raised: #181818;
+                --surface-hover: #202020;
+                --line: #292929;
+                --line-strong: #494949;
+                --ink: #f2f0eb;
+                --muted: #898783;
+                --muted-strong: #c3c0b9;
+                --accent: #f2f0eb;
+                --accent-soft: #1a1a1a;
+                --green: #f2f0eb;
+                --amber: #ff3b30;
+                --red: #ff3b30;
+                --focus: #ff3b30;
+                font-family: Geist, "Helvetica Neue", Arial, sans-serif;
             }
 
             * {
@@ -135,8 +135,7 @@
             .match-title,
             .match-actions,
             .card-top,
-            .actions,
-            .shortcut-row {
+            .actions {
                 display: flex;
                 align-items: center;
             }
@@ -201,11 +200,13 @@
 
             .progress-fill {
                 display: block;
-                width: 0;
+                width: 100%;
                 height: 100%;
                 border-radius: inherit;
                 background: var(--green);
-                transition: width 700ms cubic-bezier(0.32, 0.72, 0, 1);
+                transform: scaleX(0);
+                transform-origin: left center;
+                transition: transform 220ms cubic-bezier(0.32, 0.72, 0, 1);
             }
 
             .topbar-actions,
@@ -304,14 +305,6 @@
                 background: var(--shell);
             }
 
-            .rail-section {
-                padding: 24px;
-                border-bottom: 1px solid var(--line);
-            }
-
-            .eyebrow,
-            .rail-label,
-            .detail-label,
             .match-kicker {
                 margin: 0;
                 color: var(--muted);
@@ -321,56 +314,6 @@
                 line-height: 16px;
                 letter-spacing: 0.08em;
                 text-transform: uppercase;
-            }
-
-            .rail-heading {
-                margin: 8px 0;
-                font-size: 20px;
-                font-weight: 600;
-                line-height: 28px;
-                letter-spacing: -0.02em;
-            }
-
-            .rail-copy {
-                margin: 0;
-                color: var(--muted);
-                font-size: 14px;
-                line-height: 20px;
-            }
-
-            .stats {
-                display: grid;
-                grid-template-columns: 1fr 1fr;
-            }
-
-            .stat {
-                min-width: 0;
-                padding: 16px 24px;
-                border-right: 1px solid var(--line);
-                border-bottom: 1px solid var(--line);
-            }
-
-            .stat:nth-child(even) {
-                border-right: 0;
-            }
-
-            .stat strong {
-                display: block;
-                margin-bottom: 4px;
-                font-size: 24px;
-                font-weight: 600;
-                line-height: 32px;
-                letter-spacing: -0.03em;
-            }
-
-            .stat span {
-                display: block;
-                overflow: hidden;
-                color: var(--muted);
-                font-size: 12px;
-                line-height: 16px;
-                text-overflow: ellipsis;
-                white-space: nowrap;
             }
 
             .filters {
@@ -465,17 +408,6 @@
                 color: var(--ink);
             }
 
-            .match-link.is-reviewed::after {
-                content: "";
-                position: absolute;
-                top: 8px;
-                right: 8px;
-                width: 6px;
-                height: 6px;
-                border-radius: 9999px;
-                background: var(--green);
-            }
-
             .match-link.is-filtered,
             .match.is-filtered {
                 display: none !important;
@@ -523,33 +455,6 @@
                 font-family: "Geist Mono", ui-monospace, monospace;
                 font-size: 12px;
                 line-height: 16px;
-            }
-
-            .scope-dot {
-                width: 7px;
-                height: 7px;
-                margin-right: 2px;
-                border-radius: 9999px;
-                background: var(--muted);
-            }
-
-            .match-link.cross-board .scope-dot {
-                background: var(--amber);
-            }
-
-            .shortcut-row {
-                justify-content: space-between;
-                gap: 8px;
-                padding: 12px 24px;
-                color: var(--muted);
-                font-size: 12px;
-                line-height: 16px;
-            }
-
-            .shortcut-row span {
-                display: inline-flex;
-                align-items: center;
-                gap: 4px;
             }
 
             .content {
@@ -992,12 +897,6 @@
                     border-bottom: 1px solid var(--line);
                 }
 
-                .rail-intro,
-                .stats,
-                .shortcut-row {
-                    display: none;
-                }
-
                 .match-nav {
                     display: flex;
                     overflow-x: auto;
@@ -1069,38 +968,35 @@
                 *::after {
                     scroll-behavior: auto !important;
                     transition-duration: 0.01ms !important;
+                    animation-duration: 0.01ms !important;
+                    animation-iteration-count: 1 !important;
                 }
             }
 
             /* Editorial review system: ink, paper, signal red. */
-            :root {
-                --canvas: #080808; --shell: #0b0b0b; --surface: #111;
-                --surface-raised: #181818; --surface-hover: #202020;
-                --line: #292929; --line-strong: #494949; --ink: #f2f0eb;
-                --muted: #898783; --muted-strong: #c3c0b9; --accent: #f2f0eb;
-                --accent-soft: #1a1a1a; --green: #f2f0eb; --amber: #ff3b30;
-                --red: #ff3b30; --focus: #ff3b30;
-                font-family: Geist, "Helvetica Neue", Arial, sans-serif;
-            }
-            body { background: linear-gradient(128deg, #080808 0 58%, #160a09 78%, #080808 100%); }
+            body { background: var(--canvas); }
+            ::selection { background: var(--red); color: #fff; }
+            ::-webkit-scrollbar { width: 10px; height: 10px; }
+            ::-webkit-scrollbar-track { background: var(--shell); }
+            ::-webkit-scrollbar-thumb { border: 3px solid var(--shell); background: #494949; }
+            ::-webkit-scrollbar-thumb:hover { background: var(--muted); }
+            * { scrollbar-color: #494949 var(--shell); scrollbar-width: thin; }
             .app-shell { width: 100%; min-height: 100dvh; margin: 0; border: 0; border-radius: 0; background: transparent; box-shadow: none; }
             .topbar { min-height: 78px; padding: 14px clamp(18px, 3vw, 48px); border-color: #393939; background: rgb(8 8 8 / 86%); }
             .brand { font-size: 18px; letter-spacing: -.06em; }
             .brand-mark { width: 40px; height: 40px; border-radius: 50%; background: var(--red); color: white; }
-            .report-name { border-color: #3d3d3d; text-transform: uppercase; letter-spacing: .09em; font-size: 11px; }
+            .report-name { border-color: #3d3d3d; text-transform: uppercase; letter-spacing: .08em; font-family: "Geist Mono", ui-monospace, monospace; font-size: 12px; font-weight: 700; }
             .progress-track, .progress-fill { height: 2px; border-radius: 0; }
             .progress-fill { background: var(--red); }
-            .control, .button, .review-button { border-radius: 0; text-transform: uppercase; letter-spacing: .08em; font-size: 11px; }
+            .progress-block.is-updated .progress-track { animation: review-confirmation 420ms cubic-bezier(.16, 1, .3, 1); }
+            @keyframes review-confirmation { 0%, 100% { background: var(--line); } 34% { background: var(--red); } }
+            .control, .button, .review-button { border-radius: 0; text-transform: uppercase; letter-spacing: .08em; font-size: 12px; }
+            .control, .button, .review-button, .filters label, .match-link, .image-stage::after { transition-duration: 160ms; }
+            .control-icon { width: 16px; height: 16px; fill: none; stroke: currentColor; stroke-linecap: square; stroke-linejoin: miter; stroke-width: 1.5; }
+            .skip-link { border-radius: 0; background: var(--red); color: #fff; }
             .workspace { grid-template-columns: minmax(300px, 25vw) minmax(0, 1fr); }
             .rail { top: 78px; display: flex; flex-direction: column; height: calc(100dvh - 78px); overflow: hidden; border-color: #393939; background: rgb(9 9 9 / 94%); }
-            .rail-section { position: relative; overflow: hidden; padding: 30px 28px 34px; border-color: #393939; }
-            .eyebrow, .match-kicker { color: var(--red); }
-            .rail-heading { position: relative; z-index: 1; max-width: 100%; margin: 12px 0 16px; font-size: clamp(32px, 2.6vw, 48px); font-weight: 500; line-height: .92; letter-spacing: -.07em; }
-            .rail-copy { position: relative; z-index: 1; max-width: 25ch; }
-            .stats { grid-auto-flow: dense; border-bottom: 1px solid #393939; }
-            .stat { min-height: 104px; padding: 20px 24px; border-color: #393939; }
-            .stat strong { font-size: 32px; font-weight: 400; }
-            .stat span { text-transform: uppercase; letter-spacing: .08em; }
+            .match-kicker { color: var(--red); }
             .filters { gap: 0; padding: 0; border-color: #393939; }
             .filters label { padding: 14px 4px; border-radius: 0; border-right: 1px solid #393939; }
             #filter-all:checked ~ .filters label[for="filter-all"], #filter-same:checked ~ .filters label[for="filter-same"], #filter-cross:checked ~ .filters label[for="filter-cross"] { border-color: var(--red); background: var(--red); color: white; }
@@ -1109,13 +1005,17 @@
             .match-link:hover { padding-left: 26px; transform: none; }
             .match-link[aria-current="true"] { border-color: #3a3a3a; background: #f2f0eb; color: #080808; }
             .match-link[aria-current="true"] .match-link-meta { color: #555; }
-            .match-number { width: 40px; border: 0; border-radius: 0; font-size: 10px; }
+            .match-number { width: 40px; border: 0; border-radius: 0; font-size: 12px; font-weight: 700; letter-spacing: .08em; }
+            .match-link-title { font-size: 15px; font-weight: 500; line-height: 20px; }
+            .match-link-meta { letter-spacing: .04em; }
             .match-link[aria-current="true"] .match-number { color: var(--red); }
-            .scope-dot, .match-link.cross-board .scope-dot { border-radius: 0; background: var(--red); }
-            .shortcut-row { position: relative; z-index: 2; flex: none; min-height: 52px; border-top: 1px solid #393939; background: #080808; }
+            .match-link-state { display: none; color: var(--red); font-family: "Geist Mono", ui-monospace, monospace; font-size: 10px; font-weight: 700; letter-spacing: .08em; line-height: 16px; text-transform: uppercase; }
+            .match-link.is-reviewed .match-link-state { display: block; }
+            .match-link[aria-current="true"] .match-link-state { color: var(--canvas); }
             .content { position: relative; padding: clamp(52px, 7vw, 112px) clamp(24px, 6vw, 96px) 120px; }
             .match { max-width: 1440px; }
             .match-heading { margin-bottom: clamp(36px, 5vw, 72px); }
+            .match-heading > :first-child { min-width: 0; }
             .match-heading h1, .match-heading h2 { max-width: 64rem; font-size: clamp(52px, 7vw, 112px); font-weight: 400; line-height: .88; letter-spacing: -.075em; }
             .match-description { max-width: 54ch; margin-top: 22px; font-size: 15px; }
             .badge { border-radius: 0; }
@@ -1133,19 +1033,56 @@
             .button.primary { border-color: #f2f0eb; background: #f2f0eb; color: #080808; }
             .button.primary:hover { border-color: var(--red); background: var(--red); color: #fff; }
             .secondary-panels { max-width: 1440px; margin-top: 96px; border-color: #3a3a3a; }
-            footer { max-width: 70ch; margin-top: 88px; text-transform: uppercase; letter-spacing: .06em; }
-            .overview-mode .match { position: sticky; top: 112px; padding: clamp(36px, 5vw, 72px); margin-bottom: 18vh; border: 1px solid #3a3a3a; background: #0b0b0b; }
+            footer { max-width: 70ch; margin-top: 88px; letter-spacing: .01em; }
+            /* Overview is a scan queue; focus view owns the large evidence panel. */
+            .overview-mode .content { padding: 32px clamp(24px, 3vw, 56px) 72px; }
+            .overview-mode .match { position: static; max-width: none; padding: 0 0 28px; margin: 0 0 32px; border: 0; border-bottom: 1px solid #3a3a3a; background: transparent; }
+            .overview-mode .match:last-of-type { margin-bottom: 0; border-bottom: 0; }
+            .overview-mode .match-heading { display: grid; grid-template-columns: minmax(0, 1fr) auto; align-items: end; gap: 16px; margin-bottom: 16px; }
+            .overview-mode .match-kicker { margin-bottom: 4px; }
+            .overview-mode .match-title { gap: 10px; }
+            .overview-mode .match-heading h1, .overview-mode .match-heading h2 { max-width: none; margin: 0; font-size: clamp(28px, 3.4vw, 48px); line-height: .95; letter-spacing: -.055em; }
+            .overview-mode .match-description { max-width: 64ch; margin-top: 8px; font-size: 14px; line-height: 20px; }
+            .overview-mode .review-button { min-height: 40px; padding: 8px 12px; }
+            .overview-mode .comparison { grid-template-columns: repeat(auto-fit, minmax(240px, 1fr)); gap: 1px; border: 1px solid #444; background: #444; }
+            .overview-mode .image-stage { aspect-ratio: 4 / 5; min-height: 0; }
+            .overview-mode .image-stage img { width: 100%; height: 100%; max-height: none; object-fit: contain; }
+            .overview-mode .card-body { gap: 8px; padding: 12px 14px; }
+            .overview-mode .actions { margin-top: 0; }
             body:not(.overview-mode) .content { min-height: calc(100dvh - 78px); padding-top: 20px; padding-bottom: 28px; }
             body:not(.overview-mode) .match-heading { align-items: end; margin-bottom: 14px; }
             body:not(.overview-mode) .match-heading h1,
             body:not(.overview-mode) .match-heading h2 { font-size: clamp(38px, 4vw, 64px); line-height: .9; }
-            body:not(.overview-mode) .match-description { max-width: 70ch; margin-top: 8px; line-height: 18px; }
+            body:not(.overview-mode) .match-description { max-width: 58ch; margin-top: 8px; line-height: 22px; letter-spacing: .005em; }
             body:not(.overview-mode) .image-stage { position: relative; height: clamp(260px, calc(100dvh - 330px), 720px); min-height: 0; }
             body:not(.overview-mode) .image-stage img { position: absolute; inset: 0; width: 100%; height: 100%; max-height: none; object-fit: contain; object-position: center; }
             body:not(.overview-mode) .card-body { gap: 8px; padding: 10px 16px; }
             body:not(.overview-mode) .actions { margin-top: 0; }
-            @media (max-width: 880px) { .rail { top: auto; display: block; height: auto; overflow: visible; } .match-nav { overflow-x: auto; overflow-y: hidden; } .content { padding-top: 56px; } .match-heading h1, .match-heading h2 { font-size: clamp(48px, 12vw, 76px); } .overview-mode .match { position: static; padding: 24px; } body:not(.overview-mode) .content { min-height: 0; } body:not(.overview-mode) .image-stage { height: min(54dvh, 520px); } }
-            @media (max-width: 620px) { .topbar { min-height: 64px; } .rail-section { padding: 26px 20px 30px; } .rail-heading { max-width: 100%; } .match-heading h1, .match-heading h2 { font-size: clamp(44px, 15vw, 68px); } .image-stage { min-height: 300px; } }
+            @media (max-width: 880px) {
+                .rail { top: auto; display: block; height: auto; overflow: visible; }
+                .match-nav { overflow-x: auto; overflow-y: hidden; }
+                .content { padding-top: 56px; }
+                .match-heading { display: grid; gap: 20px; }
+                .match-actions { justify-content: flex-start; }
+                .match-heading h1, .match-heading h2 { font-size: clamp(48px, 12vw, 76px); }
+                .overview-mode .content { padding-top: 28px; }
+                body:not(.overview-mode) .content { min-height: 0; }
+                body:not(.overview-mode) .match-heading { align-items: start; margin-bottom: 20px; }
+                body:not(.overview-mode) .image-stage { height: min(54dvh, 520px); }
+            }
+            @media (max-width: 620px) {
+                .topbar { min-height: 64px; }
+                .match-heading h1, .match-heading h2 { font-size: clamp(44px, 15vw, 68px); }
+                .image-stage { min-height: 300px; }
+                .overview-mode .match-heading { grid-template-columns: 1fr; align-items: start; }
+                .overview-mode .match-heading h1, .overview-mode .match-heading h2 { font-size: clamp(28px, 9vw, 42px); }
+                .overview-mode .review-button { justify-self: start; }
+                .overview-mode .image-stage { min-height: 0; }
+            }
+            @media (pointer: coarse) {
+                .control, .button { min-height: 44px; }
+                .control.icon-only { width: 44px; min-height: 44px; }
+            }
 
             @media print {
                 :root {
@@ -1250,7 +1187,13 @@
                         aria-label="Previous match"
                         title="Previous match (K)"
                     >
-                        ←
+                        <svg
+                            class="control-icon"
+                            viewBox="0 0 16 16"
+                            aria-hidden="true"
+                        >
+                            <path d="M9.75 3.25 5 8l4.75 4.75" />
+                        </svg>
                     </button>
                     <button
                         class="control icon-only"
@@ -1259,7 +1202,13 @@
                         aria-label="Next match"
                         title="Next match (J)"
                     >
-                        →
+                        <svg
+                            class="control-icon"
+                            viewBox="0 0 16 16"
+                            aria-hidden="true"
+                        >
+                            <path d="M6.25 3.25 11 8l-4.75 4.75" />
+                        </svg>
                     </button>
                     <button
                         class="control"
@@ -1274,47 +1223,7 @@
             </header>
 
             <div class="workspace">
-                <aside class="rail" aria-label="Report navigation">
-                    <div class="rail-section rail-intro">
-                        <p class="eyebrow">Duplicate review</p>
-                        <h2 class="rail-heading">{{ report.title() }}</h2>
-                        <p class="rail-copy">
-                            Compare candidates before removing anything from
-                            Pinterest.
-                        </p>
-                    </div>
-
-                    <div class="stats" aria-label="Scan summary">
-                        <div class="stat">
-                            <strong>{{ report.summary.pins_found }}</strong>
-                            <span>Pins returned</span>
-                        </div>
-                        {% match report.summary.pins_reported %}{% when Some
-                        with (reported) %}
-                        <div class="stat">
-                            <strong>{{ reported }}</strong>
-                            <span>Pinterest total</span>
-                        </div>
-                        {% when None %}{% endmatch %}
-                        <div class="stat">
-                            <strong>{{ report.summary.analyzed }}</strong>
-                            <span>Analyzed</span>
-                        </div>
-                        <div class="stat">
-                            <strong>{{ report.summary.skipped }}</strong>
-                            <span>Skipped</span>
-                        </div>
-                        <div class="stat">
-                            <strong>{{ report.summary.exact_groups }}</strong>
-                            <span>Exact groups</span>
-                        </div>
-                        <div class="stat">
-                            <strong
-                                >{{ report.summary.visual_candidates }}</strong
-                            >
-                            <span>Visual pairs</span>
-                        </div>
-                    </div>
+                <aside class="rail" aria-label="Match navigation">
 
                     {% if show_filters %}
                     <input
@@ -1368,7 +1277,9 @@
                                     byte-identical</span
                                 >
                             </span>
-                            <span class="scope-dot" aria-hidden="true"></span>
+                            <span class="match-link-state" aria-hidden="true"
+                                >Reviewed</span
+                            >
                         </button>
                         {% endfor %} {% for candidate in
                         report.visual_candidates %}
@@ -1388,15 +1299,13 @@
                                     distance {{ candidate.hash_distance }}</span
                                 >
                             </span>
-                            <span class="scope-dot" aria-hidden="true"></span>
+                            <span class="match-link-state" aria-hidden="true"
+                                >Reviewed</span
+                            >
                         </button>
                         {% endfor %}
                     </nav>
 
-                    <div class="shortcut-row" aria-hidden="true">
-                        <span><kbd>J</kbd><kbd>K</kbd> move</span>
-                        <span><kbd>E</kbd> reviewed</span>
-                    </div>
                 </aside>
 
                 <main class="content" id="report-content" tabindex="-1">
@@ -1435,9 +1344,9 @@
                                     >{% endif %}
                                 </div>
                                 <p class="match-description">
-                                    These files are byte-identical. Compare
-                                    their boards and pin context before choosing
-                                    which copy to keep.
+                                    These pins use the same image file. Compare
+                                    their boards, then choose the pin you want
+                                    to keep.
                                 </p>
                             </div>
                             <div class="match-actions">
@@ -1477,10 +1386,9 @@
                                     >{% endif %}
                                 </div>
                                 <p class="match-description">
-                                    {{ candidate.similarity_percent }}% similar
-                                    with perceptual hash distance {{
-                                    candidate.hash_distance }}/64. Inspect both
-                                    images before acting on the recommendation.
+                                    These images are {{ candidate.similarity_percent }}%
+                                    similar. Check both before using the
+                                    keep/delete suggestions.
                                 </p>
                             </div>
                             <div class="match-actions">
@@ -1558,10 +1466,10 @@
                     </div>
 
                     <footer>
-                        This temporary report loads images from Pinterest and
-                        remains available until your operating system cleans its
-                        temporary files. Review actions exist only in this open
-                        page and never modify Pinterest.
+                        This local report loads images from Pinterest and may
+                        disappear when your operating system cleans temporary
+                        files. Review marks exist only in this open page; unpin
+                        never changes your Pinterest account.
                     </footer>
                 </main>
             </div>
@@ -1586,6 +1494,7 @@
                 const empty = document.querySelector("#filter-empty");
                 const progress = document.querySelector("#review-progress");
                 const progressFill = document.querySelector("#progress-fill");
+                const progressBlock = document.querySelector(".progress-block");
                 const status = document.querySelector("#interaction-status");
                 let active = groups[0] || null;
 
@@ -1631,10 +1540,19 @@
                     ).length;
                     if (progress) progress.textContent = `${reviewed} / ${groups.length}`;
                     if (progressFill) {
-                        progressFill.style.width = groups.length
-                            ? `${(reviewed / groups.length) * 100}%`
-                            : "0%";
+                        const completion = groups.length
+                            ? reviewed / groups.length
+                            : 0;
+                        progressFill.style.transform = `scaleX(${completion})`;
                     }
+                };
+
+                const acknowledgeReview = () => {
+                    if (!progressBlock) return;
+                    progressBlock.classList.remove("is-updated");
+                    requestAnimationFrame(() => {
+                        progressBlock.classList.add("is-updated");
+                    });
                 };
 
                 const updateControls = () => {
@@ -1689,7 +1607,19 @@
                     if (label) label.textContent = reviewed ? "Reviewed" : "Mark reviewed";
                     const link = links.find((item) => item.dataset.target === group.id);
                     link?.classList.toggle("is-reviewed", reviewed);
+                    if (link) {
+                        const title = link.querySelector(".match-link-title")?.textContent?.trim() || "Match";
+                        const detail = link.querySelector(".match-link-meta")?.textContent?.trim();
+                        if (reviewed) {
+                            link.setAttribute(
+                                "aria-label",
+                                detail ? `${title}, ${detail}, reviewed` : `${title}, reviewed`,
+                            );
+                        }
+                        else link.removeAttribute("aria-label");
+                    }
                     updateProgress();
+                    if (reviewed) acknowledgeReview();
                     announce(reviewed ? "Marked reviewed" : "Review mark removed");
                 };
 

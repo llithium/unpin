@@ -4,10 +4,10 @@
         href="{{ item.image_url }}"
         target="_blank"
         rel="noopener noreferrer"
-        aria-label="Open original image for pin {{ item.pin_id }}"
+        aria-label="Open original image, {{ item.width }} × {{ item.height }} pixels, for pin {{ item.pin_id }}"
         ><img
             src="{{ item.image_url }}"
-            alt="Pinterest pin {{ item.pin_id }}"
+            alt=""
             width="{{ item.width }}"
             height="{{ item.height }}"
             loading="lazy"

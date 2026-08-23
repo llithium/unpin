@@ -144,12 +144,16 @@ mod tests {
 
         assert!(html.contains("Exact group 1"));
         assert!(html.contains("Visual candidate 1"));
-        assert!(html.contains("96% similar"));
+        assert!(html.contains("These images are 96%"));
+        assert!(html.contains("These pins use the same image file."));
+        assert!(html.contains("keep/delete suggestions"));
+        assert!(html.contains("never changes your Pinterest account."));
         assert!(html.contains("DELETE?"));
         assert!(html.contains("https://www.pinterest.com/pin/102/"));
         assert!(html.contains("101.jpg?x=1&#38;y=2"));
         assert!(html.contains("Ideas &#60;script&#62;"));
-        assert!(html.contains("<span>Pinterest total</span>"));
+        assert!(!html.contains("<span>Pinterest total</span>"));
+        assert!(!html.contains("class=\"stats\""));
         assert!(!html.contains("<script>alert"));
         assert!(html.contains("video &#60;unsupported&#62;"));
         assert!(html.contains("overflow: hidden"));
@@ -158,9 +162,18 @@ mod tests {
         assert!(html.contains("max-height: min(68dvh, 720px)"));
         assert!(html.contains("width=\"1200\""));
         assert!(html.contains("height=\"800\""));
+        assert!(
+            html.contains("aria-label=\"Open original image, 1200 × 800 pixels, for pin 101\"")
+        );
+        assert!(html.contains("alt=\"\""));
         assert!(html.contains("object-fit: contain"));
         assert!(html.contains("class=\"app-shell\""));
         assert!(html.contains("id=\"overview-toggle\""));
+        assert!(html.contains("Overview is a scan queue"));
+        assert!(
+            html.contains(".overview-mode .image-stage { aspect-ratio: 4 / 5; min-height: 0; }")
+        );
+        assert!(html.contains(".overview-mode .match { position: static; max-width: none;"));
         assert!(html.contains("data-review-button"));
         assert!(html.contains(".progress-fill {\n                display: block;"));
         assert!(html.contains("document.addEventListener(\"keydown\""));
@@ -172,9 +185,16 @@ mod tests {
     fn html_includes_the_report_design_and_accessibility_baseline() {
         let html = render_html(&sample_report());
 
-        assert!(html.contains("font-family: Manrope"));
+        assert!(html.contains("font-family: Geist, \"Helvetica Neue\", Arial, sans-serif"));
         assert!(html.contains("min-height: 100dvh"));
         assert!(!html.contains("radial-gradient"));
+        assert!(!html.contains("linear-gradient"));
+        assert!(html.contains("class=\"control-icon\""));
+        assert!(html.contains("@media (pointer: coarse)"));
+        assert!(html.contains(".control.icon-only { width: 44px; min-height: 44px; }"));
+        assert!(html.contains("scrollbar-color: #494949 var(--shell)"));
+        assert!(html.contains(".match-heading > :first-child { min-width: 0; }"));
+        assert!(html.contains(".match-heading { display: grid; gap: 20px; }"));
         assert!(!html.contains("font-family:\n                    Inter"));
         assert!(html.contains("class=\"skip-link\" href=\"#report-content\""));
         assert!(html.contains("id=\"report-content\" tabindex=\"-1\""));
@@ -330,6 +350,9 @@ mod tests {
         let html = render_html(&multi_board_report());
 
         assert!(html.contains("data-reviewed=\"false\""));
+        assert!(html.contains("class=\"match-link-state\" aria-hidden=\"true\""));
+        assert!(html.contains(">Reviewed</span"));
+        assert!(!html.contains("class=\"scope-dot\""));
         assert!(html.contains("id=\"previous-match\""));
         assert!(html.contains("id=\"next-match\""));
         assert!(html.contains("if (key === \"j\") move(1)"));
@@ -337,6 +360,10 @@ mod tests {
         assert!(html.contains("if (key === \"e\" && active)"));
         assert!(html.contains("if (key === \"o\")"));
         assert!(html.contains("setReviewed(reviewedGroup, reviewed)"));
+        assert!(html.contains("${title}, ${detail}, reviewed"));
+        assert!(html.contains("const acknowledgeReview"));
+        assert!(html.contains("progressBlock.classList.add(\"is-updated\")"));
+        assert!(html.contains("@keyframes review-confirmation"));
         assert!(html.contains("setActive(target, { announce: true })"));
         assert!(!html.contains("scroll: true"));
         assert!(!html.contains("scrollIntoView"));
