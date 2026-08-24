@@ -3,7 +3,6 @@
 
 use futures_util::stream::{self, StreamExt};
 use std::collections::HashSet;
-use std::io::IsTerminal;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use thiserror::Error;
@@ -339,7 +338,7 @@ async fn resolve_sources(
     };
 
     if matches!(&selection, SourceSelection::Interactive)
-        && !(std::io::stdin().is_terminal() && std::io::stderr().is_terminal())
+        && !progress.interactive_terminal_available()
     {
         return Err(IntakeError::BoardSelectionNotInteractive);
     }
@@ -515,6 +514,7 @@ mod tests {
         use wiremock::matchers::{method, path};
         use wiremock::{Mock, MockServer, ResponseTemplate};
 
+        let _test_guard = crate::test_support::high_concurrency_test_guard().await;
         let server = MockServer::start().await;
         let total = BOARD_FETCH_CONCURRENCY * 2 + 1;
         let boards = (0..total)

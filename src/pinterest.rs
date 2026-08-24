@@ -1622,6 +1622,7 @@ mod tests {
         use wiremock::matchers::{method, path};
         use wiremock::{Mock, MockServer, ResponseTemplate};
 
+        let _test_guard = crate::test_support::high_concurrency_test_guard().await;
         let server = MockServer::start().await;
         let total = SECTION_FETCH_CONCURRENCY * 2 + 1;
         let sections = (0..total)
@@ -1717,6 +1718,7 @@ mod tests {
         use wiremock::matchers::{method, path};
         use wiremock::{Mock, MockServer, ResponseTemplate};
 
+        let _test_guard = crate::test_support::high_concurrency_test_guard().await;
         let server = MockServer::start().await;
         let total = API_REQUEST_CONCURRENCY * 2 + 1;
         Mock::given(method("GET"))
@@ -1792,6 +1794,7 @@ mod tests {
         use tokio::sync::Notify;
         use tokio::time::timeout;
 
+        let _test_guard = crate::test_support::high_concurrency_test_guard().await;
         let listener = TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
         let address = listener.local_addr().unwrap();
         let headers_ready = Arc::new(Notify::new());

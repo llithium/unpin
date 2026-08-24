@@ -1239,6 +1239,7 @@ mod tests {
         use wiremock::matchers::{method, path_regex};
         use wiremock::{Mock, MockServer, ResponseTemplate};
 
+        let _test_guard = crate::test_support::high_concurrency_test_guard().await;
         let server = MockServer::start().await;
         let mut bytes = Cursor::new(Vec::new());
         DynamicImage::new_rgb8(2, 2)

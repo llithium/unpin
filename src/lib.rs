@@ -9,6 +9,23 @@ pub mod visual;
 
 mod intake;
 
+#[cfg(test)]
+mod test_support {
+    use std::sync::OnceLock;
+
+    // The concurrency-boundary tests intentionally open dozens of delayed
+    // connections at once. Keep those resource-heavy fixtures from running
+    // together under libtest's default parallel scheduling.
+    static HIGH_CONCURRENCY_TEST_LOCK: OnceLock<tokio::sync::Mutex<()>> = OnceLock::new();
+
+    pub(crate) async fn high_concurrency_test_guard() -> tokio::sync::MutexGuard<'static, ()> {
+        HIGH_CONCURRENCY_TEST_LOCK
+            .get_or_init(|| tokio::sync::Mutex::new(()))
+            .lock()
+            .await
+    }
+}
+
 use thiserror::Error;
 use url::Url;
 

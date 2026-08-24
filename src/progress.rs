@@ -1,4 +1,5 @@
 use std::collections::HashSet;
+use std::io::IsTerminal;
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
@@ -83,6 +84,12 @@ pub enum ProgressStep {
 /// The single observation seam for scan lifecycle progress.
 pub trait Progress: Send + Sync {
     fn step(&self, step: ProgressStep);
+
+    /// Whether this progress sink can safely hand control to an interactive
+    /// terminal selector.
+    fn interactive_terminal_available(&self) -> bool {
+        false
+    }
 }
 
 #[derive(Debug, Default)]
@@ -389,6 +396,10 @@ pub fn restore_cursor_on_interrupt() {
 }
 
 impl Progress for TerminalProgress {
+    fn interactive_terminal_available(&self) -> bool {
+        std::io::stdin().is_terminal() && std::io::stderr().is_terminal()
+    }
+
     fn step(&self, step: ProgressStep) {
         if !self.visible {
             return;
