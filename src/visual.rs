@@ -167,6 +167,9 @@ mod tests {
         );
         assert!(html.contains("alt=\"\""));
         assert!(html.contains("object-fit: contain"));
+        assert!(html.contains(
+            "body:not(.overview-mode) .image-stage img {\n                position: static;\n                width: auto;\n                height: auto;\n                min-width: 0;\n                min-height: 0;\n                max-width: 100%;\n                max-height: 100%;\n                justify-self: center;\n                align-self: center;\n                object-fit: contain;"
+        ));
         assert!(html.contains("class=\"app-shell\""));
         assert!(html.contains("id=\"overview-toggle\""));
         assert!(html.contains("Overview is a scan queue"));
