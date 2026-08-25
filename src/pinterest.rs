@@ -2,7 +2,7 @@ use std::collections::HashSet;
 use std::error::Error as StdError;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
-use std::time::Duration;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use futures_util::stream::{self, StreamExt, TryStreamExt};
 use percent_encoding::percent_decode_str;
@@ -13,7 +13,7 @@ use serde_json::{Value, json};
 use thiserror::Error;
 use url::Url;
 
-use crate::auth::BrowserCookie;
+use crate::auth::{BrowserCookie, ScopedCookie, scope_explicit_cookies};
 use crate::progress::{Lifecycle, NoProgress, Progress, ProgressStep, SetupTask};
 
 const MAX_PAGES: usize = 10_000;
@@ -310,6 +310,14 @@ pub enum PinterestError {
     #[error("invalid Pinterest target: {0}")]
     InvalidTarget(String),
 
+    #[error(
+        "authenticated requests with imported cookies require HTTPS for both Pinterest and API URLs"
+    )]
+    InsecureCookieTransport,
+
+    #[error("cookie-bearing API root must match the Pinterest target origin")]
+    CrossOriginCookieTransport,
+
     #[error("failed to build the Pinterest HTTP client")]
     Client(#[source] reqwest::Error),
 
@@ -337,7 +345,7 @@ pub enum PinterestError {
 pub struct PinterestClient {
     http: reqwest::Client,
     api_root: Url,
-    cookie_header: HeaderValue,
+    cookies: Vec<ScopedCookie>,
     authenticated: bool,
     request_limiter: Arc<tokio::sync::Semaphore>,
 }
@@ -361,8 +369,18 @@ impl PinterestClient {
         api_root: Url,
         cookies: Vec<BrowserCookie>,
     ) -> Result<Self, PinterestError> {
-        let (csrf_token, cookie_header, authenticated) = build_cookie_header(cookies)?;
-        let headers = build_headers(&root, &csrf_token)?;
+        let scoped = scope_explicit_cookies(&root, cookies);
+        Self::with_api_root_and_scoped_cookies(root, api_root, scoped)
+    }
+
+    pub(crate) fn with_api_root_and_scoped_cookies(
+        root: Url,
+        api_root: Url,
+        cookies: Vec<ScopedCookie>,
+    ) -> Result<Self, PinterestError> {
+        let authenticated = !cookies.is_empty();
+        validate_cookie_transport(&root, &api_root, authenticated)?;
+        let headers = build_headers(&root)?;
         let http = reqwest::Client::builder()
             .default_headers(headers)
             .timeout(Duration::from_secs(30))
@@ -377,7 +395,7 @@ impl PinterestClient {
         Ok(Self {
             http,
             api_root,
-            cookie_header,
+            cookies,
             authenticated,
             request_limiter: Arc::new(tokio::sync::Semaphore::new(API_REQUEST_CONCURRENCY)),
         })
@@ -862,6 +880,10 @@ impl PinterestClient {
             .api_root
             .join(&format!("resource/{resource}Resource/get/"))
             .map_err(|_| invalid_response(resource, "could not construct the endpoint URL"))?;
+        let (csrf_token, cookie_header) = build_request_cookie_header(&self.cookies, &endpoint)?;
+        let mut csrf_header = HeaderValue::from_str(&csrf_token)
+            .map_err(|_| invalid_response("headers", "invalid csrf header value"))?;
+        csrf_header.set_sensitive(true);
         let data = serde_json::to_string(&json!({ "options": options }))
             .map_err(|_| invalid_response(resource, "could not serialize request options"))?;
 
@@ -876,7 +898,8 @@ impl PinterestClient {
                     .http
                     .get(endpoint.clone())
                     .query(&[("data", data.as_str()), ("source_url", "")])
-                    .header("Cookie", self.cookie_header.clone())
+                    .header("Cookie", cookie_header.clone())
+                    .header("X-CSRFToken", csrf_header.clone())
                     .send()
                     .await;
 
@@ -1013,9 +1036,51 @@ fn emit_retry(progress: &dyn Progress, resource: &'static str, attempt: usize, d
     });
 }
 
+fn build_request_cookie_header(
+    cookies: &[ScopedCookie],
+    request_url: &Url,
+) -> Result<(String, HeaderValue), PinterestError> {
+    build_cookie_header(
+        select_applicable_cookies(cookies, request_url)
+            .into_iter()
+            .map(|cookie| cookie.cookie.clone())
+            .collect(),
+    )
+}
+
+fn select_applicable_cookies<'a>(
+    cookies: &'a [ScopedCookie],
+    request_url: &Url,
+) -> Vec<&'a ScopedCookie> {
+    let now = unix_time_now();
+    let Some(request_host) = request_host(request_url) else {
+        return Vec::new();
+    };
+    let mut selected: Vec<&ScopedCookie> = Vec::new();
+
+    for cookie in cookies
+        .iter()
+        .filter(|cookie| cookie_applies_to_url(cookie, request_url, now))
+    {
+        if let Some(existing) = selected
+            .iter_mut()
+            .find(|existing| existing.cookie.name == cookie.cookie.name)
+        {
+            if prefers_cookie(cookie, existing, &request_host) {
+                *existing = cookie;
+            }
+            continue;
+        }
+        selected.push(cookie);
+    }
+
+    selected.sort_by(|left, right| left.cookie.name.cmp(&right.cookie.name));
+    selected
+}
+
 fn build_cookie_header(
     mut cookies: Vec<BrowserCookie>,
-) -> Result<(String, HeaderValue, bool), PinterestError> {
+) -> Result<(String, HeaderValue), PinterestError> {
     cookies.retain(|cookie| {
         is_cookie_name(&cookie.name)
             && !cookie
@@ -1023,7 +1088,6 @@ fn build_cookie_header(
                 .bytes()
                 .any(|byte| byte == b';' || byte.is_ascii_control())
     });
-    let authenticated = !cookies.is_empty();
     let csrf_token = cookies
         .iter()
         .find(|cookie| cookie.name == "csrftoken")
@@ -1045,7 +1109,77 @@ fn build_cookie_header(
     let mut header = HeaderValue::from_str(&header)
         .map_err(|_| invalid_response("headers", "browser cookies were not header-safe"))?;
     header.set_sensitive(true);
-    Ok((csrf_token, header, authenticated))
+    Ok((csrf_token, header))
+}
+
+fn cookie_applies_to_url(cookie: &ScopedCookie, request_url: &Url, now: u64) -> bool {
+    let Some(request_host) = request_host(request_url) else {
+        return false;
+    };
+    if cookie.secure && request_url.scheme() != "https" {
+        return false;
+    }
+    if cookie.expires.is_some_and(|expires| expires <= now) {
+        return false;
+    }
+    if !domain_matches_cookie(cookie, &request_host) {
+        return false;
+    }
+    path_matches_cookie(&cookie.path, request_path(request_url))
+}
+
+fn prefers_cookie(candidate: &ScopedCookie, current: &ScopedCookie, request_host: &str) -> bool {
+    let candidate_host_only = exact_host_only_match(candidate, request_host);
+    let current_host_only = exact_host_only_match(current, request_host);
+    if candidate_host_only != current_host_only {
+        return candidate_host_only;
+    }
+    if candidate.path.len() != current.path.len() {
+        return candidate.path.len() > current.path.len();
+    }
+    if candidate.normalized_domain.len() != current.normalized_domain.len() {
+        return candidate.normalized_domain.len() > current.normalized_domain.len();
+    }
+    candidate.source_order < current.source_order
+}
+
+fn exact_host_only_match(cookie: &ScopedCookie, request_host: &str) -> bool {
+    cookie.host_only && cookie.normalized_domain == request_host
+}
+
+fn domain_matches_cookie(cookie: &ScopedCookie, request_host: &str) -> bool {
+    if cookie.host_only {
+        return cookie.normalized_domain == request_host;
+    }
+
+    request_host == cookie.normalized_domain
+        || request_host
+            .strip_suffix(&cookie.normalized_domain)
+            .is_some_and(|prefix| prefix.ends_with('.'))
+}
+
+fn path_matches_cookie(cookie_path: &str, request_path: &str) -> bool {
+    request_path == cookie_path
+        || (cookie_path.ends_with('/') && request_path.starts_with(cookie_path))
+        || request_path
+            .strip_prefix(cookie_path)
+            .is_some_and(|suffix| suffix.starts_with('/'))
+}
+
+fn request_host(request_url: &Url) -> Option<String> {
+    request_url.host_str().map(str::to_ascii_lowercase)
+}
+
+fn request_path(request_url: &Url) -> &str {
+    let path = request_url.path();
+    if path.is_empty() { "/" } else { path }
+}
+
+fn unix_time_now() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs()
 }
 
 fn is_cookie_name(name: &str) -> bool {
@@ -1072,7 +1206,27 @@ fn is_cookie_name(name: &str) -> bool {
         })
 }
 
-fn build_headers(root: &Url, csrf_token: &str) -> Result<HeaderMap, PinterestError> {
+fn validate_cookie_transport(
+    root: &Url,
+    api_root: &Url,
+    authenticated: bool,
+) -> Result<(), PinterestError> {
+    if !authenticated {
+        return Ok(());
+    }
+
+    if root.scheme() != "https" || api_root.scheme() != "https" {
+        return Err(PinterestError::InsecureCookieTransport);
+    }
+
+    if root.origin() != api_root.origin() {
+        return Err(PinterestError::CrossOriginCookieTransport);
+    }
+
+    Ok(())
+}
+
+fn build_headers(root: &Url) -> Result<HeaderMap, PinterestError> {
     let mut headers = HeaderMap::new();
     let host = root
         .host_str()
@@ -1087,7 +1241,6 @@ fn build_headers(root: &Url, csrf_token: &str) -> Result<HeaderMap, PinterestErr
         ("Sec-Fetch-Dest", "empty"),
         ("Sec-Fetch-Mode", "cors"),
         ("Sec-Fetch-Site", "same-origin"),
-        ("X-CSRFToken", csrf_token),
     ];
 
     for (name, value) in values {
@@ -1560,22 +1713,65 @@ mod tests {
         assert!(HeaderValue::from_str(&token).is_ok());
     }
 
+    #[allow(clippy::too_many_arguments)]
+    fn scoped_cookie(
+        name: &str,
+        value: &str,
+        domain: &str,
+        host_only: bool,
+        path: &str,
+        secure: bool,
+        expires: Option<u64>,
+        source_order: usize,
+    ) -> ScopedCookie {
+        ScopedCookie {
+            cookie: BrowserCookie {
+                name: name.into(),
+                value: value.into(),
+            },
+            normalized_domain: domain.into(),
+            host_only,
+            path: path.into(),
+            secure,
+            expires,
+            source_order,
+        }
+    }
+
+    fn request(url: &str) -> Url {
+        Url::parse(url).unwrap()
+    }
+
     #[test]
     fn imported_cookies_supply_csrf_and_are_marked_sensitive() {
-        let (csrf, header, authenticated) = build_cookie_header(vec![
-            BrowserCookie {
-                name: "_pinterest_sess".into(),
-                value: "session-value".into(),
-            },
-            BrowserCookie {
-                name: "csrftoken".into(),
-                value: "browser-csrf".into(),
-            },
-        ])
+        let (csrf, header) = build_request_cookie_header(
+            &[
+                scoped_cookie(
+                    "_pinterest_sess",
+                    "session-value",
+                    "www.pinterest.com",
+                    true,
+                    "/",
+                    true,
+                    None,
+                    0,
+                ),
+                scoped_cookie(
+                    "csrftoken",
+                    "browser-csrf",
+                    "www.pinterest.com",
+                    true,
+                    "/",
+                    true,
+                    None,
+                    1,
+                ),
+            ],
+            &request("https://www.pinterest.com/resource/BoardResource/get/"),
+        )
         .unwrap();
 
         assert_eq!(csrf, "browser-csrf");
-        assert!(authenticated);
         assert!(header.is_sensitive());
         let value = header.to_str().unwrap();
         assert!(value.contains("_pinterest_sess=session-value"));
@@ -1584,15 +1780,380 @@ mod tests {
 
     #[test]
     fn unsafe_browser_cookie_values_are_not_sent() {
-        let (_, header, authenticated) = build_cookie_header(vec![BrowserCookie {
-            name: "bad".into(),
-            value: "value\r\ninjected: true".into(),
-        }])
+        let (_, header) = build_request_cookie_header(
+            &[scoped_cookie(
+                "bad",
+                "value\r\ninjected: true",
+                "www.pinterest.com",
+                true,
+                "/",
+                true,
+                None,
+                0,
+            )],
+            &request("https://www.pinterest.com/resource/BoardResource/get/"),
+        )
         .unwrap();
 
         assert!(!header.to_str().unwrap().contains("injected"));
         assert!(header.to_str().unwrap().contains("csrftoken="));
-        assert!(!authenticated);
+        assert!(!header.to_str().unwrap().contains("bad="));
+    }
+
+    #[test]
+    fn host_only_cookies_do_not_cross_pinterest_subdomains() {
+        let cookies = [scoped_cookie(
+            "_pinterest_sess",
+            "host-only",
+            "www.pinterest.com",
+            true,
+            "/",
+            true,
+            None,
+            0,
+        )];
+        let selected = select_applicable_cookies(
+            &cookies,
+            &request("https://api.pinterest.com/resource/BoardResource/get/"),
+        );
+
+        assert!(selected.is_empty());
+    }
+
+    #[test]
+    fn domain_cookies_cover_allowed_pinterest_subdomains() {
+        let cookies = [scoped_cookie(
+            "_pinterest_sess",
+            "domain",
+            "pinterest.com",
+            false,
+            "/",
+            true,
+            None,
+            0,
+        )];
+        let selected = select_applicable_cookies(
+            &cookies,
+            &request("https://uk.pinterest.com/resource/BoardResource/get/"),
+        );
+
+        assert_eq!(selected.len(), 1);
+        assert_eq!(selected[0].normalized_domain, "pinterest.com");
+        assert!(!selected[0].host_only);
+    }
+
+    #[test]
+    fn lookalike_domains_do_not_match_cookie_scope() {
+        let cookies = [scoped_cookie(
+            "_pinterest_sess",
+            "domain",
+            "pinterest.com",
+            false,
+            "/",
+            true,
+            None,
+            0,
+        )];
+        let selected = select_applicable_cookies(
+            &cookies,
+            &request("https://notpinterest.com/resource/BoardResource/get/"),
+        );
+
+        assert!(selected.is_empty());
+    }
+
+    #[test]
+    fn path_restricted_cookies_are_excluded_when_request_path_does_not_match() {
+        let cookies = [scoped_cookie(
+            "_pinterest_sess",
+            "path",
+            "www.pinterest.com",
+            true,
+            "/pin/",
+            true,
+            None,
+            0,
+        )];
+        let selected = select_applicable_cookies(
+            &cookies,
+            &request("https://www.pinterest.com/resource/BoardResource/get/"),
+        );
+
+        assert!(selected.is_empty());
+    }
+
+    #[test]
+    fn cookie_path_matching_respects_segment_boundaries() {
+        let cookies = [scoped_cookie(
+            "_pinterest_sess",
+            "path",
+            "www.pinterest.com",
+            true,
+            "/resource/api",
+            true,
+            None,
+            0,
+        )];
+
+        let matching = select_applicable_cookies(
+            &cookies,
+            &request("https://www.pinterest.com/resource/api/get/"),
+        );
+        let near_miss = select_applicable_cookies(
+            &cookies,
+            &request("https://www.pinterest.com/resource/apis/get/"),
+        );
+
+        assert_eq!(matching.len(), 1);
+        assert!(near_miss.is_empty());
+    }
+
+    #[test]
+    fn secure_cookies_require_https_requests() {
+        let cookies = [scoped_cookie(
+            "_pinterest_sess",
+            "secure",
+            "www.pinterest.com",
+            true,
+            "/",
+            true,
+            None,
+            0,
+        )];
+
+        let http_selected = select_applicable_cookies(
+            &cookies,
+            &request("http://www.pinterest.com/resource/BoardResource/get/"),
+        );
+        let https_selected = select_applicable_cookies(
+            &cookies,
+            &request("https://www.pinterest.com/resource/BoardResource/get/"),
+        );
+
+        assert!(http_selected.is_empty());
+        assert_eq!(https_selected.len(), 1);
+    }
+
+    #[test]
+    fn expired_cookies_are_excluded() {
+        let cookies = [scoped_cookie(
+            "_pinterest_sess",
+            "expired",
+            "www.pinterest.com",
+            true,
+            "/",
+            true,
+            Some(unix_time_now().saturating_sub(1)),
+            0,
+        )];
+        let selected = select_applicable_cookies(
+            &cookies,
+            &request("https://www.pinterest.com/resource/BoardResource/get/"),
+        );
+
+        assert!(selected.is_empty());
+    }
+
+    #[test]
+    fn duplicate_cookie_names_follow_host_path_domain_specificity() {
+        let cookies = [
+            scoped_cookie(
+                "sid",
+                "domain-root",
+                "pinterest.com",
+                false,
+                "/",
+                true,
+                None,
+                0,
+            ),
+            scoped_cookie(
+                "sid",
+                "domain-www",
+                "www.pinterest.com",
+                false,
+                "/",
+                true,
+                None,
+                1,
+            ),
+            scoped_cookie(
+                "sid",
+                "host-path",
+                "www.pinterest.com",
+                true,
+                "/resource/",
+                true,
+                None,
+                2,
+            ),
+        ];
+        let selected = select_applicable_cookies(
+            &cookies,
+            &request("https://www.pinterest.com/resource/BoardResource/get/"),
+        );
+
+        assert_eq!(selected.len(), 1);
+        assert!(selected[0].host_only);
+        assert_eq!(selected[0].path, "/resource/");
+        assert_eq!(selected[0].source_order, 2);
+    }
+
+    #[test]
+    fn duplicate_cookie_names_fall_back_to_stable_source_order() {
+        let cookies = [
+            scoped_cookie(
+                "sid",
+                "first",
+                "www.pinterest.com",
+                true,
+                "/",
+                true,
+                None,
+                0,
+            ),
+            scoped_cookie(
+                "sid",
+                "second",
+                "www.pinterest.com",
+                true,
+                "/",
+                true,
+                None,
+                1,
+            ),
+        ];
+        let selected = select_applicable_cookies(
+            &cookies,
+            &request("https://www.pinterest.com/resource/BoardResource/get/"),
+        );
+
+        assert_eq!(selected.len(), 1);
+        assert_eq!(selected[0].source_order, 0);
+    }
+
+    #[test]
+    fn csrf_comes_from_the_same_applicable_cookie_set() {
+        let (csrf, header) = build_request_cookie_header(
+            &[
+                scoped_cookie(
+                    "csrftoken",
+                    "path-miss",
+                    "www.pinterest.com",
+                    true,
+                    "/pin/",
+                    true,
+                    None,
+                    0,
+                ),
+                scoped_cookie(
+                    "csrftoken",
+                    "applicable",
+                    "www.pinterest.com",
+                    true,
+                    "/resource/",
+                    true,
+                    None,
+                    1,
+                ),
+            ],
+            &request("https://www.pinterest.com/resource/BoardResource/get/"),
+        )
+        .unwrap();
+
+        assert_eq!(csrf, "applicable");
+        assert!(header.to_str().unwrap().contains("csrftoken=applicable"));
+    }
+
+    fn imported_cookie_fixture() -> Vec<BrowserCookie> {
+        vec![
+            BrowserCookie {
+                name: "_pinterest_sess".into(),
+                value: "fixture-session".into(),
+            },
+            BrowserCookie {
+                name: "csrftoken".into(),
+                value: "fixture-csrf".into(),
+            },
+        ]
+    }
+
+    #[test]
+    fn imported_cookies_allow_same_origin_https_api_roots() {
+        let client = PinterestClient::with_api_root_and_cookies(
+            Url::parse("https://www.pinterest.com/").unwrap(),
+            Url::parse("https://www.pinterest.com/resource/BoardResource/get/").unwrap(),
+            imported_cookie_fixture(),
+        )
+        .unwrap();
+
+        assert!(client.is_authenticated());
+    }
+
+    #[test]
+    fn imported_cookies_reject_http_target_roots() {
+        let result = PinterestClient::with_cookies(
+            Url::parse("http://www.pinterest.com/").unwrap(),
+            imported_cookie_fixture(),
+        );
+
+        assert!(matches!(
+            result,
+            Err(PinterestError::InsecureCookieTransport)
+        ));
+    }
+
+    #[test]
+    fn imported_cookies_reject_http_api_roots() {
+        let result = PinterestClient::with_api_root_and_cookies(
+            Url::parse("https://www.pinterest.com/").unwrap(),
+            Url::parse("http://api.pinterest.test/").unwrap(),
+            imported_cookie_fixture(),
+        );
+
+        assert!(matches!(
+            result,
+            Err(PinterestError::InsecureCookieTransport)
+        ));
+    }
+
+    #[test]
+    fn imported_cookies_reject_cross_origin_https_api_hosts() {
+        let result = PinterestClient::with_api_root_and_cookies(
+            Url::parse("https://www.pinterest.com/").unwrap(),
+            Url::parse("https://api.pinterest.test/").unwrap(),
+            imported_cookie_fixture(),
+        );
+
+        assert!(matches!(
+            result,
+            Err(PinterestError::CrossOriginCookieTransport)
+        ));
+    }
+
+    #[test]
+    fn imported_cookies_reject_cross_origin_https_api_ports() {
+        let result = PinterestClient::with_api_root_and_cookies(
+            Url::parse("https://www.pinterest.com/").unwrap(),
+            Url::parse("https://www.pinterest.com:444/").unwrap(),
+            imported_cookie_fixture(),
+        );
+
+        assert!(matches!(
+            result,
+            Err(PinterestError::CrossOriginCookieTransport)
+        ));
+    }
+
+    #[test]
+    fn anonymous_http_targets_remain_constructible() {
+        let client = PinterestClient::with_api_root(
+            Url::parse("http://www.pinterest.com/").unwrap(),
+            Url::parse("http://api.pinterest.test/").unwrap(),
+        )
+        .unwrap();
+
+        assert!(!client.is_authenticated());
     }
 
     #[tokio::test]

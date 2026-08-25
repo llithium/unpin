@@ -11,7 +11,7 @@ use unpin::pinterest::{BoardTarget, PinterestClient, PinterestError};
 use unpin::progress::{Lifecycle, Progress, ProgressStep, SetupTask};
 use unpin::report::MatchScope;
 use url::Url;
-use wiremock::matchers::{header, header_regex, method, path, query_param};
+use wiremock::matchers::{header, method, path, query_param};
 use wiremock::{Mock, MockServer, ResponseTemplate};
 
 #[derive(Debug, Default)]
@@ -1105,21 +1105,12 @@ async fn malformed_pinterest_json_is_a_clean_error() {
     assert!(!error.to_string().contains("not-json"));
 }
 
-#[tokio::test]
-async fn authenticated_pinterest_requests_send_imported_cookies_and_csrf() {
-    let server = MockServer::start().await;
-    Mock::given(method("GET"))
-        .and(path("/resource/BoardResource/get/"))
-        .and(header_regex("cookie", r".*_pinterest_sess=test-session.*"))
-        .and(header("x-csrftoken", "test-csrf"))
-        .respond_with(ResponseTemplate::new(403))
-        .mount(&server)
-        .await;
-
+#[test]
+fn authenticated_pinterest_requests_require_same_origin_https_api_roots() {
     let target = BoardTarget::parse("https://www.pinterest.com/alice/ideas/").unwrap();
-    let client = PinterestClient::with_api_root_and_cookies(
+    let cross_origin = PinterestClient::with_api_root_and_cookies(
         target.root.clone(),
-        Url::parse(&server.uri()).unwrap(),
+        Url::parse("https://api.pinterest.test/").unwrap(),
         vec![
             BrowserCookie {
                 name: "_pinterest_sess".into(),
@@ -1130,15 +1121,30 @@ async fn authenticated_pinterest_requests_send_imported_cookies_and_csrf() {
                 value: "test-csrf".into(),
             },
         ],
-    )
-    .unwrap();
-    let error = client.fetch_board(&target).await.unwrap_err();
+    );
 
     assert!(matches!(
-        error,
-        PinterestError::Http {
-            status: reqwest::StatusCode::FORBIDDEN,
-            ..
-        }
+        cross_origin,
+        Err(PinterestError::CrossOriginCookieTransport)
+    ));
+
+    let insecure = PinterestClient::with_api_root_and_cookies(
+        target.root.clone(),
+        Url::parse("http://127.0.0.1:4010/").unwrap(),
+        vec![
+            BrowserCookie {
+                name: "_pinterest_sess".into(),
+                value: "test-session".into(),
+            },
+            BrowserCookie {
+                name: "csrftoken".into(),
+                value: "test-csrf".into(),
+            },
+        ],
+    );
+
+    assert!(matches!(
+        insecure,
+        Err(PinterestError::InsecureCookieTransport)
     ));
 }

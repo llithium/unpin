@@ -1,9 +1,9 @@
-use std::collections::HashMap;
 #[cfg(unix)]
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use thiserror::Error;
+use url::Url;
 
 use crate::cli::CookieBrowser;
 
@@ -11,6 +11,39 @@ use crate::cli::CookieBrowser;
 pub struct BrowserCookie {
     pub name: String,
     pub value: String,
+}
+
+#[derive(Debug, Clone, Eq, PartialEq)]
+pub(crate) struct ScopedCookie {
+    pub(crate) cookie: BrowserCookie,
+    pub(crate) normalized_domain: String,
+    pub(crate) host_only: bool,
+    pub(crate) path: String,
+    pub(crate) secure: bool,
+    pub(crate) expires: Option<u64>,
+    pub(crate) source_order: usize,
+}
+
+impl ScopedCookie {
+    fn new(
+        cookie: BrowserCookie,
+        domain: &str,
+        host_only: bool,
+        path: &str,
+        secure: bool,
+        expires: Option<u64>,
+        source_order: usize,
+    ) -> Self {
+        Self {
+            cookie,
+            normalized_domain: normalize_domain(domain),
+            host_only,
+            path: normalize_path(path),
+            secure,
+            expires,
+            source_order,
+        }
+    }
 }
 
 #[derive(Debug, Error)]
@@ -40,15 +73,20 @@ pub enum AuthError {
 
 /// Loads Pinterest cookies from the Netscape/Mozilla cookies.txt format.
 pub fn load_pinterest_cookies_file(path: &Path) -> Result<Vec<BrowserCookie>, AuthError> {
+    Ok(compatibility_public_cookies(
+        load_pinterest_scoped_cookies_file(path)?,
+    ))
+}
+
+pub(crate) fn load_pinterest_scoped_cookies_file(
+    path: &Path,
+) -> Result<Vec<ScopedCookie>, AuthError> {
     let content = std::fs::read_to_string(path).map_err(|source| AuthError::CookieFileRead {
         path: path.to_owned(),
         source,
     })?;
-    let now = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_secs();
-    let mut by_name: HashMap<String, (usize, BrowserCookie)> = HashMap::new();
+    let now = unix_time_now();
+    let mut cookies = Vec::new();
 
     for (index, raw_line) in content.lines().enumerate() {
         let line = raw_line.strip_prefix("#HttpOnly_").unwrap_or(raw_line);
@@ -63,6 +101,9 @@ pub fn load_pinterest_cookies_file(path: &Path) -> Result<Vec<BrowserCookie>, Au
             });
         }
         let domain = fields[0];
+        let allow_subdomains = fields[1].eq_ignore_ascii_case("TRUE");
+        let path = fields[2];
+        let secure = fields[3].eq_ignore_ascii_case("TRUE");
         let expires = fields[4].parse::<u64>().unwrap_or(0);
         let name = fields[5];
         let value = fields[6];
@@ -73,24 +114,20 @@ pub fn load_pinterest_cookies_file(path: &Path) -> Result<Vec<BrowserCookie>, Au
         {
             continue;
         }
-        let specificity = domain.trim_start_matches('.').len();
-        let candidate = BrowserCookie {
-            name: name.to_owned(),
-            value: value.to_owned(),
-        };
-        match by_name.get(name) {
-            Some((current_specificity, _)) if *current_specificity > specificity => {}
-            _ => {
-                by_name.insert(name.to_owned(), (specificity, candidate));
-            }
-        }
+        cookies.push(ScopedCookie::new(
+            BrowserCookie {
+                name: name.to_owned(),
+                value: value.to_owned(),
+            },
+            domain,
+            !allow_subdomains,
+            path,
+            secure,
+            (expires != 0).then_some(expires),
+            index,
+        ));
     }
 
-    let mut cookies = by_name
-        .into_values()
-        .map(|(_, cookie)| cookie)
-        .collect::<Vec<_>>();
-    cookies.sort_by(|left, right| left.name.cmp(&right.name));
     if cookies.is_empty() {
         return Err(AuthError::NoCookiesInFile {
             path: path.to_owned(),
@@ -102,14 +139,22 @@ pub fn load_pinterest_cookies_file(path: &Path) -> Result<Vec<BrowserCookie>, Au
 pub async fn load_pinterest_cookies(
     browser: CookieBrowser,
 ) -> Result<Vec<BrowserCookie>, AuthError> {
-    tokio::task::spawn_blocking(move || load_pinterest_cookies_blocking(browser))
+    Ok(compatibility_public_cookies(
+        load_pinterest_scoped_cookies(browser).await?,
+    ))
+}
+
+pub(crate) async fn load_pinterest_scoped_cookies(
+    browser: CookieBrowser,
+) -> Result<Vec<ScopedCookie>, AuthError> {
+    tokio::task::spawn_blocking(move || load_pinterest_scoped_cookies_blocking(browser))
         .await
         .map_err(|_| AuthError::Read { browser })?
 }
 
-fn load_pinterest_cookies_blocking(
+fn load_pinterest_scoped_cookies_blocking(
     browser: CookieBrowser,
-) -> Result<Vec<BrowserCookie>, AuthError> {
+) -> Result<Vec<ScopedCookie>, AuthError> {
     let domains = Some(vec!["pinterest.com".to_owned()]);
     let cookies = match browser {
         CookieBrowser::Chrome => load_chrome_cookies(domains),
@@ -122,13 +167,10 @@ fn load_pinterest_cookies_blocking(
     }
     .map_err(|_| AuthError::Read { browser })?;
 
-    let now = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_secs();
-    let mut by_name: HashMap<String, (usize, BrowserCookie)> = HashMap::new();
+    let now = unix_time_now();
+    let mut scoped = Vec::new();
 
-    for cookie in cookies {
+    for (source_order, cookie) in cookies.into_iter().enumerate() {
         if cookie.name.is_empty()
             || cookie.value.is_empty()
             || cookie.expires.is_some_and(|expires| expires <= now)
@@ -137,30 +179,37 @@ fn load_pinterest_cookies_blocking(
             continue;
         }
 
-        // When both `.pinterest.com` and `www.pinterest.com` define the same
-        // cookie, use the more specific domain just as a browser would.
-        let specificity = cookie.domain.trim_start_matches('.').len();
-        let candidate = BrowserCookie {
-            name: cookie.name.clone(),
-            value: cookie.value,
-        };
-        match by_name.get(&cookie.name) {
-            Some((current_specificity, _)) if *current_specificity > specificity => {}
-            _ => {
-                by_name.insert(cookie.name, (specificity, candidate));
-            }
-        }
+        // `rookie` does not surface the browser's host-only bit directly, so
+        // use the conventional leading-dot representation when importing it.
+        scoped.push(ScopedCookie::new(
+            BrowserCookie {
+                name: cookie.name,
+                value: cookie.value,
+            },
+            &cookie.domain,
+            !cookie.domain.starts_with('.'),
+            &cookie.path,
+            cookie.secure,
+            cookie.expires.filter(|expires| *expires != 0),
+            source_order,
+        ));
     }
 
-    let mut cookies = by_name
-        .into_values()
-        .map(|(_, cookie)| cookie)
-        .collect::<Vec<_>>();
-    cookies.sort_by(|left, right| left.name.cmp(&right.name));
-    if cookies.is_empty() {
+    if scoped.is_empty() {
         return Err(AuthError::NoCookies { browser });
     }
-    Ok(cookies)
+    Ok(scoped)
+}
+
+pub(crate) fn scope_explicit_cookies(root: &Url, cookies: Vec<BrowserCookie>) -> Vec<ScopedCookie> {
+    let domain = root.host_str().unwrap_or_default().to_owned();
+    cookies
+        .into_iter()
+        .enumerate()
+        .map(|(source_order, cookie)| {
+            ScopedCookie::new(cookie, &domain, true, "/", true, None, source_order)
+        })
+        .collect()
 }
 
 fn load_chrome_cookies(domains: Option<Vec<String>>) -> rookie::Result<Vec<rookie::enums::Cookie>> {
@@ -298,8 +347,41 @@ fn ordered_profile_directories(base: &Path) -> Vec<PathBuf> {
 }
 
 fn domain_matches_pinterest(domain: &str) -> bool {
-    let domain = domain.trim_start_matches('.').to_ascii_lowercase();
+    let domain = normalize_domain(domain);
     domain == "pinterest.com" || domain.ends_with(".pinterest.com")
+}
+
+fn normalize_domain(domain: &str) -> String {
+    domain
+        .trim()
+        .trim_start_matches('.')
+        .trim_end_matches('.')
+        .to_ascii_lowercase()
+}
+
+fn normalize_path(path: &str) -> String {
+    if path.is_empty() {
+        "/".into()
+    } else {
+        path.to_owned()
+    }
+}
+
+fn compatibility_public_cookies(mut cookies: Vec<ScopedCookie>) -> Vec<BrowserCookie> {
+    cookies.sort_by(|left, right| {
+        left.cookie
+            .name
+            .cmp(&right.cookie.name)
+            .then(left.source_order.cmp(&right.source_order))
+    });
+    cookies.into_iter().map(|cookie| cookie.cookie).collect()
+}
+
+fn unix_time_now() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs()
 }
 
 #[cfg(test)]
@@ -326,18 +408,66 @@ mod tests {
         )
         .unwrap();
 
+        let cookies = load_pinterest_scoped_cookies_file(file.path()).unwrap();
+        assert_eq!(cookies.len(), 2);
+        assert_eq!(cookies[0].cookie.name, "_pinterest_sess");
+        assert_eq!(cookies[0].normalized_domain, "pinterest.com");
+        assert!(!cookies[0].host_only);
+        assert_eq!(cookies[0].path, "/");
+        assert!(!cookies[0].secure);
+        assert_eq!(cookies[0].expires, None);
+        assert_eq!(cookies[0].source_order, 1);
+        assert_eq!(cookies[1].cookie.name, "csrftoken");
+        assert_eq!(cookies[1].normalized_domain, "www.pinterest.com");
+        assert!(cookies[1].host_only);
+        assert_eq!(cookies[1].path, "/");
+        assert!(cookies[1].secure);
+        assert_eq!(cookies[1].expires, None);
+        assert_eq!(cookies[1].source_order, 3);
+    }
+
+    #[test]
+    fn public_cookie_file_loader_keeps_name_value_shape() {
+        let file = tempfile::NamedTempFile::new().unwrap();
+        std::fs::write(
+            file.path(),
+            ".pinterest.com\tTRUE\t/\tFALSE\t0\t_pinterest_sess\tsecret\n",
+        )
+        .unwrap();
+
         assert_eq!(
             load_pinterest_cookies_file(file.path()).unwrap(),
-            [
-                BrowserCookie {
-                    name: "_pinterest_sess".into(),
-                    value: "secret".into()
-                },
-                BrowserCookie {
+            [BrowserCookie {
+                name: "_pinterest_sess".into(),
+                value: "secret".into()
+            }]
+        );
+    }
+
+    #[test]
+    fn explicit_cookies_are_scoped_to_the_exact_root_host() {
+        let cookies = scope_explicit_cookies(
+            &Url::parse("https://www.pinterest.com/alice/ideas/").unwrap(),
+            vec![BrowserCookie {
+                name: "csrftoken".into(),
+                value: "secret".into(),
+            }],
+        );
+
+        assert_eq!(
+            cookies,
+            [ScopedCookie {
+                cookie: BrowserCookie {
                     name: "csrftoken".into(),
-                    value: "token".into()
-                }
-            ]
+                    value: "secret".into(),
+                },
+                normalized_domain: "www.pinterest.com".into(),
+                host_only: true,
+                path: "/".into(),
+                secure: true,
+                expires: None,
+                source_order: 0,
+            }]
         );
     }
 

@@ -58,12 +58,13 @@ unpin username/board-name --cookies cookies.txt
 ```
 
 Cookie import is opt-in. `unpin` reads only Pinterest-domain cookies, uses them
-in memory for the scan, and never prints or writes their values. The browser or
-operating system may ask for permission to access its cookie encryption key.
-Chrome, Chromium, Brave, Edge, Firefox, Arc, and Vivaldi are supported. The
-currently active Chrome profile is tried first. `--cookies` accepts the standard
-Netscape/Mozilla `cookies.txt` format produced by browser cookie exporters and
-curl.
+in memory for the scan, and never prints or writes their values. Imported-cookie
+scans require an HTTPS Pinterest URL; anonymous scans can still use HTTP targets
+when no cookies are imported. The browser or operating system may ask for
+permission to access its cookie encryption key. Chrome, Chromium, Brave, Edge,
+Firefox, Arc, and Vivaldi are supported. The currently active Chrome profile is
+tried first. `--cookies` accepts the standard Netscape/Mozilla `cookies.txt`
+format produced by browser cookie exporters and curl.
 
 While running in an interactive terminal, `unpin` shows a persistent,
 grouped checklist of the scan. The active step has an animated spinner; when

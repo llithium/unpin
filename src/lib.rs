@@ -91,6 +91,9 @@ pub async fn run(cli: &Cli) -> Result<Report, AppError> {
     run_with_api_root_and_progress(cli, None, &NoProgress).await
 }
 
+/// Runs with an optional custom API root for anonymous test and integration
+/// scenarios. When imported cookies are present, the API root must stay on the
+/// same HTTPS origin as the Pinterest target.
 pub async fn run_with_api_root(cli: &Cli, api_root: Option<Url>) -> Result<Report, AppError> {
     run_with_api_root_and_progress(cli, api_root, &NoProgress).await
 }
@@ -102,7 +105,7 @@ pub async fn run_with_api_root_and_progress(
 ) -> Result<Report, AppError> {
     let target = Target::parse(&cli.target)?;
     let cookies = if let Some(path) = &cli.cookies {
-        auth::load_pinterest_cookies_file(path)?
+        auth::load_pinterest_scoped_cookies_file(path)?
     } else if let Some(browser) = cli.cookies_from_browser {
         let browser_name = browser.to_string();
         progress.step(ProgressStep::Setup {
@@ -111,7 +114,7 @@ pub async fn run_with_api_root_and_progress(
             },
             lifecycle: Lifecycle::Started,
         });
-        let cookies = auth::load_pinterest_cookies(browser).await?;
+        let cookies = auth::load_pinterest_scoped_cookies(browser).await?;
         progress.step(ProgressStep::Setup {
             task: SetupTask::BrowserCookies {
                 browser: browser_name,
@@ -127,8 +130,10 @@ pub async fn run_with_api_root_and_progress(
     // those synthetic media URLs leak into the user's normal cache.
     let use_default_cache = api_root.is_none() && !cli.no_cache;
     let client = match api_root {
-        Some(api_root) => PinterestClient::with_api_root_and_cookies(root, api_root, cookies)?,
-        None => PinterestClient::with_cookies(root, cookies)?,
+        Some(api_root) => {
+            PinterestClient::with_api_root_and_scoped_cookies(root, api_root, cookies)?
+        }
+        None => PinterestClient::with_api_root_and_scoped_cookies(root.clone(), root, cookies)?,
     };
 
     let selection = if cli.interactive {
