@@ -464,6 +464,8 @@ mod tests {
         assert!(html.contains("advanceAfterReview(group)"));
         assert!(html.contains("advanceAfterReview(reviewedGroup)"));
         assert!(html.contains("const warmGroupImages = (group)"));
+        assert!(html.contains("const initializeImages = () =>"));
+        assert!(html.contains("initializeImages();"));
         assert!(html.contains("warmNearbyImages();"));
         assert!(html.contains("image.loading = \"eager\""));
         assert!(html.contains("link.addEventListener(\"pointerenter\", warmTarget)"));

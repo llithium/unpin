@@ -2912,6 +2912,12 @@
                     });
                 };
 
+                const initializeImages = () => {
+                    groups.forEach((group) => {
+                        group.querySelectorAll(".image-stage img").forEach(markImageReady);
+                    });
+                };
+
                 const warmNearbyImages = () => {
                     const visible = visibleGroups();
                     const index = visible.indexOf(active);
@@ -3118,6 +3124,7 @@
                     }
                 });
 
+                initializeImages();
                 applyFilter();
                 updateProgress();
             })();
