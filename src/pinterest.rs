@@ -613,92 +613,115 @@ impl PinterestClient {
         seen_pin_ids: &mut HashSet<String>,
         progress: &dyn Progress,
     ) -> Result<BoardPins, PinterestError> {
-        let mut raw_pins = self
-            .paginate(
-                "BoardFeed",
-                json!({
-                    "board_id": board.id,
-                    "field_set_key": "react_grid_pin",
-                    "prepend": false,
-                    "page_size": FEED_PAGE_SIZE,
-                    "bookmarks": null
-                }),
-                progress,
-            )
-            .await?;
-        let mut warnings = Vec::new();
+        let board_feed = self.paginate(
+            "BoardFeed",
+            json!({
+                "board_id": board.id,
+                "field_set_key": "react_grid_pin",
+                "prepend": false,
+                "page_size": FEED_PAGE_SIZE,
+                "bookmarks": null
+            }),
+            progress,
+        );
 
-        if board.section_count > 0 {
-            let sections = self
-                .paginate("BoardSections", json!({ "board_id": board.id }), progress)
-                .await?;
-            let mut section_ids = Vec::new();
-            for section in sections {
-                match value_string(section.get("id")) {
-                    Some(id) => section_ids.push(id),
-                    None => {
-                        warnings.push("Pinterest returned a board section without an ID".into())
-                    }
-                }
-            }
-            // Announced after filtering so the total matches the number of
-            // sections that will actually report progress.
-            progress.step(ProgressStep::SectionCollection {
-                current: 0,
-                completed: 0,
-                total: section_ids.len(),
-                lifecycle: Lifecycle::Started,
-            });
-
-            // Each section is an independent paginated feed, so they overlap
-            // rather than running end to end. Results are reordered back into
-            // section order below to keep a scan's pin order deterministic.
-            let section_total = section_ids.len();
-            let section_completed = Arc::new(AtomicUsize::new(0));
-            let section_fetches =
-                stream::iter(section_ids.into_iter().enumerate().map(|(index, id)| {
-                    let section_completed = Arc::clone(&section_completed);
-                    async move {
-                        progress.step(ProgressStep::SectionCollection {
-                            current: index + 1,
-                            completed: section_completed.load(Ordering::Relaxed),
-                            total: section_total,
-                            lifecycle: Lifecycle::Started,
-                        });
-                        let fetched = self
-                            .paginate(
-                                "BoardSectionPins",
-                                json!({
-                                    "section_id": id,
-                                    "page_size": FEED_PAGE_SIZE,
-                                    "bookmarks": null
-                                }),
-                                progress,
-                            )
-                            .await;
-                        let completed = section_completed.fetch_add(1, Ordering::Relaxed) + 1;
-                        progress.step(ProgressStep::SectionCollection {
-                            current: index + 1,
-                            completed,
-                            total: section_total,
-                            lifecycle: Lifecycle::Completed,
-                        });
-                        (index, fetched)
-                    }
-                }))
-                .buffer_unordered(SECTION_FETCH_CONCURRENCY);
-            futures_util::pin_mut!(section_fetches);
-            let mut fetched_sections = section_fetches.collect::<Vec<_>>().await;
-            fetched_sections.sort_by_key(|(index, _)| *index);
-            for (_, fetched) in fetched_sections {
-                raw_pins.extend(fetched?);
-            }
-        }
+        // Section discovery does not depend on any page of the main feed. Keep
+        // the whole section pipeline in its own future so section pin pages can
+        // start as soon as discovery completes, even while BoardFeed is still
+        // walking its bookmark chain.
+        let (raw_pins, warnings) = if board.section_count > 0 {
+            let section_pins = async {
+                let sections = self
+                    .paginate("BoardSections", json!({ "board_id": board.id }), progress)
+                    .await?;
+                self.fetch_section_pins(sections, progress).await
+            };
+            let (raw_pins, section_pins) = tokio::try_join!(board_feed, section_pins)?;
+            let (section_pins, warnings) = section_pins;
+            let mut raw_pins = raw_pins;
+            raw_pins.extend(section_pins);
+            (raw_pins, warnings)
+        } else {
+            (board_feed.await?, Vec::new())
+        };
 
         let mut parsed =
             self.parse_pins(raw_pins, &board.name, board.pins_reported, seen_pin_ids)?;
         parsed.warnings.splice(0..0, warnings);
         Ok(parsed)
+    }
+
+    /// Fetches section feeds concurrently and restores their provider order so
+    /// the final scan remains deterministic even though network completion is
+    /// intentionally unordered.
+    async fn fetch_section_pins(
+        &self,
+        sections: Vec<Value>,
+        progress: &dyn Progress,
+    ) -> Result<(Vec<Value>, Vec<String>), PinterestError> {
+        let mut section_ids = Vec::new();
+        let mut warnings = Vec::new();
+        for section in sections {
+            match value_string(section.get("id")) {
+                Some(id) => section_ids.push(id),
+                None => warnings.push("Pinterest returned a board section without an ID".into()),
+            }
+        }
+        // Announced after filtering so the total matches the number of
+        // sections that will actually report progress.
+        progress.step(ProgressStep::SectionCollection {
+            current: 0,
+            completed: 0,
+            total: section_ids.len(),
+            lifecycle: Lifecycle::Started,
+        });
+
+        // Each section is an independent paginated feed, so they overlap
+        // rather than running end to end. Results are reordered back into
+        // section order below to keep a scan's pin order deterministic.
+        let section_total = section_ids.len();
+        let section_completed = Arc::new(AtomicUsize::new(0));
+        let section_fetches =
+            stream::iter(section_ids.into_iter().enumerate().map(|(index, id)| {
+                let section_completed = Arc::clone(&section_completed);
+                async move {
+                    progress.step(ProgressStep::SectionCollection {
+                        current: index + 1,
+                        completed: section_completed.load(Ordering::Relaxed),
+                        total: section_total,
+                        lifecycle: Lifecycle::Started,
+                    });
+                    let fetched = self
+                        .paginate(
+                            "BoardSectionPins",
+                            json!({
+                                "section_id": id,
+                                "page_size": FEED_PAGE_SIZE,
+                                "bookmarks": null
+                            }),
+                            progress,
+                        )
+                        .await;
+                    let completed = section_completed.fetch_add(1, Ordering::Relaxed) + 1;
+                    progress.step(ProgressStep::SectionCollection {
+                        current: index + 1,
+                        completed,
+                        total: section_total,
+                        lifecycle: Lifecycle::Completed,
+                    });
+                    (index, fetched)
+                }
+            }))
+            .buffer_unordered(SECTION_FETCH_CONCURRENCY);
+        futures_util::pin_mut!(section_fetches);
+        let mut fetched_sections = section_fetches.collect::<Vec<_>>().await;
+        fetched_sections.sort_by_key(|(index, _)| *index);
+
+        let mut raw_pins = Vec::new();
+        for (_, fetched) in fetched_sections {
+            raw_pins.extend(fetched?);
+        }
+        Ok((raw_pins, warnings))
     }
 
     fn parse_pins(
@@ -1613,6 +1636,88 @@ mod tests {
         assert_eq!(collected.pins_found, 1);
         assert_eq!(collected.pins.len(), 1);
         assert_eq!(collected.pins[0].id, "shared");
+    }
+
+    #[tokio::test]
+    async fn section_pipeline_starts_while_the_main_feed_is_still_loading() {
+        use std::time::{Duration, Instant};
+
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        let empty_page = json!({
+            "resource_response": { "data": [] },
+            "resource": { "options": { "bookmarks": ["-end-"] } }
+        });
+        Mock::given(method("GET"))
+            .and(path("/resource/BoardFeedResource/get/"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .set_body_json(empty_page.clone())
+                    .set_delay(Duration::from_millis(500)),
+            )
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/resource/BoardSectionsResource/get/"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "resource_response": { "data": [{ "id": "section-1" }] },
+                "resource": { "options": { "bookmarks": ["-end-"] } }
+            })))
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/resource/BoardSectionPinsResource/get/"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .set_body_json(empty_page)
+                    .set_delay(Duration::from_millis(500)),
+            )
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let client = PinterestClient::with_api_root(
+            Url::parse("https://www.pinterest.com/").unwrap(),
+            Url::parse(&server.uri()).unwrap(),
+        )
+        .unwrap();
+        let board = BoardRef {
+            id: "board-1".into(),
+            name: "Ideas".into(),
+            slug: "ideas".into(),
+            url: "https://www.pinterest.com/alice/ideas/".into(),
+            pins_reported: Some(0),
+            section_count: 1,
+            is_secret: false,
+        };
+        let scan = tokio::spawn(async move {
+            let progress = NoProgress;
+            client
+                .fetch_board_pins(&board, &mut HashSet::new(), &progress)
+                .await
+        });
+
+        let deadline = Instant::now() + Duration::from_millis(250);
+        loop {
+            let section_request_started = server
+                .received_requests()
+                .await
+                .unwrap()
+                .iter()
+                .any(|request| request.url.path() == "/resource/BoardSectionPinsResource/get/");
+            if section_request_started {
+                break;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "section pins did not start while the main feed was delayed"
+            );
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+
+        assert!(scan.await.unwrap().is_ok());
     }
 
     #[tokio::test]

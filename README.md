@@ -136,8 +136,10 @@ Run `unpin --help` for the complete interface.
   `unpin` asks for 250 pins per page instead of Pinterest's default 25 to keep
   that chain short. The page size is an undocumented option; if Pinterest
   refuses it, the feed is refetched at the default page size rather than
-  failing. Throttled or transient requests are retried up to three times with
-  bounded exponential backoff.
+  failing. A board's main feed and section feeds, and a profile's unorganized
+  feed and board feeds, overlap when they are independent. Throttled or
+  transient requests are retried up to three times with bounded exponential
+  backoff.
 - When several boards are selected, their pins are pooled into a single
   analysis, so duplicates spanning two boards are found. Each reported pin
   carries its board name, and pin counts are also broken down per board.

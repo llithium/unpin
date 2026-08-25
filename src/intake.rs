@@ -125,9 +125,14 @@ pub(crate) async fn collect(
     client: &PinterestClient,
     progress: &dyn Progress,
 ) -> Result<ScanIntakeResult, IntakeError> {
-    let resolved = resolve_sources(&request.target, request.selection, client, progress).await?;
-    let username = resolved.user.as_ref().map(|user| user.username.clone());
-    let multiple = resolved.boards.len() > 1 || resolved.user.is_some();
+    let ResolvedSources {
+        user,
+        boards,
+        include_unorganized,
+        prefetched_unorganized,
+    } = resolve_sources(&request.target, request.selection, client, progress).await?;
+    let username = user.as_ref().map(|user| user.username.clone());
+    let multiple = boards.len() > 1 || user.is_some();
 
     // Keep source-level deduplication inside PinterestClient and perform the
     // cross-source merge here, where the selected source order is known.
@@ -136,36 +141,52 @@ pub(crate) async fn collect(
     let mut pins = Vec::new();
     let mut skipped = Vec::new();
 
-    let board_total = resolved.boards.len();
+    let board_total = boards.len();
     let board_completed = Arc::new(AtomicUsize::new(0));
-    let board_fetches = stream::iter(resolved.boards.into_iter().enumerate().map(
-        |(index, board)| {
-            let client = client.clone();
-            let board_completed = Arc::clone(&board_completed);
-            async move {
-                progress.step(ProgressStep::SourceCollection {
-                    name: board.name.clone(),
-                    current: index + 1,
-                    completed: board_completed.load(Ordering::Relaxed),
-                    total: board_total,
-                    lifecycle: Lifecycle::Started,
-                });
-                let fetched = client.collect_board_source(&board, progress).await;
-                let completed = board_completed.fetch_add(1, Ordering::Relaxed) + 1;
-                progress.step(ProgressStep::SourceCollection {
-                    name: board.name.clone(),
-                    current: index + 1,
-                    completed,
-                    total: board_total,
-                    lifecycle: Lifecycle::Completed,
-                });
-                (index, board, fetched)
-            }
-        },
-    ))
+    let board_fetches = stream::iter(boards.into_iter().enumerate().map(|(index, board)| {
+        let client = client.clone();
+        let board_completed = Arc::clone(&board_completed);
+        async move {
+            progress.step(ProgressStep::SourceCollection {
+                name: board.name.clone(),
+                current: index + 1,
+                completed: board_completed.load(Ordering::Relaxed),
+                total: board_total,
+                lifecycle: Lifecycle::Started,
+            });
+            let fetched = client.collect_board_source(&board, progress).await;
+            let completed = board_completed.fetch_add(1, Ordering::Relaxed) + 1;
+            progress.step(ProgressStep::SourceCollection {
+                name: board.name.clone(),
+                current: index + 1,
+                completed,
+                total: board_total,
+                lifecycle: Lifecycle::Completed,
+            });
+            (index, board, fetched)
+        }
+    }))
     .buffer_unordered(BOARD_FETCH_CONCURRENCY);
-    futures_util::pin_mut!(board_fetches);
-    let mut board_results = board_fetches.collect::<Vec<_>>().await;
+
+    // A profile's unorganized feed is independent of every board feed. Start
+    // it with the board stream so a slow profile-level feed cannot become a
+    // serial tail after all boards have finished.
+    let user_for_unorganized = user.clone();
+    let unorganized_fetch = async move {
+        if !include_unorganized {
+            return None;
+        }
+        let fetched = match prefetched_unorganized {
+            Some(fetched) => fetched,
+            None => {
+                let user = user_for_unorganized.as_ref()?;
+                client.collect_unorganized_source(user, progress).await
+            }
+        };
+        Some(fetched)
+    };
+    let (mut board_results, fetched_unorganized) =
+        tokio::join!(board_fetches.collect::<Vec<_>>(), unorganized_fetch);
     board_results.sort_by_key(|(index, _, _)| *index);
 
     for (_, board, fetched) in board_results {
@@ -204,10 +225,10 @@ pub(crate) async fn collect(
     // Pins saved straight to a profile are displayed by Pinterest as
     // "Unorganized ideas", not as a board. Include them in every profile scan
     // so they participate in the same duplicate analysis as board pins.
-    if let Some(user) = resolved.user
-        && resolved.include_unorganized
+    if let Some(user) = user
+        && include_unorganized
     {
-        let fetched = match resolved.prefetched_unorganized {
+        let fetched = match fetched_unorganized {
             Some(fetched) => fetched,
             None => client.collect_unorganized_source(&user, progress).await,
         };
@@ -503,6 +524,95 @@ mod tests {
             SourceOutcome::Collected { source, .. } => assert_eq!(source.pins_found, 0),
             SourceOutcome::Failed { .. } => panic!("the second board should be collected"),
         }
+    }
+
+    #[tokio::test]
+    async fn profile_level_pins_start_with_board_fetches() {
+        use std::time::{Duration, Instant};
+
+        use serde_json::json;
+        use url::Url;
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/resource/BoardsResource/get/"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "resource_response": { "data": [{
+                    "id": "board-1",
+                    "type": "board",
+                    "name": "Interiors",
+                    "url": "/alice/interiors/",
+                    "pin_count": 0,
+                    "section_count": 0,
+                    "privacy": "public"
+                }]},
+                "resource": { "options": { "bookmarks": ["-end-"] } }
+            })))
+            .mount(&server)
+            .await;
+        let delayed_empty = || {
+            ResponseTemplate::new(200)
+                .set_body_json(json!({
+                    "resource_response": { "data": [] },
+                    "resource": { "options": { "bookmarks": ["-end-"] } }
+                }))
+                .set_delay(Duration::from_millis(500))
+        };
+        Mock::given(method("GET"))
+            .and(path("/resource/BoardFeedResource/get/"))
+            .respond_with(delayed_empty())
+            .expect(1)
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/resource/UserPinsResource/get/"))
+            .respond_with(delayed_empty())
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let target = Target::parse("alice").unwrap();
+        let client = PinterestClient::with_api_root(
+            target.root().clone(),
+            Url::parse(&server.uri()).unwrap(),
+        )
+        .unwrap();
+        let scan = tokio::spawn(async move {
+            collect(
+                IntakeRequest {
+                    target,
+                    selection: SourceSelection::Default,
+                },
+                &client,
+                &crate::progress::NoProgress,
+            )
+            .await
+        });
+
+        let deadline = Instant::now() + Duration::from_millis(250);
+        loop {
+            let paths = server
+                .received_requests()
+                .await
+                .unwrap()
+                .into_iter()
+                .map(|request| request.url.path().to_owned())
+                .collect::<HashSet<_>>();
+            if paths.contains("/resource/BoardFeedResource/get/")
+                && paths.contains("/resource/UserPinsResource/get/")
+            {
+                break;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "profile-level pins did not start with the board feed"
+            );
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+
+        assert!(scan.await.unwrap().is_ok());
     }
 
     #[tokio::test]
