@@ -1760,9 +1760,14 @@
             .overview-mode .image-stage { aspect-ratio: 4 / 5; min-height: 0; }
 
             .overview-mode .image-stage img {
-                width: 100%;
-                height: 100%;
-                max-height: none;
+                width: auto;
+                height: auto;
+                min-width: 0;
+                min-height: 0;
+                max-width: 100%;
+                max-height: 100%;
+                justify-self: center;
+                align-self: center;
                 object-fit: contain;
             }
 

@@ -176,6 +176,9 @@ mod tests {
         assert!(
             html.contains(".overview-mode .image-stage { aspect-ratio: 4 / 5; min-height: 0; }")
         );
+        assert!(html.contains(
+            ".overview-mode .image-stage img {\n                width: auto;\n                height: auto;\n                min-width: 0;\n                min-height: 0;\n                max-width: 100%;\n                max-height: 100%;\n                justify-self: center;\n                align-self: center;\n                object-fit: contain;"
+        ));
         assert!(html.contains(".overview-mode .match { position: static; max-width: none;"));
         assert!(html.contains("data-review-button"));
         assert!(html.contains(".progress-fill {\n                display: block;"));
