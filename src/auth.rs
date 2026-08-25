@@ -173,8 +173,46 @@ fn load_chrome_cookies(domains: Option<Vec<String>>) -> rookie::Result<Vec<rooki
 }
 
 #[cfg(unix)]
+fn select_chrome_profile_cookies<I>(candidates: I, now: u64) -> Option<Vec<rookie::enums::Cookie>>
+where
+    I: IntoIterator<Item = Vec<rookie::enums::Cookie>>,
+{
+    let mut first_non_empty = None;
+
+    for cookies in candidates {
+        if cookies.is_empty() {
+            continue;
+        }
+        if cookies
+            .iter()
+            .any(|cookie| is_live_pinterest_session_cookie(cookie, now))
+        {
+            return Some(cookies);
+        }
+        if first_non_empty.is_none() {
+            first_non_empty = Some(cookies);
+        }
+    }
+
+    first_non_empty
+}
+
+#[cfg(unix)]
+fn is_live_pinterest_session_cookie(cookie: &rookie::enums::Cookie, now: u64) -> bool {
+    cookie.name == "_pinterest_sess"
+        && !cookie.value.is_empty()
+        && domain_matches_pinterest(&cookie.domain)
+        // `rookie` uses `0` for session cookies; keep treating that like no expiry.
+        && cookie
+            .expires
+            .map(|expires| expires == 0 || expires > now)
+            .unwrap_or(true)
+}
+
+#[cfg(unix)]
 fn load_chrome_profile_cookies(domains: Option<Vec<String>>) -> Option<Vec<rookie::enums::Cookie>> {
-    let mut first_pinterest_profile = None;
+    let now = unix_time_now();
+    let mut candidates = Vec::new();
 
     for base in chrome_profile_bases() {
         for profile in ordered_profile_directories(&base) {
@@ -189,21 +227,12 @@ fn load_chrome_profile_cookies(domains: Option<Vec<String>>) -> Option<Vec<rooki
                 let Ok(cookies) = rookie::any_browser(database, domains.clone(), None) else {
                     continue;
                 };
-                if cookies.is_empty() {
-                    continue;
-                }
-                if cookies
-                    .iter()
-                    .any(|cookie| cookie.name == "_pinterest_sess")
-                {
-                    return Some(cookies);
-                }
-                first_pinterest_profile.get_or_insert(cookies);
+                candidates.push(cookies);
             }
         }
     }
 
-    first_pinterest_profile
+    select_chrome_profile_cookies(candidates, now)
 }
 
 #[cfg(target_os = "macos")]
@@ -313,6 +342,159 @@ mod tests {
                     value: "token".into()
                 }
             ]
+        );
+    }
+
+    #[cfg(unix)]
+    fn raw_cookie(
+        name: &str,
+        domain: &str,
+        value: &str,
+        expires: Option<u64>,
+    ) -> rookie::enums::Cookie {
+        rookie::enums::Cookie {
+            domain: domain.into(),
+            path: "/".into(),
+            secure: true,
+            expires,
+            name: name.into(),
+            value: value.into(),
+            http_only: false,
+            same_site: 0,
+        }
+    }
+
+    #[cfg(unix)]
+    fn profile_marker(profile_id: &str) -> rookie::enums::Cookie {
+        raw_cookie(profile_id, "example.com", "marker", None)
+    }
+
+    #[cfg(unix)]
+    fn profile_with_session(
+        profile_id: &str,
+        session_value: &str,
+        expires: Option<u64>,
+    ) -> Vec<rookie::enums::Cookie> {
+        vec![
+            profile_marker(profile_id),
+            raw_cookie("_pinterest_sess", ".pinterest.com", session_value, expires),
+        ]
+    }
+
+    #[cfg(unix)]
+    fn profile_without_live_session(profile_id: &str) -> Vec<rookie::enums::Cookie> {
+        vec![profile_marker(profile_id)]
+    }
+
+    #[cfg(unix)]
+    fn selected_profile_id(cookies: &[rookie::enums::Cookie]) -> Option<&str> {
+        cookies
+            .iter()
+            .find(|cookie| cookie.domain == "example.com")
+            .map(|cookie| cookie.name.as_str())
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn chrome_profile_selector_skips_expired_session_for_later_live_profile() {
+        let now = 1_700_000_000;
+        let selected = select_chrome_profile_cookies(
+            vec![
+                profile_with_session("profile_one", "expired", Some(now - 1)),
+                profile_with_session("profile_two", "live", Some(now + 60)),
+            ],
+            now,
+        )
+        .unwrap();
+
+        assert_eq!(selected_profile_id(&selected), Some("profile_two"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn chrome_profile_selector_keeps_first_live_profile() {
+        let now = 1_700_000_000;
+        let selected = select_chrome_profile_cookies(
+            vec![
+                profile_with_session("profile_one", "live", Some(now + 60)),
+                profile_with_session("profile_two", "also_live", Some(now + 120)),
+            ],
+            now,
+        )
+        .unwrap();
+
+        assert_eq!(selected_profile_id(&selected), Some("profile_one"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn chrome_profile_selector_rejects_empty_session_value() {
+        let now = 1_700_000_000;
+        let selected = select_chrome_profile_cookies(
+            vec![
+                profile_with_session("profile_one", "", Some(now + 60)),
+                profile_with_session("profile_two", "live", Some(now + 120)),
+            ],
+            now,
+        )
+        .unwrap();
+
+        assert_eq!(selected_profile_id(&selected), Some("profile_two"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn chrome_profile_selector_rejects_session_expiring_at_now() {
+        let now = 1_700_000_000;
+        let selected = select_chrome_profile_cookies(
+            vec![
+                profile_with_session("profile_one", "boundary", Some(now)),
+                profile_with_session("profile_two", "live", Some(now + 1)),
+            ],
+            now,
+        )
+        .unwrap();
+
+        assert_eq!(selected_profile_id(&selected), Some("profile_two"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn chrome_profile_selector_accepts_session_without_expiry() {
+        let now = 1_700_000_000;
+        let selected = select_chrome_profile_cookies(
+            vec![
+                profile_with_session("profile_one", "session", None),
+                profile_with_session("profile_two", "live", Some(now + 1)),
+            ],
+            now,
+        )
+        .unwrap();
+
+        assert_eq!(selected_profile_id(&selected), Some("profile_one"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn chrome_profile_selector_falls_back_to_first_non_empty_profile_without_live_session() {
+        let now = 1_700_000_000;
+        let selected = select_chrome_profile_cookies(
+            vec![
+                profile_without_live_session("profile_one"),
+                profile_with_session("profile_two", "", Some(now + 60)),
+            ],
+            now,
+        )
+        .unwrap();
+
+        assert_eq!(selected_profile_id(&selected), Some("profile_one"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn chrome_profile_selector_returns_none_when_all_candidates_are_empty() {
+        assert!(
+            select_chrome_profile_cookies(vec![Vec::new(), Vec::new()], 1_700_000_000).is_none()
         );
     }
 }
