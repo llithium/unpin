@@ -202,11 +202,7 @@ fn is_live_pinterest_session_cookie(cookie: &rookie::enums::Cookie, now: u64) ->
     cookie.name == "_pinterest_sess"
         && !cookie.value.is_empty()
         && domain_matches_pinterest(&cookie.domain)
-        // `rookie` uses `0` for session cookies; keep treating that like no expiry.
-        && cookie
-            .expires
-            .map(|expires| expires == 0 || expires > now)
-            .unwrap_or(true)
+        && cookie.expires.is_none_or(|expires| expires > now)
 }
 
 #[cfg(unix)]
@@ -449,6 +445,22 @@ mod tests {
         let selected = select_chrome_profile_cookies(
             vec![
                 profile_with_session("profile_one", "boundary", Some(now)),
+                profile_with_session("profile_two", "live", Some(now + 1)),
+            ],
+            now,
+        )
+        .unwrap();
+
+        assert_eq!(selected_profile_id(&selected), Some("profile_two"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn chrome_profile_selector_rejects_zero_expiry_session() {
+        let now = 1_700_000_000;
+        let selected = select_chrome_profile_cookies(
+            vec![
+                profile_with_session("profile_one", "zero", Some(0)),
                 profile_with_session("profile_two", "live", Some(now + 1)),
             ],
             now,
