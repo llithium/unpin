@@ -750,8 +750,10 @@ fn build_exact_groups(images: &[AnalyzedImage]) -> Vec<DuplicateGroup> {
         })
         .collect::<Vec<_>>();
     groups.sort_by(|left, right| {
-        Reverse(left.items.len())
-            .cmp(&Reverse(right.items.len()))
+        left.scope
+            .sort_priority()
+            .cmp(&right.scope.sort_priority())
+            .then_with(|| Reverse(left.items.len()).cmp(&Reverse(right.items.len())))
             .then_with(|| left.items[0].pin_id.cmp(&right.items[0].pin_id))
     });
     groups
@@ -787,8 +789,10 @@ fn build_visual_candidates(images: &[AnalyzedImage], threshold: u8) -> Vec<Visua
     }
 
     candidates.sort_by(|left, right| {
-        left.hash_distance
-            .cmp(&right.hash_distance)
+        left.scope
+            .sort_priority()
+            .cmp(&right.scope.sort_priority())
+            .then_with(|| left.hash_distance.cmp(&right.hash_distance))
             .then_with(|| left.items[0].pin_id.cmp(&right.items[0].pin_id))
             .then_with(|| left.items[1].pin_id.cmp(&right.items[1].pin_id))
     });
@@ -1338,6 +1342,52 @@ mod tests {
         right.board = Some("Mood board".into());
         let candidates = build_visual_candidates(&[left, right], 2);
         assert_eq!(candidates[0].scope, MatchScope::CrossBoard);
+    }
+
+    #[test]
+    fn same_board_matches_sort_before_cross_board_matches() {
+        let mut same_first = analyzed("3", 800, 600, 1_000, 0);
+        let mut same_second = analyzed("4", 800, 600, 1_000, 0);
+        same_first.sha256 = "same-board".into();
+        same_second.sha256 = "same-board".into();
+        same_first.board = Some("Interiors".into());
+        same_second.board = Some("Interiors".into());
+
+        let mut cross_first = analyzed("1", 800, 600, 1_000, 0);
+        let mut cross_second = analyzed("2", 800, 600, 1_000, 0);
+        cross_first.sha256 = "cross-board".into();
+        cross_second.sha256 = "cross-board".into();
+        cross_first.board = Some("Interiors".into());
+        cross_second.board = Some("Mood board".into());
+
+        let groups = build_exact_groups(&[cross_first, cross_second, same_first, same_second]);
+        assert_eq!(groups[0].scope, MatchScope::SameBoard);
+        assert_eq!(groups[1].scope, MatchScope::CrossBoard);
+
+        // Scope comes before visual similarity, so a same-board candidate is
+        // still first when the across-board candidate has the closer hash.
+        let mut same_visual_first = analyzed("7", 1000, 1000, 500, 0b01111);
+        let mut same_visual_second = analyzed("8", 1000, 1000, 500, 0b11111);
+        same_visual_first.board = Some("Interiors".into());
+        same_visual_second.board = Some("Interiors".into());
+
+        let mut cross_visual_first = analyzed("5", 1000, 1000, 500, 0);
+        let mut cross_visual_second = analyzed("6", 1000, 1000, 500, 0);
+        cross_visual_first.board = Some("Interiors".into());
+        cross_visual_second.board = Some("Mood board".into());
+
+        let candidates = build_visual_candidates(
+            &[
+                cross_visual_first,
+                cross_visual_second,
+                same_visual_first,
+                same_visual_second,
+            ],
+            1,
+        );
+        assert_eq!(candidates.len(), 2);
+        assert_eq!(candidates[0].scope, MatchScope::SameBoard);
+        assert_eq!(candidates[1].scope, MatchScope::CrossBoard);
     }
 
     #[test]

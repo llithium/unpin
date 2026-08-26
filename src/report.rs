@@ -95,6 +95,15 @@ impl MatchScope {
             Self::CrossBoard => "cross-board",
         }
     }
+
+    /// Keeps duplicates saved within one board at the front of the review
+    /// queue, where they are the safest cleanup candidates.
+    pub(crate) fn sort_priority(self) -> u8 {
+        match self {
+            Self::SameBoard => 0,
+            Self::CrossBoard => 1,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Eq, PartialEq)]
