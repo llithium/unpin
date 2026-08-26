@@ -5,7 +5,7 @@ use askama::Template;
 use tempfile::Builder;
 use thiserror::Error;
 
-use crate::report::{Report, human_bytes};
+use crate::report::{MatchScope, Report, human_bytes};
 
 #[derive(Template)]
 #[template(path = "report.html")]
@@ -15,6 +15,7 @@ struct ReportTemplate<'a> {
     show_filters: bool,
     same: usize,
     cross: usize,
+    quick_wins: usize,
 }
 
 impl ReportTemplate<'_> {
@@ -62,12 +63,18 @@ fn open_report_with(path: &Path, opener: impl FnOnce(&Path) -> io::Result<()>) -
 pub fn render_html(report: &Report) -> String {
     let show_boards = report.shows_board_labels();
     let (same, cross) = report.scope_counts();
+    let quick_wins = report
+        .exact_groups
+        .iter()
+        .filter(|group| group.scope == MatchScope::SameBoard)
+        .count();
     ReportTemplate {
         report,
         show_boards,
         show_filters: show_boards && same + cross > 0,
         same,
         cross,
+        quick_wins,
     }
     .render()
     .expect("the HTML report template is valid")
@@ -185,6 +192,20 @@ mod tests {
         assert!(html.contains("document.addEventListener(\"keydown\""));
         assert!(html.contains("event.target instanceof HTMLButtonElement"));
         assert!(html.contains("prefers-reduced-motion: reduce"));
+        assert!(html.contains("id=\"quick-wins\""));
+        assert!(html.contains(
+            "aria-label=\"Show exact duplicates saved more than once within one board\""
+        ));
+        assert!(html.contains(">Quick wins</span>"));
+        assert!(html.contains("class=\"filter-count\">1</span>"));
+        assert!(html.contains("scopeFilters.find((filter) => filter.value === \"same-board\")"));
+        assert!(html.contains("kindFilters.find((filter) => filter.value === \"exact\")"));
+        assert!(
+            html.contains("applyFilter();\n                    announce(\"Quick wins shown\")")
+        );
+        assert!(html.contains("aria-pressed=\"false\""));
+        assert!(html.contains("quickWins.setAttribute(\"aria-pressed\""));
+        assert!(html.contains("never changes your Pinterest account."));
     }
 
     #[test]
@@ -308,6 +329,37 @@ mod tests {
         let mut visual_only = sample_report();
         visual_only.exact_groups.clear();
         assert!(!render_html(&visual_only).contains("id=\"kind-all\""));
+    }
+
+    #[test]
+    fn quick_wins_only_appears_when_it_removes_other_matches() {
+        let mut exact_only = sample_report();
+        exact_only.visual_candidates.clear();
+        assert!(!render_html(&exact_only).contains("id=\"quick-wins\""));
+
+        let mut visual_only = sample_report();
+        visual_only.exact_groups.clear();
+        assert!(!render_html(&visual_only).contains("id=\"quick-wins\""));
+    }
+
+    #[test]
+    fn quick_wins_uses_same_board_exact_matches_in_multi_board_scans() {
+        let mut report = sample_report();
+        report.summary.boards.push(ScannedBoard {
+            name: "Mood board".into(),
+            url: "https://www.pinterest.com/alice/mood-board/".into(),
+            pins_reported: Some(1),
+            pins_found: 1,
+        });
+        report.visual_candidates[0].scope = MatchScope::CrossBoard;
+        let html = render_html(&report);
+
+        assert!(html.contains("id=\"quick-wins\""));
+        assert!(html.contains(
+            "<span>Quick wins</span>\n                            <span class=\"filter-count\">1</span>"
+        ));
+        assert!(html.contains("id=\"filter-same\""));
+        assert!(html.contains("id=\"filter-cross\""));
     }
 
     #[test]

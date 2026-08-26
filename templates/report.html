@@ -2585,6 +2585,21 @@
                     </div>
                     {% endif %}
 
+                    {% if quick_wins > 0 && quick_wins < same + cross %}
+                    <div class="filter-controls-meta">
+                        <button
+                            class="control"
+                            id="quick-wins"
+                            type="button"
+                            aria-label="Show exact duplicates saved more than once within one board"
+                            aria-pressed="false"
+                        >
+                            <span>Quick wins</span>
+                            <span class="filter-count">{{ quick_wins }}</span>
+                        </button>
+                    </div>
+                    {% endif %}
+
                     <div class="filter-controls-meta">
                         <label class="unreviewed-filter" for="unreviewed-only">
                             <input
@@ -2873,6 +2888,7 @@
                 const kindFilters = Array.from(
                     document.querySelectorAll('input[name="kind-filter"]'),
                 );
+                const quickWins = document.querySelector("#quick-wins");
                 const unreviewedOnly = document.querySelector("#unreviewed-only");
                 const visibleCount = document.querySelector("#visible-count");
                 const previous = document.querySelector("#previous-match");
@@ -2955,6 +2971,16 @@
                     if (next) next.disabled = index < 0 || index >= visible.length - 1;
                 };
 
+                const syncQuickWins = () => {
+                    if (!quickWins) return;
+                    const scope = scopeFilters.find((filter) => filter.checked)?.value;
+                    const kind = kindFilters.find((filter) => filter.checked)?.value;
+                    const isQuickWins =
+                        (!scopeFilters.length || scope === "same-board") &&
+                        (!kindFilters.length || kind === "exact");
+                    quickWins.setAttribute("aria-pressed", isQuickWins ? "true" : "false");
+                };
+
                 const setActive = (group, options = {}) => {
                     if (!group || group.classList.contains("is-filtered")) return;
                     warmGroupImages(group);
@@ -3031,6 +3057,7 @@
                 const applyFilter = (preferredActive = null) => {
                     const scope = scopeFilters.find((filter) => filter.checked)?.value || "all";
                     const kind = kindFilters.find((filter) => filter.checked)?.value || "all";
+                    syncQuickWins();
                     groups.forEach((group) => {
                         const scopeMatches = !(
                             scope !== "all" && group.dataset.scope !== scope
@@ -3089,6 +3116,12 @@
                 [...scopeFilters, ...kindFilters].forEach((filter) =>
                     filter.addEventListener("change", () => applyFilter()),
                 );
+                quickWins?.addEventListener("click", () => {
+                    scopeFilters.find((filter) => filter.value === "same-board")?.click();
+                    kindFilters.find((filter) => filter.value === "exact")?.click();
+                    applyFilter();
+                    announce("Quick wins shown");
+                });
                 unreviewedOnly?.addEventListener("change", () => applyFilter());
                 previous?.addEventListener("click", () => move(-1));
                 next?.addEventListener("click", () => move(1));
