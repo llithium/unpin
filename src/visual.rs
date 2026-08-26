@@ -205,6 +205,11 @@ mod tests {
         );
         assert!(html.contains("aria-pressed=\"false\""));
         assert!(html.contains("quickWins.setAttribute(\"aria-pressed\""));
+        assert!(html.contains("id=\"reset-review\""));
+        assert!(html.contains("window.sessionStorage.setItem("));
+        assert!(html.contains("const restoreState = () =>"));
+        assert!(html.contains("groups.forEach((group) => syncReviewedUi(group, false))"));
+        assert!(html.contains("Review marks survive reloads in this browser tab"));
         assert!(html.contains("never changes your Pinterest account."));
     }
 
@@ -489,7 +494,7 @@ mod tests {
     }
 
     #[test]
-    fn review_workspace_has_session_only_navigation_hooks() {
+    fn review_workspace_restores_tab_local_navigation_state() {
         let html = render_html(&multi_board_report());
 
         assert!(html.contains("data-reviewed=\"false\""));
@@ -522,7 +527,10 @@ mod tests {
         assert!(html.contains("image.loading = \"eager\""));
         assert!(html.contains("link.addEventListener(\"pointerenter\", warmTarget)"));
         assert!(!html.contains("localStorage"));
-        assert!(!html.contains("sessionStorage"));
+        assert!(html.contains("window.sessionStorage.getItem(storageKey)"));
+        assert!(html.contains("window.sessionStorage.setItem("));
+        assert!(html.contains("active: active?.id || null"));
+        assert!(html.contains("restoreState();"));
     }
 
     #[test]

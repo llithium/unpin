@@ -190,6 +190,37 @@
                 letter-spacing: 0.03em;
             }
 
+            .progress-reset {
+                min-height: 28px;
+                margin-left: 4px;
+                padding: 4px 7px;
+                border: 1px solid transparent;
+                border-radius: 4px;
+                background: transparent;
+                color: var(--muted);
+                cursor: pointer;
+                font: inherit;
+                letter-spacing: inherit;
+                text-transform: uppercase;
+                transition:
+                    border-color 220ms ease,
+                    color 220ms ease,
+                    background 220ms ease;
+            }
+
+            .progress-reset:hover:not(:disabled),
+            .progress-reset:focus-visible {
+                border-color: var(--line-strong);
+                background: var(--surface);
+                color: var(--ink);
+            }
+
+            .progress-reset:disabled {
+                cursor: default;
+                opacity: 0;
+                pointer-events: none;
+            }
+
             .progress-track {
                 width: 112px;
                 height: 3px;
@@ -2453,6 +2484,12 @@
                         ><span class="progress-fill" id="progress-fill"></span
                     ></span>
                     <span>reviewed</span>
+                    <button
+                        class="progress-reset"
+                        id="reset-review"
+                        type="button"
+                        disabled
+                    >Reset</button>
                 </div>
                 <div class="topbar-actions">
                     <button
@@ -2865,8 +2902,8 @@
                     <footer>
                         This local report loads images from Pinterest and may
                         disappear when your operating system cleans temporary
-                        files. Review marks exist only in this open page; unpin
-                        never changes your Pinterest account.
+                        files. Review marks survive reloads in this browser tab;
+                        unpin never changes your Pinterest account.
                     </footer>
                 </main>
             </div>
@@ -2898,7 +2935,9 @@
                 const progress = document.querySelector("#review-progress");
                 const progressFill = document.querySelector("#progress-fill");
                 const progressBlock = document.querySelector(".progress-block");
+                const resetReview = document.querySelector("#reset-review");
                 const status = document.querySelector("#interaction-status");
+                const storageKey = `unpin:review:${window.location.pathname}`;
                 let active = groups[0] || null;
 
                 const visibleGroups = () =>
@@ -2906,6 +2945,36 @@
 
                 const announce = (message) => {
                     if (status) status.textContent = message;
+                };
+
+                const readStoredState = () => {
+                    try {
+                        const value = window.sessionStorage.getItem(storageKey);
+                        return value ? JSON.parse(value) : null;
+                    } catch (_) {
+                        return null;
+                    }
+                };
+
+                const writeStoredState = () => {
+                    try {
+                        window.sessionStorage.setItem(
+                            storageKey,
+                            JSON.stringify({
+                                reviewed: groups
+                                    .filter((group) => group.dataset.reviewed === "true")
+                                    .map((group) => group.id),
+                                scope: scopeFilters.find((filter) => filter.checked)?.value,
+                                kind: kindFilters.find((filter) => filter.checked)?.value,
+                                unreviewedOnly: Boolean(unreviewedOnly?.checked),
+                                overview: document.body.classList.contains("overview-mode"),
+                                active: active?.id || null,
+                            }),
+                        );
+                    } catch (_) {
+                        // Some browsers restrict storage for local file URLs.
+                        // The report remains fully usable without persistence.
+                    }
                 };
 
                 const markImageReady = (image) => {
@@ -2954,6 +3023,13 @@
                             : 0;
                         progressFill.style.transform = `scaleX(${completion})`;
                     }
+                    if (progressBlock) {
+                        progressBlock.setAttribute(
+                            "aria-label",
+                            `Review progress: ${reviewed} of ${groups.length} reviewed`,
+                        );
+                    }
+                    if (resetReview) resetReview.disabled = reviewed === 0;
                 };
 
                 const acknowledgeReview = () => {
@@ -2998,14 +3074,18 @@
                             `${active.querySelector("h1, h2")?.textContent || "Match"} selected. ${visibleGroups().length} matches shown`,
                         );
                     }
+                    if (options.persist !== false) writeStoredState();
                 };
 
-                const setOverview = (enabled) => {
+                const setOverview = (enabled, options = {}) => {
                     document.body.classList.toggle("overview-mode", enabled);
                     overview?.setAttribute("aria-pressed", enabled ? "true" : "false");
                     const label = overview?.querySelector(".control-label");
                     if (label) label.textContent = enabled ? "Focus view" : "Overview";
-                    announce(enabled ? "Overview opened" : "Focus view opened");
+                    if (options.announce !== false) {
+                        announce(enabled ? "Overview opened" : "Focus view opened");
+                    }
+                    if (options.persist !== false) writeStoredState();
                 };
 
                 const move = (offset) => {
@@ -3017,14 +3097,8 @@
                     setActive(target, { announce: true });
                 };
 
-                const setReviewed = (group, reviewed) => {
+                const syncReviewedUi = (group, reviewed) => {
                     if (!group) return;
-                    let preferredActive = null;
-                    if (reviewed && unreviewedOnly?.checked && group === active) {
-                        const visible = visibleGroups();
-                        const index = visible.indexOf(group);
-                        preferredActive = visible[index + 1] || visible[index - 1] || null;
-                    }
                     group.dataset.reviewed = reviewed ? "true" : "false";
                     const button = group.querySelector("[data-review-button]");
                     button?.setAttribute("aria-pressed", reviewed ? "true" : "false");
@@ -3039,8 +3113,20 @@
                         }
                         else link.removeAttribute("aria-label");
                     }
+                };
+
+                const setReviewed = (group, reviewed) => {
+                    if (!group) return;
+                    let preferredActive = null;
+                    if (reviewed && unreviewedOnly?.checked && group === active) {
+                        const visible = visibleGroups();
+                        const index = visible.indexOf(group);
+                        preferredActive = visible[index + 1] || visible[index - 1] || null;
+                    }
+                    syncReviewedUi(group, reviewed);
                     applyFilter(preferredActive);
                     updateProgress();
+                    writeStoredState();
                     if (reviewed) acknowledgeReview();
                     const reviewStatus = reviewed ? "Marked reviewed" : "Review mark removed";
                     announce(`${reviewStatus}. ${visibleGroups().length} matches shown`);
@@ -3088,7 +3174,38 @@
                     }
                     if (active) setActive(active);
                     else updateControls();
+                    writeStoredState();
                     announce(`${visible.length} matches shown`);
+                };
+
+                const restoreState = () => {
+                    const stored = readStoredState();
+                    if (!stored || typeof stored !== "object") return;
+                    const reviewed = new Set(
+                        Array.isArray(stored.reviewed) ? stored.reviewed : [],
+                    );
+                    groups.forEach((group) =>
+                        syncReviewedUi(group, reviewed.has(group.id)),
+                    );
+                    const storedScope = scopeFilters.find(
+                        (filter) => filter.value === stored.scope,
+                    );
+                    const storedKind = kindFilters.find(
+                        (filter) => filter.value === stored.kind,
+                    );
+                    if (storedScope) storedScope.checked = true;
+                    if (storedKind) storedKind.checked = true;
+                    if (unreviewedOnly) {
+                        unreviewedOnly.checked = stored.unreviewedOnly === true;
+                    }
+                    const restoredActive = groups.find(
+                        (group) => group.id === stored.active,
+                    );
+                    if (restoredActive) active = restoredActive;
+                    setOverview(stored.overview === true, {
+                        announce: false,
+                        persist: false,
+                    });
                 };
 
                 links.forEach((link) => {
@@ -3128,6 +3245,13 @@
                 overview?.addEventListener("click", () => {
                     setOverview(!document.body.classList.contains("overview-mode"));
                 });
+                resetReview?.addEventListener("click", () => {
+                    groups.forEach((group) => syncReviewedUi(group, false));
+                    applyFilter();
+                    updateProgress();
+                    writeStoredState();
+                    announce("Review marks cleared");
+                });
 
                 document.addEventListener("keydown", (event) => {
                     if (
@@ -3158,6 +3282,7 @@
                 });
 
                 initializeImages();
+                restoreState();
                 applyFilter();
                 updateProgress();
             })();
