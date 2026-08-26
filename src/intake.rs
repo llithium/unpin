@@ -23,7 +23,10 @@ const UNORGANIZED_NAME: &str = "Unorganized ideas";
 #[derive(Debug, Clone)]
 pub(crate) enum SourceSelection {
     Default,
-    Requested(Vec<String>),
+    Requested {
+        boards: Vec<String>,
+        include_unorganized: bool,
+    },
     Interactive,
 }
 
@@ -94,7 +97,7 @@ pub(crate) enum IntakeError {
     #[error("--interactive requires an interactive terminal")]
     BoardSelectionNotInteractive,
 
-    #[error("--boards and --interactive only apply to a username or profile URL")]
+    #[error("--boards, --unorganized, and --interactive only apply to a username or profile URL")]
     BoardFlagsWithBoardUrl,
 
     #[error("all scan sources failed")]
@@ -365,7 +368,15 @@ async fn resolve_sources(
     }
 
     let boards = client.list_profile_sources(user, progress).await?;
-    if boards.is_empty() && matches!(&selection, SourceSelection::Requested(_)) {
+    if boards.is_empty()
+        && matches!(
+            &selection,
+            SourceSelection::Requested {
+                boards,
+                ..
+            } if !boards.is_empty()
+        )
+    {
         return Err(select::SelectError::NoBoards {
             username: user.username.clone(),
         }
@@ -373,8 +384,16 @@ async fn resolve_sources(
     }
 
     let (selected, include_unorganized, prefetched_unorganized) = match selection {
-        SourceSelection::Requested(requested) => {
-            (select::resolve_requested(&requested, &boards)?, false, None)
+        SourceSelection::Requested {
+            boards: requested,
+            include_unorganized,
+        } => {
+            let selected = if requested.is_empty() {
+                Vec::new()
+            } else {
+                select::resolve_requested(&requested, &boards)?
+            };
+            (selected, include_unorganized, None)
         }
         SourceSelection::Interactive => {
             let fetched = client.collect_unorganized_source(user, progress).await;

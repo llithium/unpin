@@ -52,7 +52,7 @@ pub enum AppError {
     #[error("--interactive requires an interactive terminal")]
     BoardSelectionNotInteractive,
 
-    #[error("--boards and --interactive only apply to a username or profile URL")]
+    #[error("--boards, --unorganized, and --interactive only apply to a username or profile URL")]
     BoardFlagsWithBoardUrl,
 
     /// Every selected source failed to fetch, so the per-source reasons are
@@ -138,10 +138,13 @@ pub async fn run_with_api_root_and_progress(
 
     let selection = if cli.interactive {
         SourceSelection::Interactive
-    } else if cli.boards.is_empty() {
+    } else if cli.boards.is_empty() && !cli.unorganized {
         SourceSelection::Default
     } else {
-        SourceSelection::Requested(cli.boards.clone())
+        SourceSelection::Requested {
+            boards: cli.boards.clone(),
+            include_unorganized: cli.unorganized,
+        }
     };
     let intake = intake::collect(IntakeRequest { target, selection }, &client, progress)
         .await

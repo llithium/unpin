@@ -42,11 +42,16 @@ slugs or names (comma-separated or repeated):
 ```console
 unpin username --boards board-name,Another Board
 unpin username --interactive
+unpin username --unorganized
+unpin username --boards board-name --unorganized
 ```
 
 In the picker, arrow keys move, space toggles, enter confirms, and typing
 filters the list by name. The first row selects every board at once.
-With no board-selection option, every board is scanned.
+`--boards` by itself scans only the named boards. `--unorganized` by itself
+scans only pins saved directly to the profile as Unorganized ideas; combined
+with `--boards`, it adds those pins to the selected boards. With no
+board-selection option, every board and Unorganized ideas are scanned.
 
 Pinterest may return only part of a large board to anonymous web requests. For
 a complete view, import the Pinterest session from the browser where you are

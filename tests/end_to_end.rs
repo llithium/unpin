@@ -442,6 +442,93 @@ async fn profile_scans_include_unorganized_pins() {
     assert_eq!(report.summary.boards[0].name, "Unorganized ideas");
     assert_eq!(report.summary.pins_found, 1);
     assert_eq!(report.summary.analyzed, 1);
+    let requests = server.received_requests().await.unwrap();
+    assert_eq!(
+        requests
+            .iter()
+            .filter(|request| request.url.path() == "/resource/UserPinsResource/get/")
+            .count(),
+        1
+    );
+    assert_eq!(
+        requests
+            .iter()
+            .filter(|request| request.url.path() == "/resource/BoardFeedResource/get/")
+            .count(),
+        0
+    );
+}
+
+#[tokio::test]
+async fn explicit_unorganized_selection_skips_board_feeds() {
+    let server = MockServer::start().await;
+    let image = image_bytes(20, 20);
+    Mock::given(method("GET"))
+        .and(path("/profile-pin.png"))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .insert_header("content-type", "image/png")
+                .set_body_bytes(image),
+        )
+        .mount(&server)
+        .await;
+
+    mount_board_listing(
+        &server,
+        json!([board_entry("board-1", "Interiors", "interiors", 0)]),
+    )
+    .await;
+    mount_resource(
+        &server,
+        "UserPins",
+        json!({
+            "username": "alice",
+            "field_set_key": "grid_item",
+            "page_size": 250,
+            "bookmarks": null
+        }),
+        page(
+            json!([{
+                "id": "profile-pin",
+                "board": {
+                    "layout": "quick_saves",
+                    "url": "/alice/_quick_saves/"
+                },
+                "images": {"orig": {
+                    "url": format!("{}/profile-pin.png", server.uri()),
+                    "width": 20,
+                    "height": 20
+                }}
+            }]),
+            "-end-",
+        ),
+    )
+    .await;
+
+    let cli = Cli::try_parse_from(["unpin", "alice", "--unorganized", "--exact-only"]).unwrap();
+    let report = unpin::run_with_api_root(&cli, Some(Url::parse(&server.uri()).unwrap()))
+        .await
+        .unwrap();
+
+    assert_eq!(report.summary.boards.len(), 1);
+    assert_eq!(report.summary.boards[0].name, "Unorganized ideas");
+    assert_eq!(report.summary.pins_found, 1);
+    assert_eq!(report.summary.analyzed, 1);
+    let requests = server.received_requests().await.unwrap();
+    assert_eq!(
+        requests
+            .iter()
+            .filter(|request| request.url.path() == "/resource/UserPinsResource/get/")
+            .count(),
+        1
+    );
+    assert_eq!(
+        requests
+            .iter()
+            .filter(|request| request.url.path() == "/resource/BoardFeedResource/get/")
+            .count(),
+        0
+    );
 }
 
 #[tokio::test]
@@ -702,6 +789,32 @@ async fn scans_selected_profile_boards_as_one_pooled_report() {
         )
         .await;
     }
+    mount_resource(
+        &server,
+        "UserPins",
+        json!({
+            "username": "alice",
+            "field_set_key": "grid_item",
+            "page_size": 250,
+            "bookmarks": null
+        }),
+        page(
+            json!([{
+                "id": "203",
+                "board": {
+                    "layout": "quick_saves",
+                    "url": "/alice/_quick_saves/"
+                },
+                "images": {"orig": {
+                    "url": format!("{}/shared.png", server.uri()),
+                    "width": 20,
+                    "height": 20
+                }}
+            }]),
+            "-end-",
+        ),
+    )
+    .await;
 
     // `--boards` picks two of the three boards, by slug and by name.
     let cli = Cli::try_parse_from([
@@ -709,6 +822,7 @@ async fn scans_selected_profile_boards_as_one_pooled_report() {
         "https://www.pinterest.com/alice/",
         "--boards",
         "interiors,Mood board",
+        "--unorganized",
     ])
     .unwrap();
     let progress = RecordingProgress::default();
@@ -721,7 +835,7 @@ async fn scans_selected_profile_boards_as_one_pooled_report() {
     .unwrap();
 
     assert_eq!(report.summary.username.as_deref(), Some("alice"));
-    assert_eq!(report.summary.boards.len(), 2, "Recipes was not selected");
+    assert_eq!(report.summary.boards.len(), 3, "Recipes was not selected");
     // The non-board grid entry must never reach BoardFeed; wiremock has no
     // stub for it, so scanning it would have failed this run outright.
     assert!(progress.steps().contains(&ProgressStep::Setup {
@@ -733,27 +847,43 @@ async fn scans_selected_profile_boards_as_one_pooled_report() {
     }));
     assert_eq!(report.summary.boards[0].name, "Interiors");
     assert_eq!(report.summary.boards[1].name, "Mood board");
+    assert_eq!(report.summary.boards[2].name, "Unorganized ideas");
     // Board links point at Pinterest itself, never at the API root in use.
     assert_eq!(
         report.summary.boards[0].url,
         "https://www.pinterest.com/alice/interiors/"
     );
-    assert_eq!(report.summary.pins_found, 2);
-    assert_eq!(report.summary.pins_reported, Some(2));
-    assert_eq!(report.summary.analyzed, 2);
-    assert_eq!(report.title(), "alice 2 boards");
+    assert_eq!(report.summary.pins_found, 3);
+    assert_eq!(report.summary.pins_reported, Some(3));
+    assert_eq!(report.summary.analyzed, 3);
+    assert_eq!(report.title(), "alice 3 boards");
 
-    // The duplicate spans the two boards, which a per-board scan could not find.
+    // The duplicate spans the selected sources, which a per-source scan could not find.
     assert_eq!(report.summary.exact_groups, 1);
     let items = &report.exact_groups[0].items;
-    assert_eq!(items.len(), 2);
+    assert_eq!(items.len(), 3);
     let mut boards = items
         .iter()
         .map(|item| item.board.clone().unwrap())
         .collect::<Vec<_>>();
     boards.sort();
-    assert_eq!(boards, ["Interiors", "Mood board"]);
+    assert_eq!(boards, ["Interiors", "Mood board", "Unorganized ideas"]);
     assert_eq!(report.exact_groups[0].scope, MatchScope::CrossBoard);
+    let requests = server.received_requests().await.unwrap();
+    assert_eq!(
+        requests
+            .iter()
+            .filter(|request| request.url.path() == "/resource/UserPinsResource/get/")
+            .count(),
+        1
+    );
+    assert_eq!(
+        requests
+            .iter()
+            .filter(|request| request.url.path() == "/resource/BoardFeedResource/get/")
+            .count(),
+        2
+    );
 
     assert!(progress.steps().contains(&ProgressStep::Setup {
         task: SetupTask::UserBoards {
@@ -814,7 +944,7 @@ async fn scans_selected_profile_boards_as_one_pooled_report() {
     assert!(text.contains("ACROSS BOARDS"));
     let html =
         std::fs::read_to_string(unpin::visual::create_temporary_report(&report).unwrap()).unwrap();
-    assert!(html.contains("alice 2 boards"));
+    assert!(html.contains("alice 3 boards"));
     assert!(html.contains("class=\"board\""));
     assert!(html.contains("title=\"Interiors\""));
     assert!(html.contains("badge cross-board"));
@@ -877,6 +1007,17 @@ async fn board_selection_flags_are_rejected_for_a_board_url() {
         .unwrap_err();
 
     assert!(error.to_string().contains("only apply to a username"));
+
+    let cli = Cli::try_parse_from([
+        "unpin",
+        "https://www.pinterest.com/alice/ideas/",
+        "--unorganized",
+    ])
+    .unwrap();
+    let error = unpin::run_with_api_root(&cli, Some(Url::parse("http://127.0.0.1:1/").unwrap()))
+        .await
+        .unwrap_err();
+    assert!(error.to_string().contains("--unorganized"));
 }
 
 #[tokio::test]

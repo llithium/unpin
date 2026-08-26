@@ -18,6 +18,11 @@ pub struct Cli {
     )]
     pub boards: Vec<String>,
 
+    /// Include Unorganized ideas in an explicit profile source selection.
+    /// With no --boards values, scan only Unorganized ideas.
+    #[arg(long, conflicts_with = "interactive")]
+    pub unorganized: bool,
+
     /// Prompt to choose boards from a profile.
     #[arg(long)]
     pub interactive: bool,
@@ -166,6 +171,7 @@ mod tests {
         assert_eq!(cli.cookies_from_browser, None);
         assert_eq!(cli.cookies, None);
         assert!(cli.boards.is_empty());
+        assert!(!cli.unorganized);
         assert!(!cli.interactive);
         assert!(!cli.same_board_only);
         assert!(!cli.cross_board_only);
@@ -192,6 +198,15 @@ mod tests {
         assert_eq!(cli.boards, ["a", "b"]);
 
         assert!(Cli::try_parse_from(["unpin", "alice", "--interactive"]).is_ok());
+
+        let unorganized = Cli::try_parse_from(["unpin", "alice", "--unorganized"]).unwrap();
+        assert!(unorganized.unorganized);
+
+        let combined =
+            Cli::try_parse_from(["unpin", "alice", "--boards", "interiors", "--unorganized"])
+                .unwrap();
+        assert_eq!(combined.boards, ["interiors"]);
+        assert!(combined.unorganized);
     }
 
     #[test]
@@ -199,6 +214,9 @@ mod tests {
         let result =
             Cli::try_parse_from(["unpin", "alice", "--interactive", "--boards", "interiors"]);
 
+        assert!(result.is_err());
+
+        let result = Cli::try_parse_from(["unpin", "alice", "--interactive", "--unorganized"]);
         assert!(result.is_err());
     }
 
@@ -215,6 +233,9 @@ mod tests {
         assert!(
             Cli::try_parse_from(["unpin", "alice", "--same-board-only", "--cross-board-only"])
                 .is_err()
+        );
+        assert!(
+            Cli::try_parse_from(["unpin", "alice", "--unorganized", "--same-board-only"]).is_ok()
         );
         assert!(Cli::try_parse_from(["unpin", "alice", "--all-boards"]).is_err());
     }
