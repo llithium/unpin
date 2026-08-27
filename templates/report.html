@@ -2977,7 +2977,7 @@
                     }
                 };
 
-                const markImageReady = (image) => {
+                const markImageReady = (image, decode = false) => {
                     const reveal = () => image.classList.add("is-loaded");
                     if (image.complete && image.naturalWidth > 0) {
                         reveal();
@@ -2985,7 +2985,7 @@
                     }
                     image.addEventListener("load", reveal, { once: true });
                     image.addEventListener("error", reveal, { once: true });
-                    if (typeof image.decode === "function") {
+                    if (decode && typeof image.decode === "function") {
                         image.decode().then(reveal).catch(() => {});
                     }
                 };
@@ -2993,13 +2993,15 @@
                 const warmGroupImages = (group) => {
                     group?.querySelectorAll(".image-stage img").forEach((image) => {
                         image.loading = "eager";
-                        markImageReady(image);
+                        markImageReady(image, true);
                     });
                 };
 
                 const initializeImages = () => {
                     groups.forEach((group) => {
-                        group.querySelectorAll(".image-stage img").forEach(markImageReady);
+                        group
+                            .querySelectorAll(".image-stage img")
+                            .forEach((image) => markImageReady(image));
                     });
                 };
 

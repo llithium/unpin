@@ -27,7 +27,10 @@ const MAX_API_RESPONSE_BYTES: u64 = 16 * 1024 * 1024;
 /// returns a silently truncated feed.
 const MAX_FEED_RESULTS: usize = 50_000;
 const DEFAULT_ROOT: &str = "https://www.pinterest.com/";
-const BOARD_PAGE_SIZE: usize = 25;
+/// Profile board listings are independent items, so use the largest page size
+/// currently accepted by Pinterest. `paginate` removes this option and falls
+/// back to the provider default if the endpoint rejects it.
+const BOARD_PAGE_SIZE: usize = 250;
 /// Pin feeds default to 25 results per page, and pagination is strictly
 /// sequential because each page is addressed by the previous page's bookmark.
 /// Asking for larger pages is the only way to shorten that chain.

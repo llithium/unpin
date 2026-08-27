@@ -523,6 +523,9 @@ mod tests {
         assert!(html.contains("const warmGroupImages = (group)"));
         assert!(html.contains("const initializeImages = () =>"));
         assert!(html.contains("initializeImages();"));
+        assert!(html.contains("const markImageReady = (image, decode = false)"));
+        assert!(html.contains("markImageReady(image, true)"));
+        assert!(!html.contains("forEach(markImageReady)"));
         assert!(html.contains("warmNearbyImages();"));
         assert!(html.contains("image.loading = \"eager\""));
         assert!(html.contains("link.addEventListener(\"pointerenter\", warmTarget)"));

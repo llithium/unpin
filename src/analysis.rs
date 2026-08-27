@@ -40,9 +40,14 @@ const STRUCTURAL_SIGNATURE_SIZE: u32 = 64;
 const DIFFERENCE_HASH_WIDTH: u32 = 9;
 const DIFFERENCE_HASH_HEIGHT: u32 = 8;
 const MIN_STRUCTURAL_SIMILARITY: f64 = 0.97;
-const CACHE_FORMAT_VERSION: u8 = 2;
+/// Aspect-ratio buckets are expressed in log space so the same relative
+/// tolerance works for portrait, landscape, and square images. A ±3 lookup
+/// covers every pair allowed by the one-percent final check below.
+const ASPECT_RATIO_BUCKET_WIDTH: f64 = 0.005;
+const ASPECT_RATIO_BUCKET_RADIUS: i64 = 3;
+const CACHE_FORMAT_VERSION: u8 = 3;
 const CACHE_MAX_AGE: Duration = Duration::from_secs(30 * 24 * 60 * 60);
-const CACHE_ENTRY_SUBDIRECTORY: &str = "fingerprints-v2";
+const CACHE_ENTRY_SUBDIRECTORY: &str = "fingerprints-v3";
 
 struct ImageAnalysisLimits {
     max_image_bytes: u64,
@@ -82,6 +87,8 @@ struct AnalyzedImage {
     sha256: String,
     difference_hash: u64,
     structural_signature: Box<[u8]>,
+    structural_sum: u64,
+    structural_sum_squares: u64,
 }
 
 #[derive(Debug, Clone, Eq, PartialEq, Serialize, Deserialize)]
@@ -95,6 +102,12 @@ struct ImageFingerprint {
     /// it back as thousands of decimal integers dominated warm-cache runs.
     #[serde(with = "hex_bytes")]
     structural_signature: Box<[u8]>,
+    structural_sum: u64,
+    structural_sum_squares: u64,
+    /// Exact-only runs intentionally omit the visual signature and avoid
+    /// decoding the image. Such entries are usable for exact matching, but a
+    /// visual run must treat them as misses and refresh them.
+    visual_ready: bool,
 }
 
 mod hex_bytes {
@@ -154,7 +167,7 @@ impl FingerprintCache {
         self.directory.join(format!("{key}.json"))
     }
 
-    fn get(&self, media_url: &str) -> Option<ImageFingerprint> {
+    fn get(&self, media_url: &str, require_visual: bool) -> Option<ImageFingerprint> {
         let path = self.entry_path(media_url);
         let metadata = fs::metadata(&path).ok()?;
         let modified = metadata.modified().ok()?;
@@ -176,7 +189,11 @@ impl FingerprintCache {
                 return None;
             }
         };
-        Some(cached.fingerprint)
+        let fingerprint = cached.fingerprint;
+        if require_visual && !fingerprint.visual_ready {
+            return None;
+        }
+        Some(fingerprint)
     }
 
     fn put(&self, media_url: &str, fingerprint: &ImageFingerprint) {
@@ -371,7 +388,7 @@ async fn analyze_pins_with_limits(
     // Cache hits are resolved up front in one blocking batch. Doing them inside
     // the download stream put thousands of small synchronous reads on the async
     // runtime and made a fully cached run wait behind the network limit.
-    let hits = cached_fingerprints(cache.as_ref(), &entries).await;
+    let hits = cached_fingerprints(cache.as_ref(), &entries, !exact_only).await;
     let mut misses = Vec::new();
     for ((media_url, pins), hit) in entries.into_iter().zip(hits) {
         match hit {
@@ -414,7 +431,11 @@ async fn analyze_pins_with_limits(
                         // Keep the compressed-buffer reservation until the
                         // decoded image and its derived hashes are finished.
                         let _buffer_permit = buffer_permit;
-                        let fingerprint = fingerprint_image(&bytes, max_decoded_pixels)?;
+                        let fingerprint = if exact_only {
+                            fingerprint_image_exact(&bytes, max_decoded_pixels)?
+                        } else {
+                            fingerprint_image(&bytes, max_decoded_pixels)?
+                        };
                         if let Some(cache) = &cache {
                             cache.put(&cached_url, &fingerprint);
                         }
@@ -480,6 +501,7 @@ async fn analyze_pins_with_limits(
 async fn cached_fingerprints(
     cache: Option<&FingerprintCache>,
     entries: &[(String, Vec<Pin>)],
+    require_visual: bool,
 ) -> Vec<Option<ImageFingerprint>> {
     let Some(cache) = cache.cloned() else {
         return vec![None; entries.len()];
@@ -491,7 +513,7 @@ async fn cached_fingerprints(
     let total = urls.len();
     tokio::task::spawn_blocking(move || {
         urls.iter()
-            .map(|media_url| cache.get(media_url))
+            .map(|media_url| cache.get(media_url, require_visual))
             .collect::<Vec<_>>()
     })
     .await
@@ -515,6 +537,8 @@ fn analyzed_images(
             sha256: fingerprint.sha256.clone(),
             difference_hash: fingerprint.difference_hash,
             structural_signature: fingerprint.structural_signature.clone(),
+            structural_sum: fingerprint.structural_sum,
+            structural_sum_squares: fingerprint.structural_sum_squares,
         })
         .collect()
 }
@@ -529,7 +553,8 @@ fn fingerprint_image(bytes: &[u8], max_decoded_pixels: u64) -> Result<ImageFinge
     }
 
     let sha256 = hex::encode(Sha256::digest(bytes));
-    let (difference_hash, structural_signature) = fingerprint_hashes(&image);
+    let (difference_hash, structural_signature, structural_sum, structural_sum_squares) =
+        fingerprint_hashes(&image);
 
     Ok(ImageFingerprint {
         width,
@@ -538,6 +563,35 @@ fn fingerprint_image(bytes: &[u8], max_decoded_pixels: u64) -> Result<ImageFinge
         sha256,
         difference_hash,
         structural_signature,
+        structural_sum,
+        structural_sum_squares,
+        visual_ready: true,
+    })
+}
+
+/// Computes only the byte identity and dimensions needed by an exact-only
+/// scan. Reading the image header avoids allocating and decoding the full
+/// raster when no perceptual comparison will be performed.
+fn fingerprint_image_exact(
+    bytes: &[u8],
+    max_decoded_pixels: u64,
+) -> Result<ImageFingerprint, String> {
+    let (width, height) = image_dimensions(bytes)?;
+    checked_pixel_count(width, height, max_decoded_pixels)?;
+    if width == 0 || height == 0 {
+        return Err("decoded image has zero width or height".into());
+    }
+
+    Ok(ImageFingerprint {
+        width,
+        height,
+        byte_size: bytes.len() as u64,
+        sha256: hex::encode(Sha256::digest(bytes)),
+        difference_hash: 0,
+        structural_signature: Vec::new().into_boxed_slice(),
+        structural_sum: 0,
+        structural_sum_squares: 0,
+        visual_ready: false,
     })
 }
 
@@ -608,12 +662,16 @@ fn image_reader(bytes: &[u8]) -> Result<ImageReader<Cursor<&[u8]>>, String> {
         .map_err(|error| format!("could not identify image format: {error}"))
 }
 
+fn image_dimensions(bytes: &[u8]) -> Result<(u32, u32), String> {
+    image_reader(bytes)?
+        .into_dimensions()
+        .map_err(|error| format!("could not read image dimensions: {error}"))
+}
+
 fn decode_image(bytes: &[u8], max_decoded_pixels: u64) -> Result<DynamicImage, String> {
     // Read only the format header first. This rejects a decompression bomb
     // before `DynamicImage::from_decoder` allocates the full raster.
-    let (width, height) = image_reader(bytes)?
-        .into_dimensions()
-        .map_err(|error| format!("could not read image dimensions: {error}"))?;
+    let (width, height) = image_dimensions(bytes)?;
     checked_pixel_count(width, height, max_decoded_pixels)?;
 
     // `max_alloc` is non-strict for some codecs, so the explicit dimension
@@ -675,7 +733,7 @@ fn concise_reqwest_error(error: &reqwest::Error) -> &'static str {
 /// comes from. The difference-hash grid is then taken off the 64×64 signature
 /// rather than the original, so the second downscale touches four thousand
 /// pixels instead of several million.
-fn fingerprint_hashes(image: &DynamicImage) -> (u64, Box<[u8]>) {
+fn fingerprint_hashes(image: &DynamicImage) -> (u64, Box<[u8]>, u64, u64) {
     let luminance = image.to_luma8();
     let signature = imageops::resize(
         &luminance,
@@ -701,9 +759,27 @@ fn fingerprint_hashes(image: &DynamicImage) -> (u64, Box<[u8]>) {
         }
     }
 
-    (hash, signature.into_raw().into_boxed_slice())
+    let structural_signature = signature.into_raw().into_boxed_slice();
+    let (structural_sum, structural_sum_squares) = structural_statistics(&structural_signature);
+
+    (
+        hash,
+        structural_signature,
+        structural_sum,
+        structural_sum_squares,
+    )
 }
 
+fn structural_statistics(signature: &[u8]) -> (u64, u64) {
+    signature
+        .iter()
+        .fold((0_u64, 0_u64), |(sum, squares), &value| {
+            let value = u64::from(value);
+            (sum + value, squares + value * value)
+        })
+}
+
+#[cfg(test)]
 fn structural_similarity(left: &[u8], right: &[u8]) -> f64 {
     debug_assert_eq!(left.len(), right.len());
     if left.is_empty() || left.len() != right.len() {
@@ -726,6 +802,44 @@ fn structural_similarity(left: &[u8], right: &[u8]) -> f64 {
 
     let denominator = (left_square * right_square).sqrt();
     if denominator <= f64::EPSILON {
+        0.0
+    } else {
+        (product / denominator).clamp(-1.0, 1.0)
+    }
+}
+
+/// Compares signatures using statistics calculated once during fingerprinting.
+/// The per-pair loop therefore computes only the dot product instead of
+/// repeatedly calculating both means and both variances.
+fn structural_similarity_with_stats(
+    left: &[u8],
+    left_sum: u64,
+    left_sum_squares: u64,
+    right: &[u8],
+    right_sum: u64,
+    right_sum_squares: u64,
+) -> f64 {
+    debug_assert_eq!(left.len(), right.len());
+    if left.is_empty() || left.len() != right.len() {
+        return 0.0;
+    }
+
+    let count = left.len() as f64;
+    let product = left
+        .iter()
+        .zip(right)
+        .map(|(&left, &right)| u64::from(left) * u64::from(right))
+        .sum::<u64>() as f64;
+    let left_sum = left_sum as f64;
+    let right_sum = right_sum as f64;
+    let left_sum_squares = left_sum_squares as f64;
+    let right_sum_squares = right_sum_squares as f64;
+    let product = product - left_sum * right_sum / count;
+    let left_square = (left_sum_squares - left_sum * left_sum / count).max(0.0);
+    let right_square = (right_sum_squares - right_sum * right_sum / count).max(0.0);
+    let denominator = (left_square * right_square).sqrt();
+
+    if !denominator.is_finite() || denominator <= f64::EPSILON {
         0.0
     } else {
         (product / denominator).clamp(-1.0, 1.0)
@@ -760,32 +874,47 @@ fn build_exact_groups(images: &[AnalyzedImage]) -> Vec<DuplicateGroup> {
 }
 
 fn build_visual_candidates(images: &[AnalyzedImage], threshold: u8) -> Vec<VisualCandidate> {
-    let mut tree = BkTree::default();
+    let mut trees = HashMap::<i64, BkTree>::new();
     let mut candidates = Vec::new();
 
     for (index, image) in images.iter().enumerate() {
-        for other_index in tree.query(image.difference_hash, threshold) {
-            let other = &images[other_index];
-            if image.sha256 == other.sha256 || !aspect_ratios_match(image, other) {
-                continue;
-            }
-            let structural_similarity =
-                structural_similarity(&image.structural_signature, &other.structural_signature);
-            if structural_similarity < MIN_STRUCTURAL_SIMILARITY {
-                continue;
-            }
+        let bucket = aspect_ratio_bucket(image);
+        for offset in -ASPECT_RATIO_BUCKET_RADIUS..=ASPECT_RATIO_BUCKET_RADIUS {
+            if let Some(tree) = trees.get(&(bucket + offset)) {
+                for other_index in tree.query(image.difference_hash, threshold) {
+                    let other = &images[other_index];
+                    if image.sha256 == other.sha256 || !aspect_ratios_match(image, other) {
+                        continue;
+                    }
+                    let structural_similarity = structural_similarity_with_stats(
+                        &image.structural_signature,
+                        image.structural_sum,
+                        image.structural_sum_squares,
+                        &other.structural_signature,
+                        other.structural_sum,
+                        other.structural_sum_squares,
+                    );
+                    if structural_similarity < MIN_STRUCTURAL_SIMILARITY {
+                        continue;
+                    }
 
-            let distance = (image.difference_hash ^ other.difference_hash).count_ones() as u8;
-            let members = [other_index, index];
-            let ranked = ranked_items(images, &members);
-            candidates.push(VisualCandidate {
-                hash_distance: distance,
-                similarity_percent: (structural_similarity * 100.0).floor() as u8,
-                scope: MatchScope::of(&ranked),
-                items: [ranked[0].clone(), ranked[1].clone()],
-            });
+                    let distance =
+                        (image.difference_hash ^ other.difference_hash).count_ones() as u8;
+                    let members = [other_index, index];
+                    let ranked = ranked_items(images, &members);
+                    candidates.push(VisualCandidate {
+                        hash_distance: distance,
+                        similarity_percent: (structural_similarity * 100.0).floor() as u8,
+                        scope: MatchScope::of(&ranked),
+                        items: [ranked[0].clone(), ranked[1].clone()],
+                    });
+                }
+            }
         }
-        tree.insert(image.difference_hash, index);
+        trees
+            .entry(bucket)
+            .or_default()
+            .insert(image.difference_hash, index);
     }
 
     candidates.sort_by(|left, right| {
@@ -797,6 +926,11 @@ fn build_visual_candidates(images: &[AnalyzedImage], threshold: u8) -> Vec<Visua
             .then_with(|| left.items[1].pin_id.cmp(&right.items[1].pin_id))
     });
     candidates
+}
+
+fn aspect_ratio_bucket(image: &AnalyzedImage) -> i64 {
+    let ratio = f64::from(image.width) / f64::from(image.height);
+    (ratio.ln() / ASPECT_RATIO_BUCKET_WIDTH).floor() as i64
 }
 
 fn aspect_ratios_match(left: &AnalyzedImage, right: &AnalyzedImage) -> bool {
@@ -925,17 +1059,24 @@ mod tests {
     use super::*;
 
     fn fingerprint() -> ImageFingerprint {
+        let structural_signature = vec![0, 64, 128, 255].into_boxed_slice();
+        let (structural_sum, structural_sum_squares) = structural_statistics(&structural_signature);
         ImageFingerprint {
             width: 1200,
             height: 800,
             byte_size: 42_000,
             sha256: "abc123".into(),
             difference_hash: 0xfeed,
-            structural_signature: vec![0, 64, 128, 255].into_boxed_slice(),
+            structural_signature,
+            structural_sum,
+            structural_sum_squares,
+            visual_ready: true,
         }
     }
 
     fn analyzed(id: &str, width: u32, height: u32, bytes: u64, hash: u64) -> AnalyzedImage {
+        let structural_signature = vec![0, 10, 50, 100, 180, 255].into_boxed_slice();
+        let (structural_sum, structural_sum_squares) = structural_statistics(&structural_signature);
         AnalyzedImage {
             pin_id: id.into(),
             pin_url: format!("https://www.pinterest.com/pin/{id}/"),
@@ -946,7 +1087,9 @@ mod tests {
             byte_size: bytes,
             sha256: format!("sha-{id}"),
             difference_hash: hash,
-            structural_signature: vec![0, 10, 50, 100, 180, 255].into_boxed_slice(),
+            structural_signature,
+            structural_sum,
+            structural_sum_squares,
         }
     }
 
@@ -990,9 +1133,9 @@ mod tests {
         let media_url = "https://i.pinimg.com/originals/private-looking-name.jpg?token=value";
         let expected = fingerprint();
 
-        assert_eq!(cache.get(media_url), None);
+        assert_eq!(cache.get(media_url, true), None);
         cache.put(media_url, &expected);
-        assert_eq!(cache.get(media_url), Some(expected));
+        assert_eq!(cache.get(media_url, true), Some(expected));
 
         let entries = fs::read_dir(&cache.directory)
             .unwrap()
@@ -1006,6 +1149,53 @@ mod tests {
     }
 
     #[test]
+    fn exact_fingerprint_reads_dimensions_without_decoding_pixels() {
+        let mut encoded = Cursor::new(Vec::new());
+        DynamicImage::new_rgb8(2, 2)
+            .write_to(&mut encoded, image::ImageFormat::Png)
+            .unwrap();
+        let encoded = encoded.into_inner();
+        let bytes = (0..encoded.len())
+            .find_map(|length| {
+                let candidate = &encoded[..length];
+                image_dimensions(candidate)
+                    .ok()
+                    .filter(|_| fingerprint_image(candidate, MAX_DECODED_PIXELS).is_err())
+                    .map(|_| candidate.to_vec())
+            })
+            .expect("PNG should expose dimensions before its payload is complete");
+
+        let exact = fingerprint_image_exact(&bytes, MAX_DECODED_PIXELS).unwrap();
+        assert_eq!((exact.width, exact.height), (2, 2));
+        assert!(!exact.visual_ready);
+        assert!(exact.structural_signature.is_empty());
+        assert!(fingerprint_image(&bytes, MAX_DECODED_PIXELS).is_err());
+    }
+
+    #[test]
+    fn partial_exact_cache_entries_are_refreshed_for_visual_scans() {
+        let directory = tempfile::tempdir().unwrap();
+        let cache = FingerprintCache::new(directory.path().to_path_buf());
+        let media_url = "https://i.pinimg.com/originals/exact-only.jpg";
+        let partial = ImageFingerprint {
+            width: 1200,
+            height: 800,
+            byte_size: 42_000,
+            sha256: "abc123".into(),
+            difference_hash: 0,
+            structural_signature: Vec::new().into_boxed_slice(),
+            structural_sum: 0,
+            structural_sum_squares: 0,
+            visual_ready: false,
+        };
+
+        cache.put(media_url, &partial);
+
+        assert!(cache.get(media_url, false).is_some());
+        assert!(cache.get(media_url, true).is_none());
+    }
+
+    #[test]
     fn fingerprint_cache_discards_corrupt_or_old_format_entries() {
         let directory = tempfile::tempdir().unwrap();
         let cache = FingerprintCache::new(directory.path().to_path_buf());
@@ -1014,7 +1204,7 @@ mod tests {
         fs::create_dir_all(&cache.directory).unwrap();
 
         fs::write(&path, b"not json").unwrap();
-        assert_eq!(cache.get(media_url), None);
+        assert_eq!(cache.get(media_url, true), None);
         assert!(!path.exists());
 
         let old = CachedFingerprint {
@@ -1022,7 +1212,7 @@ mod tests {
             fingerprint: fingerprint(),
         };
         fs::write(&path, serde_json::to_vec(&old).unwrap()).unwrap();
-        assert_eq!(cache.get(media_url), None);
+        assert_eq!(cache.get(media_url, true), None);
         assert!(!path.exists());
     }
 
@@ -1417,6 +1607,21 @@ mod tests {
     }
 
     #[test]
+    fn visual_candidates_keep_close_aspect_ratios_across_bucket_boundaries() {
+        let images = [
+            analyzed("1", 1000, 1000, 500, 0),
+            analyzed("2", 1009, 1000, 400, 0b11),
+        ];
+
+        assert!(aspect_ratios_match(&images[0], &images[1]));
+        assert!(
+            (aspect_ratio_bucket(&images[0]) - aspect_ratio_bucket(&images[1])).abs()
+                <= ASPECT_RATIO_BUCKET_RADIUS
+        );
+        assert_eq!(build_visual_candidates(&images, 2).len(), 1);
+    }
+
+    #[test]
     fn visual_candidates_reject_structural_false_positives() {
         let mut left = analyzed("1", 1000, 1000, 500, 0);
         let mut right = analyzed("2", 500, 500, 400, 0b1);
@@ -1426,6 +1631,10 @@ mod tests {
             left.structural_signature[y * 64 + 16] = 0;
             right.structural_signature[y * 64 + 48] = 0;
         }
+        (left.structural_sum, left.structural_sum_squares) =
+            structural_statistics(&left.structural_signature);
+        (right.structural_sum, right.structural_sum_squares) =
+            structural_statistics(&right.structural_signature);
 
         assert!(build_visual_candidates(&[left, right], 5).is_empty());
     }
@@ -1460,5 +1669,27 @@ mod tests {
             .collect::<Vec<_>>();
 
         assert!(structural_similarity(&left, &right) > MIN_STRUCTURAL_SIMILARITY);
+    }
+
+    #[test]
+    fn precomputed_structural_statistics_match_the_original_similarity() {
+        let left = (0..=255).collect::<Vec<u8>>();
+        let right = left
+            .iter()
+            .map(|value| (f64::from(*value) * 0.8 + 20.0).round() as u8)
+            .collect::<Vec<_>>();
+        let (left_sum, left_sum_squares) = structural_statistics(&left);
+        let (right_sum, right_sum_squares) = structural_statistics(&right);
+
+        let expected = structural_similarity(&left, &right);
+        let actual = structural_similarity_with_stats(
+            &left,
+            left_sum,
+            left_sum_squares,
+            &right,
+            right_sum,
+            right_sum_squares,
+        );
+        assert!((expected - actual).abs() < 1e-12);
     }
 }

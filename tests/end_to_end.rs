@@ -337,7 +337,7 @@ async fn mount_board_listing(server: &MockServer, boards: serde_json::Value) {
             "field_set_key": "profile_grid_item",
             "sort": "last_pinned_to",
             "filter_stories": false,
-            "page_size": 25,
+            "page_size": 250,
             "include_archived": true,
             "bookmarks": null
         }),
@@ -721,7 +721,7 @@ async fn scans_selected_profile_boards_as_one_pooled_report() {
             "field_set_key": "profile_grid_item",
             "sort": "last_pinned_to",
             "filter_stories": false,
-            "page_size": 25,
+            "page_size": 250,
             "include_archived": true,
             "bookmarks": null
         }),
@@ -1149,6 +1149,53 @@ async fn an_unsupported_page_size_falls_back_to_the_default_page() {
 
     assert_eq!(result.pins_found, 1);
     assert_eq!(result.pins[0].id, "201");
+}
+
+#[tokio::test]
+async fn profile_board_listing_falls_back_when_the_large_page_is_rejected() {
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/resource/BoardsResource/get/"))
+        .and(query_param(
+            "data",
+            request_data(json!({
+                "username": "alice",
+                "field_set_key": "profile_grid_item",
+                "sort": "last_pinned_to",
+                "filter_stories": false,
+                "page_size": 250,
+                "include_archived": true,
+                "bookmarks": null
+            })),
+        ))
+        .respond_with(ResponseTemplate::new(400))
+        .expect(1)
+        .mount(&server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/resource/BoardsResource/get/"))
+        .and(query_param(
+            "data",
+            request_data(json!({
+                "username": "alice",
+                "field_set_key": "profile_grid_item",
+                "sort": "last_pinned_to",
+                "filter_stories": false,
+                "bookmarks": null,
+                "include_archived": true
+            })),
+        ))
+        .respond_with(ResponseTemplate::new(200).set_body_json(page(json!([]), "-end-")))
+        .expect(1)
+        .mount(&server)
+        .await;
+
+    let cli = Cli::try_parse_from(["unpin", "alice", "--boards", "ideas"]).unwrap();
+    let error = unpin::run_with_api_root(&cli, Some(Url::parse(&server.uri()).unwrap()))
+        .await
+        .unwrap_err();
+
+    assert!(error.to_string().contains("has no boards"));
 }
 
 /// A rejection that the fallback cannot fix must still surface as an error
