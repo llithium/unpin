@@ -3,6 +3,7 @@ use std::fmt::Write;
 
 use console::Style;
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 
 use crate::pinterest::SkippedPin;
 
@@ -112,12 +113,28 @@ pub struct DuplicateGroup {
     pub items: Vec<ReportItem>,
 }
 
+impl DuplicateGroup {
+    /// Stable identity for review state. Item order is deliberately ignored so
+    /// a ranking change cannot make an otherwise unchanged group look new.
+    pub(crate) fn review_key(&self) -> String {
+        match_review_key("exact", self.scope, &self.items)
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, Eq, PartialEq)]
 pub struct VisualCandidate {
     pub hash_distance: u8,
     pub similarity_percent: u8,
     pub scope: MatchScope,
     pub items: [ReportItem; 2],
+}
+
+impl VisualCandidate {
+    /// Stable identity for review state. A candidate is the same review item
+    /// when its two pin members and board scope are unchanged.
+    pub(crate) fn review_key(&self) -> String {
+        match_review_key("visual", self.scope, &self.items)
+    }
 }
 
 /// One board that contributed pins to this report.
@@ -172,6 +189,34 @@ impl Report {
                 }
             }
         }
+    }
+
+    /// Stable browser-storage namespace for this set of scan sources.
+    ///
+    /// The temporary HTML filename changes on every run, so it cannot be used
+    /// as the namespace if review marks are meant to survive a new report.
+    pub(crate) fn review_storage_key(&self) -> String {
+        let mut sources = self
+            .summary
+            .boards
+            .iter()
+            .map(|board| (board.name.as_str(), board.url.as_str()))
+            .collect::<Vec<_>>();
+        sources.sort_unstable();
+
+        let mut canonical = String::from("unpin-review-v2\0");
+        if let Some(username) = &self.summary.username {
+            canonical.push_str(username);
+        }
+        canonical.push('\0');
+        for (name, url) in sources {
+            canonical.push_str(name);
+            canonical.push('\0');
+            canonical.push_str(url);
+            canonical.push('\0');
+        }
+
+        hex::encode(Sha256::digest(canonical.as_bytes()))
     }
 
     /// Board labels and scope tags are noise when everything came from the same
@@ -379,6 +424,15 @@ impl Report {
     }
 }
 
+fn match_review_key(kind: &str, scope: MatchScope, items: &[ReportItem]) -> String {
+    let mut pin_ids = items
+        .iter()
+        .map(|item| item.pin_id.as_str())
+        .collect::<Vec<_>>();
+    pin_ids.sort_unstable();
+    format!("{kind}:{}:{}", scope.css_class(), pin_ids.join(","))
+}
+
 fn render_items(output: &mut String, items: &[ReportItem], theme: &TextTheme, show_boards: bool) {
     for item in items {
         let status = format!("{:<8}", item.recommendation.label());
@@ -503,6 +557,62 @@ mod tests {
             byte_size: u64::from(width) * 10,
             recommendation: Recommendation::Keep,
         }
+    }
+
+    #[test]
+    fn review_keys_ignore_item_order_but_distinguish_match_kind_and_scope() {
+        let first = item("1", "Interiors", 1200);
+        let second = item("2", "Interiors", 800);
+        let exact = DuplicateGroup {
+            scope: MatchScope::SameBoard,
+            items: vec![first.clone(), second.clone()],
+        };
+        let reversed = DuplicateGroup {
+            scope: MatchScope::SameBoard,
+            items: vec![second.clone(), first.clone()],
+        };
+        let visual = VisualCandidate {
+            hash_distance: 1,
+            similarity_percent: 99,
+            scope: MatchScope::SameBoard,
+            items: [first, second],
+        };
+        let cross_board = DuplicateGroup {
+            scope: MatchScope::CrossBoard,
+            items: reversed.items.clone(),
+        };
+
+        assert_eq!(exact.review_key(), reversed.review_key());
+        assert_ne!(exact.review_key(), visual.review_key());
+        assert_ne!(exact.review_key(), cross_board.review_key());
+    }
+
+    #[test]
+    fn review_storage_key_ignores_scan_source_order() {
+        let mut report = Report {
+            summary: Summary {
+                username: Some("alice".into()),
+                boards: vec![scanned("Interiors", 1), scanned("Mood board", 1)],
+                pins_reported: Some(2),
+                pins_found: 2,
+                analyzed: 2,
+                skipped: 0,
+                exact_groups: 0,
+                visual_candidates: 0,
+            },
+            exact_groups: vec![],
+            visual_candidates: vec![],
+            skipped: vec![],
+            warnings: vec![],
+            visual_report: None,
+        };
+        let original = report.review_storage_key();
+
+        report.summary.boards.reverse();
+        assert_eq!(original, report.review_storage_key());
+
+        report.summary.username = Some("bob".into());
+        assert_ne!(original, report.review_storage_key());
     }
 
     #[test]

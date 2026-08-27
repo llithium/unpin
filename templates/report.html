@@ -1,5 +1,5 @@
 <!doctype html>
-<html lang="en">
+<html lang="en" data-review-storage-key="{{ report.review_storage_key() }}">
     <head>
         <meta charset="utf-8" />
         <meta name="viewport" content="width=device-width, initial-scale=1" />
@@ -2764,6 +2764,7 @@
                         data-group
                         data-scope="{{ group.scope.css_class() }}"
                         data-kind="exact"
+                        data-review-key="{{ group.review_key() }}"
                         data-reviewed="false"
                     >
                         <div class="match-heading">
@@ -2807,6 +2808,7 @@
                         data-group
                         data-scope="{{ candidate.scope.css_class() }}"
                         data-kind="visual"
+                        data-review-key="{{ candidate.review_key() }}"
                         data-reviewed="false"
                     >
                         <div class="match-heading">
@@ -2902,8 +2904,9 @@
                     <footer>
                         This local report loads images from Pinterest and may
                         disappear when your operating system cleans temporary
-                        files. Review marks survive reloads in this browser tab;
-                        unpin never changes your Pinterest account.
+                        files. Review marks are kept in this browser and reused
+                        only when the matched-group set is unchanged; unpin
+                        never changes your Pinterest account.
                     </footer>
                 </main>
             </div>
@@ -2937,7 +2940,10 @@
                 const progressBlock = document.querySelector(".progress-block");
                 const resetReview = document.querySelector("#reset-review");
                 const status = document.querySelector("#interaction-status");
-                const storageKey = `unpin:review:${window.location.pathname}`;
+                const storageKey = `unpin:review:v2:${document.documentElement.dataset.reviewStorageKey}`;
+                const currentGroupKeys = groups
+                    .map((group) => group.dataset.reviewKey)
+                    .filter((key) => typeof key === "string" && key.length > 0);
                 let active = groups[0] || null;
 
                 const visibleGroups = () =>
@@ -2949,7 +2955,7 @@
 
                 const readStoredState = () => {
                     try {
-                        const value = window.sessionStorage.getItem(storageKey);
+                        const value = window.localStorage.getItem(storageKey);
                         return value ? JSON.parse(value) : null;
                     } catch (_) {
                         return null;
@@ -2958,17 +2964,19 @@
 
                 const writeStoredState = () => {
                     try {
-                        window.sessionStorage.setItem(
+                        window.localStorage.setItem(
                             storageKey,
                             JSON.stringify({
                                 reviewed: groups
                                     .filter((group) => group.dataset.reviewed === "true")
-                                    .map((group) => group.id),
+                                    .map((group) => group.dataset.reviewKey)
+                                    .filter((key) => typeof key === "string" && key.length > 0),
+                                groups: currentGroupKeys,
                                 scope: scopeFilters.find((filter) => filter.checked)?.value,
                                 kind: kindFilters.find((filter) => filter.checked)?.value,
                                 unreviewedOnly: Boolean(unreviewedOnly?.checked),
                                 overview: document.body.classList.contains("overview-mode"),
-                                active: active?.id || null,
+                                active: active?.dataset.reviewKey || null,
                             }),
                         );
                     } catch (_) {
@@ -3183,12 +3191,27 @@
                 const restoreState = () => {
                     const stored = readStoredState();
                     if (!stored || typeof stored !== "object") return;
+                    const storedGroupKeys = Array.isArray(stored.groups) ? stored.groups : [];
+                    const storedGroupsAreValid = storedGroupKeys.every(
+                        (key) => typeof key === "string" && key.length > 0,
+                    );
+                    const current = new Set(currentGroupKeys);
+                    const previous = new Set(storedGroupKeys);
+                    const groupsUnchanged =
+                        storedGroupsAreValid &&
+                        current.size === currentGroupKeys.length &&
+                        previous.size === storedGroupKeys.length &&
+                        current.size === previous.size &&
+                        [...current].every((key) => previous.has(key));
                     const reviewed = new Set(
-                        Array.isArray(stored.reviewed) ? stored.reviewed : [],
+                        groupsUnchanged && Array.isArray(stored.reviewed)
+                            ? stored.reviewed.filter((key) => current.has(key))
+                            : [],
                     );
                     groups.forEach((group) =>
-                        syncReviewedUi(group, reviewed.has(group.id)),
+                        syncReviewedUi(group, reviewed.has(group.dataset.reviewKey)),
                     );
+                    if (!groupsUnchanged) return;
                     const storedScope = scopeFilters.find(
                         (filter) => filter.value === stored.scope,
                     );
@@ -3198,10 +3221,14 @@
                     if (storedScope) storedScope.checked = true;
                     if (storedKind) storedKind.checked = true;
                     if (unreviewedOnly) {
-                        unreviewedOnly.checked = stored.unreviewedOnly === true;
+                        // A valid review cache is a work queue: reviewed matches
+                        // are omitted from the next run unless the user opts
+                        // back into seeing them with this checkbox.
+                        unreviewedOnly.checked =
+                            stored.unreviewedOnly === true || reviewed.size > 0;
                     }
                     const restoredActive = groups.find(
-                        (group) => group.id === stored.active,
+                        (group) => group.dataset.reviewKey === stored.active,
                     );
                     if (restoredActive) active = restoredActive;
                     setOverview(stored.overview === true, {

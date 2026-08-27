@@ -170,6 +170,12 @@ Run `unpin --help` for the complete interface.
   it. Fingerprint entries live in an unpin-owned subdirectory beneath that root.
   The entry format is versioned; upgrading `unpin` past a format change means
   one full re-download before the cache is warm again.
+- The visual report keeps reviewed-group marks in this browser's local storage.
+  A later run for the same scan sources reuses those marks only when the
+  complete set of exact groups and visual candidates is unchanged; any
+  addition or removal clears the marks so a changed queue is reviewed from the
+  beginning. Reused reviewed groups are hidden by default, and `Reset` or
+  `Unreviewed only` controls the current report.
 - Identical downloaded bytes are grouped using SHA-256.
 - Other images first become candidates when their 64-bit difference hashes are
   within the selected threshold and their aspect ratios differ by no more than

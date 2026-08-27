@@ -206,10 +206,10 @@ mod tests {
         assert!(html.contains("aria-pressed=\"false\""));
         assert!(html.contains("quickWins.setAttribute(\"aria-pressed\""));
         assert!(html.contains("id=\"reset-review\""));
-        assert!(html.contains("window.sessionStorage.setItem("));
+        assert!(html.contains("window.localStorage.setItem("));
         assert!(html.contains("const restoreState = () =>"));
         assert!(html.contains("groups.forEach((group) => syncReviewedUi(group, false))"));
-        assert!(html.contains("Review marks survive reloads in this browser tab"));
+        assert!(html.contains("Review marks are kept in this browser"));
         assert!(html.contains("never changes your Pinterest account."));
     }
 
@@ -391,6 +391,8 @@ mod tests {
         assert!(html.contains("id=\"exact-1\"\n                        data-group\n                        data-scope=\"same-board\"\n                        data-kind=\"exact\""));
         assert!(html.contains("data-target=\"visual-1\"\n                            data-scope=\"same-board\"\n                            data-kind=\"visual\""));
         assert!(html.contains("id=\"visual-1\"\n                        data-group\n                        data-scope=\"same-board\"\n                        data-kind=\"visual\""));
+        assert!(html.contains("data-review-key=\"exact:same-board:101\""));
+        assert!(html.contains("data-review-key=\"visual:same-board:101,102\""));
     }
 
     #[test]
@@ -494,7 +496,7 @@ mod tests {
     }
 
     #[test]
-    fn review_workspace_restores_tab_local_navigation_state() {
+    fn review_workspace_restores_cross_run_navigation_state() {
         let html = render_html(&multi_board_report());
 
         assert!(html.contains("data-reviewed=\"false\""));
@@ -529,10 +531,18 @@ mod tests {
         assert!(html.contains("warmNearbyImages();"));
         assert!(html.contains("image.loading = \"eager\""));
         assert!(html.contains("link.addEventListener(\"pointerenter\", warmTarget)"));
-        assert!(!html.contains("localStorage"));
-        assert!(html.contains("window.sessionStorage.getItem(storageKey)"));
-        assert!(html.contains("window.sessionStorage.setItem("));
-        assert!(html.contains("active: active?.id || null"));
+        assert!(html.contains("window.localStorage.getItem(storageKey)"));
+        assert!(html.contains("window.localStorage.setItem("));
+        assert!(!html.contains("sessionStorage"));
+        assert!(html.contains("groups: currentGroupKeys"));
+        assert!(html.contains("const groupsUnchanged ="));
+        assert!(html.contains("current.size === previous.size"));
+        assert!(html.contains("active: active?.dataset.reviewKey || null"));
+        assert!(html.contains("stored.unreviewedOnly === true || reviewed.size > 0"));
+        assert!(html.contains("data-review-storage-key=\""));
+        assert!(
+            html.contains("unpin:review:v2:${document.documentElement.dataset.reviewStorageKey}")
+        );
         assert!(html.contains("restoreState();"));
     }
 
