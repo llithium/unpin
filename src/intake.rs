@@ -16,7 +16,7 @@ use crate::select;
 /// Board feeds paginate sequentially, so overlapping whole boards is the only
 /// way to shorten a multi-board scan. Individual requests still share the
 /// client's API request limit.
-const BOARD_FETCH_CONCURRENCY: usize = 12;
+const BOARD_FETCH_CONCURRENCY: usize = 48;
 
 const UNORGANIZED_NAME: &str = "Unorganized ideas";
 

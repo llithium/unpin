@@ -135,9 +135,9 @@ Run `unpin --help` for the complete interface.
 
 - Pinterest board metadata is fetched page by page, including board sections.
   Pins repeated in the main feed and a section are counted once.
-- Up to twelve selected boards are fetched concurrently, and a board's sections
-  are fetched up to eight at a time. All Pinterest API requests share a
-  forty-eight-request ceiling. Pagination within any single feed remains
+- Up to forty-eight selected boards are fetched concurrently, and a board's
+  sections are fetched up to sixteen at a time. All Pinterest API requests
+  share a 128-request ceiling. Pagination within any single feed remains
   sequential, since each page is addressed by the previous page's bookmark, so
   `unpin` asks for 250 pins per page instead of Pinterest's default 25 to keep
   that chain short. The page size is an undocumented option; if Pinterest

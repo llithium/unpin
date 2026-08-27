@@ -43,10 +43,16 @@ const FEED_PAGE_SIZE: usize = 250;
 /// Sections belong to one board that is already sharing the board-level
 /// concurrency budget, so this controls how much work can queue behind the
 /// shared request limit.
-const SECTION_FETCH_CONCURRENCY: usize = 8;
+const SECTION_FETCH_CONCURRENCY: usize = 16;
 /// Board and section streams share this ceiling, so their fan-out cannot
 /// multiply into an unbounded burst when several boards have sections.
-const API_REQUEST_CONCURRENCY: usize = 48;
+///
+/// Authenticated burst testing completed 2,298 requests without throttling or
+/// transport failures through 512 concurrent requests. Feed responses are
+/// substantially larger than the metadata response used by that probe, so use
+/// one quarter of the observed safe burst instead of making response buffering
+/// and provider load scale all the way to the test boundary.
+const API_REQUEST_CONCURRENCY: usize = 128;
 const MAX_REQUEST_ATTEMPTS: usize = 4;
 const RETRY_BASE_DELAY: Duration = Duration::from_millis(250);
 const MAX_RETRY_DELAY: Duration = Duration::from_secs(30);
@@ -2566,6 +2572,62 @@ mod tests {
         assert_eq!(
             permits_before_release, 0,
             "a permit was released before a response body was consumed"
+        );
+    }
+
+    /// Fixed-workload throughput benchmark for tuning the shared request
+    /// limit. Run with:
+    ///
+    /// `cargo test --release benchmark_api_request_throughput -- --ignored --nocapture`
+    #[tokio::test]
+    #[ignore = "manual network-concurrency benchmark"]
+    async fn benchmark_api_request_throughput() {
+        use std::time::{Duration, Instant};
+
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        const REQUESTS: usize = 256;
+        const RESPONSE_DELAY: Duration = Duration::from_millis(50);
+
+        let _test_guard = crate::test_support::high_concurrency_test_guard().await;
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/resource/BenchmarkResource/get/"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .set_body_json(json!({ "ok": true }))
+                    .set_delay(RESPONSE_DELAY),
+            )
+            .expect(REQUESTS as u64)
+            .mount(&server)
+            .await;
+
+        let client = PinterestClient::with_api_root(
+            Url::parse("https://www.pinterest.com/").unwrap(),
+            Url::parse(&server.uri()).unwrap(),
+        )
+        .unwrap();
+        let started = Instant::now();
+        let results = stream::iter(0..REQUESTS)
+            .map(|index| {
+                let client = client.clone();
+                async move {
+                    let progress = NoProgress;
+                    client
+                        .call("Benchmark", json!({ "index": index }), &progress)
+                        .await
+                }
+            })
+            .buffer_unordered(REQUESTS)
+            .collect::<Vec<_>>()
+            .await;
+        let elapsed = started.elapsed();
+
+        assert!(results.into_iter().all(|result| result.is_ok()));
+        eprintln!(
+            "{REQUESTS} requests at concurrency {API_REQUEST_CONCURRENCY}: {:.1} req/s ({elapsed:?})",
+            REQUESTS as f64 / elapsed.as_secs_f64()
         );
     }
 
