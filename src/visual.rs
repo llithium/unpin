@@ -384,6 +384,15 @@ mod tests {
     }
 
     #[test]
+    fn review_queue_keeps_a_compact_item_height_when_few_matches_exist() {
+        let html = render_html(&sample_report());
+
+        assert!(html.contains(
+            ".match-nav {\n                min-height: 0;\n                flex: 1;\n                align-content: start;"
+        ));
+    }
+
+    #[test]
     fn match_navigation_and_sections_carry_kind_metadata() {
         let html = render_html(&sample_report());
 
