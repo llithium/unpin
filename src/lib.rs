@@ -8,6 +8,7 @@ pub mod select;
 pub mod visual;
 
 mod intake;
+mod pinterest_api;
 
 #[cfg(test)]
 mod test_support {

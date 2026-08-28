@@ -1,31 +1,19 @@
 use std::collections::HashSet;
-use std::error::Error as StdError;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-use futures_util::stream::{self, StreamExt, TryStreamExt};
+use futures_util::stream::{self, StreamExt};
 use percent_encoding::percent_decode_str;
-use rand::Rng;
-use reqwest::header::{HeaderMap, HeaderName, HeaderValue};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
-use thiserror::Error;
 use url::Url;
 
 use crate::auth::{BrowserCookie, ScopedCookie, scope_explicit_cookies};
+use crate::pinterest_api::PinterestApi;
 use crate::progress::{Lifecycle, NoProgress, Progress, ProgressStep, SetupTask};
 
-const MAX_PAGES: usize = 10_000;
-/// A successful API response larger than this is rejected as an invalid
-/// response. The body is checked from `Content-Length` and while streaming, so
-/// a page cannot silently grow without bound; transport failures remain
-/// `PinterestError::Request`.
-const MAX_API_RESPONSE_BYTES: u64 = 16 * 1024 * 1024;
-/// A feed that would retain more than this many result values fails with an
-/// invalid-response limit error before the extra page is appended. It never
-/// returns a silently truncated feed.
-const MAX_FEED_RESULTS: usize = 50_000;
+pub use crate::pinterest_api::PinterestError;
+
 const DEFAULT_ROOT: &str = "https://www.pinterest.com/";
 /// Profile board listings are independent items, so use the largest page size
 /// currently accepted by Pinterest. `paginate` removes this option and falls
@@ -44,18 +32,6 @@ const FEED_PAGE_SIZE: usize = 250;
 /// concurrency budget, so this controls how much work can queue behind the
 /// shared request limit.
 const SECTION_FETCH_CONCURRENCY: usize = 16;
-/// Board and section streams share this ceiling, so their fan-out cannot
-/// multiply into an unbounded burst when several boards have sections.
-///
-/// Authenticated burst testing completed 2,298 requests without throttling or
-/// transport failures through 512 concurrent requests. Feed responses are
-/// substantially larger than the metadata response used by that probe, so use
-/// one quarter of the observed safe burst instead of making response buffering
-/// and provider load scale all the way to the test boundary.
-const API_REQUEST_CONCURRENCY: usize = 128;
-const MAX_REQUEST_ATTEMPTS: usize = 4;
-const RETRY_BASE_DELAY: Duration = Duration::from_millis(250);
-const MAX_RETRY_DELAY: Duration = Duration::from_secs(30);
 
 /// Path segments that never name a Pinterest user.
 const RESERVED_SEGMENTS: [&str; 4] = ["pin", "search", "ideas", "today"];
@@ -314,49 +290,9 @@ pub struct BoardPins {
     pub warnings: Vec<String>,
 }
 
-#[derive(Debug, Error)]
-pub enum PinterestError {
-    #[error("invalid Pinterest target: {0}")]
-    InvalidTarget(String),
-
-    #[error(
-        "authenticated requests with imported cookies require HTTPS for both Pinterest and API URLs"
-    )]
-    InsecureCookieTransport,
-
-    #[error("cookie-bearing API root must match the Pinterest target origin")]
-    CrossOriginCookieTransport,
-
-    #[error("failed to build the Pinterest HTTP client")]
-    Client(#[source] reqwest::Error),
-
-    #[error("Pinterest request for {resource} failed")]
-    Request {
-        resource: &'static str,
-        #[source]
-        source: Box<dyn StdError + Send + Sync>,
-    },
-
-    #[error("Pinterest returned HTTP {status} for {resource}")]
-    Http {
-        resource: &'static str,
-        status: reqwest::StatusCode,
-    },
-
-    #[error("Pinterest response for {resource} was invalid: {message}")]
-    InvalidResponse {
-        resource: &'static str,
-        message: String,
-    },
-}
-
 #[derive(Clone)]
 pub struct PinterestClient {
-    http: reqwest::Client,
-    api_root: Url,
-    cookies: Vec<ScopedCookie>,
-    authenticated: bool,
-    request_limiter: Arc<tokio::sync::Semaphore>,
+    api: PinterestApi,
 }
 
 impl PinterestClient {
@@ -387,35 +323,17 @@ impl PinterestClient {
         api_root: Url,
         cookies: Vec<ScopedCookie>,
     ) -> Result<Self, PinterestError> {
-        let authenticated = !cookies.is_empty();
-        validate_cookie_transport(&root, &api_root, authenticated)?;
-        let headers = build_headers(&root)?;
-        let http = reqwest::Client::builder()
-            .default_headers(headers)
-            .timeout(Duration::from_secs(30))
-            .user_agent(
-                "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) \
-                 AppleWebKit/537.36 (KHTML, like Gecko) \
-                 Chrome/138.0.0.0 Safari/537.36",
-            )
-            .build()
-            .map_err(PinterestError::Client)?;
-
         Ok(Self {
-            http,
-            api_root,
-            cookies,
-            authenticated,
-            request_limiter: Arc::new(tokio::sync::Semaphore::new(API_REQUEST_CONCURRENCY)),
+            api: PinterestApi::new(root, api_root, cookies)?,
         })
     }
 
     pub fn http_client(&self) -> reqwest::Client {
-        self.http.clone()
+        self.api.http_client()
     }
 
     pub(crate) fn is_authenticated(&self) -> bool {
-        self.authenticated
+        self.api.is_authenticated()
     }
 
     pub async fn fetch_board(&self, target: &BoardTarget) -> Result<BoardPins, PinterestError> {
@@ -464,6 +382,7 @@ impl PinterestClient {
             lifecycle: Lifecycle::Started,
         });
         let board_response = self
+            .api
             .call(
                 "Board",
                 json!({
@@ -519,6 +438,7 @@ impl PinterestClient {
             lifecycle: Lifecycle::Started,
         });
         let raw_boards = self
+            .api
             .paginate(
                 "Boards",
                 json!({
@@ -607,6 +527,7 @@ impl PinterestClient {
         progress: &dyn Progress,
     ) -> Result<BoardPins, PinterestError> {
         let raw_pins = self
+            .api
             .paginate(
                 "UserPins",
                 json!({
@@ -640,7 +561,7 @@ impl PinterestClient {
         seen_pin_ids: &mut HashSet<String>,
         progress: &dyn Progress,
     ) -> Result<BoardPins, PinterestError> {
-        let board_feed = self.paginate(
+        let board_feed = self.api.paginate(
             "BoardFeed",
             json!({
                 "board_id": board.id,
@@ -659,6 +580,7 @@ impl PinterestClient {
         let (raw_pins, warnings) = if board.section_count > 0 {
             let section_pins = async {
                 let sections = self
+                    .api
                     .paginate("BoardSections", json!({ "board_id": board.id }), progress)
                     .await?;
                 self.fetch_section_pins(sections, progress).await
@@ -719,6 +641,7 @@ impl PinterestClient {
                         lifecycle: Lifecycle::Started,
                     });
                     let fetched = self
+                        .api
                         .paginate(
                             "BoardSectionPins",
                             json!({
@@ -786,7 +709,7 @@ impl PinterestClient {
         }
 
         if let Some(warning) =
-            incomplete_scan_warning(self.authenticated, pins_reported, pins_found)
+            incomplete_scan_warning(self.api.is_authenticated(), pins_reported, pins_found)
         {
             warnings.push(warning);
         }
@@ -800,197 +723,6 @@ impl PinterestClient {
             warnings,
         })
     }
-
-    async fn paginate(
-        &self,
-        resource: &'static str,
-        mut options: Value,
-        progress: &dyn Progress,
-    ) -> Result<Vec<Value>, PinterestError> {
-        let mut all_results = Vec::new();
-        let mut seen_bookmarks = HashSet::new();
-
-        for page_index in 0..MAX_PAGES {
-            progress.step(ProgressStep::PageCollection {
-                resource,
-                page: page_index + 1,
-                items: all_results.len(),
-                lifecycle: Lifecycle::Started,
-            });
-            let response = match self.call(resource, options.clone(), progress).await {
-                Ok(response) => response,
-                // An oversized `page_size` is refused outright, and the value
-                // that is acceptable today is not promised for tomorrow. Drop
-                // the option and take Pinterest's default page rather than
-                // losing the scan; `remove_page_size` reporting false on the
-                // second pass stops this from looping.
-                Err(error) => {
-                    if !is_bad_request(&error) || !remove_page_size(&mut options) {
-                        return Err(error);
-                    }
-                    self.call(resource, options.clone(), progress).await?
-                }
-            };
-            // Read the bookmark before the results are moved out of the response.
-            let bookmark = response_bookmark(&response);
-            let page_results = response_results(response, resource)?;
-            let retained_results = all_results
-                .len()
-                .checked_add(page_results.len())
-                .ok_or_else(|| {
-                    invalid_response(resource, "feed result count overflowed its safety check")
-                })?;
-            if retained_results > MAX_FEED_RESULTS {
-                return Err(invalid_response(
-                    resource,
-                    format!("feed exceeded the {MAX_FEED_RESULTS}-result retention safety limit"),
-                ));
-            }
-            all_results.extend(page_results);
-            progress.step(ProgressStep::PageCollection {
-                resource,
-                page: page_index + 1,
-                items: all_results.len(),
-                lifecycle: Lifecycle::Completed,
-            });
-
-            let Some(bookmark) = bookmark else {
-                return Ok(all_results);
-            };
-            if bookmark == "-end-" || bookmark.starts_with("Y2JOb25lO") {
-                return Ok(all_results);
-            }
-            if !seen_bookmarks.insert(bookmark.clone()) {
-                return Err(invalid_response(
-                    resource,
-                    "Pinterest returned the same pagination bookmark twice",
-                ));
-            }
-
-            let object = options.as_object_mut().ok_or_else(|| {
-                invalid_response(resource, "pagination options were not an object")
-            })?;
-            object.insert("bookmarks".into(), json!([bookmark]));
-        }
-
-        Err(invalid_response(
-            resource,
-            "pagination exceeded the safety limit",
-        ))
-    }
-
-    async fn call(
-        &self,
-        resource: &'static str,
-        options: Value,
-        progress: &dyn Progress,
-    ) -> Result<Value, PinterestError> {
-        let endpoint = self
-            .api_root
-            .join(&format!("resource/{resource}Resource/get/"))
-            .map_err(|_| invalid_response(resource, "could not construct the endpoint URL"))?;
-        let (csrf_token, cookie_header) = build_request_cookie_header(&self.cookies, &endpoint)?;
-        let mut csrf_header = HeaderValue::from_str(&csrf_token)
-            .map_err(|_| invalid_response("headers", "invalid csrf header value"))?;
-        csrf_header.set_sensitive(true);
-        let data = serde_json::to_string(&json!({ "options": options }))
-            .map_err(|_| invalid_response(resource, "could not serialize request options"))?;
-
-        for attempt in 0..MAX_REQUEST_ATTEMPTS {
-            let delay = {
-                let _permit = self
-                    .request_limiter
-                    .acquire()
-                    .await
-                    .expect("the API request limiter is never closed");
-                let response = self
-                    .http
-                    .get(endpoint.clone())
-                    .query(&[("data", data.as_str()), ("source_url", "")])
-                    .header("Cookie", cookie_header.clone())
-                    .header("X-CSRFToken", csrf_header.clone())
-                    .send()
-                    .await;
-
-                match response {
-                    Ok(response) => {
-                        let status = response.status();
-                        if status.is_success() {
-                            let body =
-                                read_api_body(response, resource, MAX_API_RESPONSE_BYTES).await?;
-                            return serde_json::from_slice(&body)
-                                .map_err(|source| request_error(resource, source));
-                        }
-                        if attempt + 1 < MAX_REQUEST_ATTEMPTS && is_retryable_status(status) {
-                            retry_delay(attempt, response.headers().get("retry-after"))
-                        } else {
-                            return Err(PinterestError::Http { resource, status });
-                        }
-                    }
-                    Err(source)
-                        if attempt + 1 < MAX_REQUEST_ATTEMPTS
-                            && (source.is_connect() || source.is_timeout()) =>
-                    {
-                        retry_delay(attempt, None)
-                    }
-                    Err(source) => return Err(request_error(resource, source)),
-                }
-            };
-
-            emit_retry(progress, resource, attempt, delay);
-            tokio::time::sleep(delay).await;
-        }
-
-        unreachable!("the request loop always returns on its final attempt")
-    }
-}
-
-async fn read_api_body(
-    response: reqwest::Response,
-    resource: &'static str,
-    max_bytes: u64,
-) -> Result<Vec<u8>, PinterestError> {
-    if response
-        .content_length()
-        .is_some_and(|length| length > max_bytes)
-    {
-        return Err(invalid_response(
-            resource,
-            format!("response body exceeded the {max_bytes}-byte safety limit"),
-        ));
-    }
-
-    let capacity = response
-        .content_length()
-        .and_then(|length| usize::try_from(length).ok())
-        .unwrap_or_default();
-    let mut body = Vec::with_capacity(capacity);
-    let mut stream = response.bytes_stream();
-    while let Some(chunk) = stream
-        .try_next()
-        .await
-        .map_err(|source| request_error(resource, source))?
-    {
-        let new_length = u64::try_from(body.len())
-            .ok()
-            .and_then(|length| {
-                u64::try_from(chunk.len())
-                    .ok()
-                    .and_then(|chunk_length| length.checked_add(chunk_length))
-            })
-            .ok_or_else(|| {
-                invalid_response(resource, "response body size overflowed its safety check")
-            })?;
-        if new_length > max_bytes {
-            return Err(invalid_response(
-                resource,
-                format!("response body exceeded the {max_bytes}-byte safety limit"),
-            ));
-        }
-        body.extend_from_slice(&chunk);
-    }
-
-    Ok(body)
 }
 
 pub(crate) fn incomplete_scan_warning(
@@ -1010,270 +742,6 @@ pub(crate) fn incomplete_scan_warning(
     }
 }
 
-fn retry_delay(attempt: usize, retry_after: Option<&HeaderValue>) -> Duration {
-    retry_after
-        .and_then(|value| value.to_str().ok())
-        .and_then(|value| value.trim().parse::<u64>().ok())
-        .map(Duration::from_secs)
-        .unwrap_or_else(|| RETRY_BASE_DELAY.saturating_mul(1_u32 << attempt.min(16)))
-        .min(MAX_RETRY_DELAY)
-}
-
-fn is_bad_request(error: &PinterestError) -> bool {
-    matches!(
-        error,
-        PinterestError::Http { status, .. } if *status == reqwest::StatusCode::BAD_REQUEST
-    )
-}
-
-/// Removes the `page_size` option, reporting whether there was one to remove.
-fn remove_page_size(options: &mut Value) -> bool {
-    options
-        .as_object_mut()
-        .is_some_and(|options| options.remove("page_size").is_some())
-}
-
-fn is_retryable_status(status: reqwest::StatusCode) -> bool {
-    status == reqwest::StatusCode::TOO_MANY_REQUESTS || status.is_server_error()
-}
-
-fn emit_retry(progress: &dyn Progress, resource: &'static str, attempt: usize, delay: Duration) {
-    progress.step(ProgressStep::PageRetry {
-        resource,
-        attempt: attempt + 2,
-        delay,
-    });
-}
-
-fn build_request_cookie_header(
-    cookies: &[ScopedCookie],
-    request_url: &Url,
-) -> Result<(String, HeaderValue), PinterestError> {
-    build_cookie_header(
-        select_applicable_cookies(cookies, request_url)
-            .into_iter()
-            .map(|cookie| cookie.cookie.clone())
-            .collect(),
-    )
-}
-
-fn select_applicable_cookies<'a>(
-    cookies: &'a [ScopedCookie],
-    request_url: &Url,
-) -> Vec<&'a ScopedCookie> {
-    let now = unix_time_now();
-    let Some(request_host) = request_host(request_url) else {
-        return Vec::new();
-    };
-    let mut selected: Vec<&ScopedCookie> = Vec::new();
-
-    for cookie in cookies
-        .iter()
-        .filter(|cookie| cookie_applies_to_url(cookie, request_url, now))
-    {
-        if let Some(existing) = selected
-            .iter_mut()
-            .find(|existing| existing.cookie.name == cookie.cookie.name)
-        {
-            if prefers_cookie(cookie, existing, &request_host) {
-                *existing = cookie;
-            }
-            continue;
-        }
-        selected.push(cookie);
-    }
-
-    selected.sort_by(|left, right| left.cookie.name.cmp(&right.cookie.name));
-    selected
-}
-
-fn build_cookie_header(
-    mut cookies: Vec<BrowserCookie>,
-) -> Result<(String, HeaderValue), PinterestError> {
-    cookies.retain(|cookie| {
-        is_cookie_name(&cookie.name)
-            && !cookie
-                .value
-                .bytes()
-                .any(|byte| byte == b';' || byte.is_ascii_control())
-    });
-    let csrf_token = cookies
-        .iter()
-        .find(|cookie| cookie.name == "csrftoken")
-        .map(|cookie| cookie.value.clone())
-        .unwrap_or_else(generate_csrf_token);
-    if !cookies.iter().any(|cookie| cookie.name == "csrftoken") {
-        cookies.push(BrowserCookie {
-            name: "csrftoken".into(),
-            value: csrf_token.clone(),
-        });
-    }
-
-    cookies.sort_by(|left, right| left.name.cmp(&right.name));
-    let header = cookies
-        .iter()
-        .map(|cookie| format!("{}={}", cookie.name, cookie.value))
-        .collect::<Vec<_>>()
-        .join("; ");
-    let mut header = HeaderValue::from_str(&header)
-        .map_err(|_| invalid_response("headers", "browser cookies were not header-safe"))?;
-    header.set_sensitive(true);
-    Ok((csrf_token, header))
-}
-
-fn cookie_applies_to_url(cookie: &ScopedCookie, request_url: &Url, now: u64) -> bool {
-    let Some(request_host) = request_host(request_url) else {
-        return false;
-    };
-    if cookie.secure && request_url.scheme() != "https" {
-        return false;
-    }
-    if cookie.expires.is_some_and(|expires| expires <= now) {
-        return false;
-    }
-    if !domain_matches_cookie(cookie, &request_host) {
-        return false;
-    }
-    path_matches_cookie(&cookie.path, request_path(request_url))
-}
-
-fn prefers_cookie(candidate: &ScopedCookie, current: &ScopedCookie, request_host: &str) -> bool {
-    let candidate_host_only = exact_host_only_match(candidate, request_host);
-    let current_host_only = exact_host_only_match(current, request_host);
-    if candidate_host_only != current_host_only {
-        return candidate_host_only;
-    }
-    if candidate.path.len() != current.path.len() {
-        return candidate.path.len() > current.path.len();
-    }
-    if candidate.normalized_domain.len() != current.normalized_domain.len() {
-        return candidate.normalized_domain.len() > current.normalized_domain.len();
-    }
-    candidate.source_order < current.source_order
-}
-
-fn exact_host_only_match(cookie: &ScopedCookie, request_host: &str) -> bool {
-    cookie.host_only && cookie.normalized_domain == request_host
-}
-
-fn domain_matches_cookie(cookie: &ScopedCookie, request_host: &str) -> bool {
-    if cookie.host_only {
-        return cookie.normalized_domain == request_host;
-    }
-
-    request_host == cookie.normalized_domain
-        || request_host
-            .strip_suffix(&cookie.normalized_domain)
-            .is_some_and(|prefix| prefix.ends_with('.'))
-}
-
-fn path_matches_cookie(cookie_path: &str, request_path: &str) -> bool {
-    request_path == cookie_path
-        || (cookie_path.ends_with('/') && request_path.starts_with(cookie_path))
-        || request_path
-            .strip_prefix(cookie_path)
-            .is_some_and(|suffix| suffix.starts_with('/'))
-}
-
-fn request_host(request_url: &Url) -> Option<String> {
-    request_url.host_str().map(str::to_ascii_lowercase)
-}
-
-fn request_path(request_url: &Url) -> &str {
-    let path = request_url.path();
-    if path.is_empty() { "/" } else { path }
-}
-
-fn unix_time_now() -> u64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_secs()
-}
-
-fn is_cookie_name(name: &str) -> bool {
-    !name.is_empty()
-        && name.bytes().all(|byte| {
-            byte.is_ascii_alphanumeric()
-                || matches!(
-                    byte,
-                    b'!' | b'#'
-                        | b'$'
-                        | b'%'
-                        | b'&'
-                        | b'\''
-                        | b'*'
-                        | b'+'
-                        | b'-'
-                        | b'.'
-                        | b'^'
-                        | b'_'
-                        | b'`'
-                        | b'|'
-                        | b'~'
-                )
-        })
-}
-
-fn validate_cookie_transport(
-    root: &Url,
-    api_root: &Url,
-    authenticated: bool,
-) -> Result<(), PinterestError> {
-    if !authenticated {
-        return Ok(());
-    }
-
-    if root.scheme() != "https" || api_root.scheme() != "https" {
-        return Err(PinterestError::InsecureCookieTransport);
-    }
-
-    if root.origin() != api_root.origin() {
-        return Err(PinterestError::CrossOriginCookieTransport);
-    }
-
-    Ok(())
-}
-
-fn build_headers(root: &Url) -> Result<HeaderMap, PinterestError> {
-    let mut headers = HeaderMap::new();
-    let host = root
-        .host_str()
-        .ok_or_else(|| invalid_response("headers", "Pinterest root URL had no host"))?;
-    let values = [
-        ("Accept", "application/json, text/javascript, */*, q=0.01"),
-        ("X-Requested-With", "XMLHttpRequest"),
-        ("X-APP-VERSION", "a89153f"),
-        ("X-Pinterest-AppState", "active"),
-        ("X-Pinterest-PWS-Handler", "www/[username].js"),
-        ("Alt-Used", host),
-        ("Sec-Fetch-Dest", "empty"),
-        ("Sec-Fetch-Mode", "cors"),
-        ("Sec-Fetch-Site", "same-origin"),
-    ];
-
-    for (name, value) in values {
-        let name = HeaderName::from_bytes(name.as_bytes())
-            .map_err(|_| invalid_response("headers", "invalid header name"))?;
-        let value = HeaderValue::from_str(value)
-            .map_err(|_| invalid_response("headers", "invalid header value"))?;
-        headers.insert(name, value);
-    }
-
-    Ok(headers)
-}
-
-fn generate_csrf_token() -> String {
-    const ALPHABET: &[u8] = b"abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789";
-    let mut rng = rand::rng();
-    (0..32)
-        .map(|_| {
-            let index = rng.random_range(0..ALPHABET.len());
-            ALPHABET[index] as char
-        })
-        .collect()
-}
-
 fn response_data<'a>(
     response: &'a Value,
     resource: &'static str,
@@ -1281,42 +749,6 @@ fn response_data<'a>(
     response
         .pointer("/resource_response/data")
         .ok_or_else(|| invalid_response(resource, "resource_response.data is missing"))
-}
-
-/// Takes the response by value so a page of results is moved out rather than
-/// deep-cloned; a single feed page carries a lot of JSON that is thrown away
-/// immediately afterwards.
-fn response_results(
-    mut response: Value,
-    resource: &'static str,
-) -> Result<Vec<Value>, PinterestError> {
-    let data = response
-        .pointer_mut("/resource_response/data")
-        .map(Value::take)
-        .ok_or_else(|| invalid_response(resource, "resource_response.data is missing"))?;
-    match data {
-        Value::Array(results) => Ok(results),
-        Value::Object(mut data) => match data.get_mut("results").map(Value::take) {
-            Some(Value::Array(results)) => Ok(results),
-            _ => Err(invalid_response(
-                resource,
-                "resource_response.data was not a result list",
-            )),
-        },
-        _ => Err(invalid_response(
-            resource,
-            "resource_response.data was not a result list",
-        )),
-    }
-}
-
-fn response_bookmark(response: &Value) -> Option<String> {
-    let bookmarks = response.pointer("/resource/options/bookmarks")?;
-    match bookmarks {
-        Value::String(bookmark) => Some(bookmark.clone()),
-        Value::Array(bookmarks) => bookmarks.first()?.as_str().map(str::to_owned),
-        _ => None,
-    }
 }
 
 fn is_unorganized_pin(raw: &Value) -> bool {
@@ -1389,16 +821,6 @@ fn value_usize(value: Option<&Value>) -> Option<usize> {
     }
 }
 
-fn request_error(
-    resource: &'static str,
-    source: impl StdError + Send + Sync + 'static,
-) -> PinterestError {
-    PinterestError::Request {
-        resource,
-        source: Box::new(source),
-    }
-}
-
 fn invalid_response(resource: &'static str, message: impl Into<String>) -> PinterestError {
     PinterestError::InvalidResponse {
         resource,
@@ -1409,6 +831,13 @@ fn invalid_response(resource: &'static str, message: impl Into<String>) -> Pinte
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::pinterest_api::test_support::{
+        build_request_cookie_header, generate_csrf_token, is_retryable_status, read_api_body,
+        response_bookmark, retry_delay, select_applicable_cookies, unix_time_now,
+    };
+    use crate::pinterest_api::{API_REQUEST_CONCURRENCY, MAX_FEED_RESULTS, MAX_RETRY_DELAY};
+    use reqwest::header::HeaderValue;
+    use std::time::Duration;
 
     fn board(input: &str) -> BoardTarget {
         match Target::parse(input).unwrap() {
@@ -1659,7 +1088,7 @@ mod tests {
         )
         .unwrap();
         let response = client
-            .http
+            .http_client()
             .get(format!("http://{address}/"))
             .send()
             .await
@@ -1701,6 +1130,7 @@ mod tests {
         )
         .unwrap();
         let error = client
+            .api
             .paginate("Feed", json!({}), &NoProgress)
             .await
             .unwrap_err();
@@ -2418,6 +1848,7 @@ mod tests {
                 tokio::spawn(async move {
                     let progress = NoProgress;
                     client
+                        .api
                         .call("Slow", json!({ "index": index }), &progress)
                         .await
                 })
@@ -2541,6 +1972,7 @@ mod tests {
                 tokio::spawn(async move {
                     let progress = NoProgress;
                     client
+                        .api
                         .call("Slow", json!({ "index": index }), &progress)
                         .await
                 })
@@ -2552,7 +1984,7 @@ mod tests {
                 .await
                 .is_ok();
         let started_before_release = started.load(Ordering::SeqCst);
-        let permits_before_release = client.request_limiter.available_permits();
+        let permits_before_release = client.api.available_permits();
 
         let _ = body_release.send(true);
         for task in tasks {
@@ -2615,6 +2047,7 @@ mod tests {
                 async move {
                     let progress = NoProgress;
                     client
+                        .api
                         .call("Benchmark", json!({ "index": index }), &progress)
                         .await
                 }
