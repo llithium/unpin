@@ -579,15 +579,25 @@ impl PinterestClient {
         // start as soon as discovery completes, even while BoardFeed is still
         // walking its bookmark chain.
         let (raw_pins, warnings) = if board.section_count > 0 {
+            // Sections are supplementary to the main board feed. Keep a
+            // failure in that optional pipeline as a warning so an otherwise
+            // usable board still contributes its main-feed pins.
             let section_pins = async {
-                let sections = self
+                match self
                     .api
                     .paginate("BoardSections", json!({ "board_id": board.id }), progress)
-                    .await?;
-                self.fetch_section_pins(sections, progress).await
+                    .await
+                {
+                    Ok(sections) => {
+                        Ok::<_, PinterestError>(self.fetch_section_pins(sections, progress).await)
+                    }
+                    Err(error) => Ok((
+                        Vec::new(),
+                        vec![format!("board sections could not be fetched: {error}")],
+                    )),
+                }
             };
-            let (raw_pins, section_pins) = tokio::try_join!(board_feed, section_pins)?;
-            let (section_pins, warnings) = section_pins;
+            let (raw_pins, (section_pins, warnings)) = tokio::try_join!(board_feed, section_pins)?;
             let mut raw_pins = raw_pins;
             raw_pins.extend(section_pins);
             (raw_pins, warnings)
@@ -608,7 +618,7 @@ impl PinterestClient {
         &self,
         sections: Vec<Value>,
         progress: &dyn Progress,
-    ) -> Result<(Vec<Value>, Vec<String>), PinterestError> {
+    ) -> (Vec<Value>, Vec<String>) {
         let mut section_ids = Vec::new();
         let mut warnings = Vec::new();
         for section in sections {
@@ -660,19 +670,24 @@ impl PinterestClient {
                         total: section_total,
                         lifecycle: Lifecycle::Completed,
                     });
-                    (index, fetched)
+                    (index, id, fetched)
                 }
             }))
             .buffer_unordered(SECTION_FETCH_CONCURRENCY);
         futures_util::pin_mut!(section_fetches);
         let mut fetched_sections = section_fetches.collect::<Vec<_>>().await;
-        fetched_sections.sort_by_key(|(index, _)| *index);
+        fetched_sections.sort_by_key(|(index, _, _)| *index);
 
         let mut raw_pins = Vec::new();
-        for (_, fetched) in fetched_sections {
-            raw_pins.extend(fetched?);
+        for (_, id, fetched) in fetched_sections {
+            match fetched {
+                Ok(pins) => raw_pins.extend(pins),
+                Err(error) => {
+                    warnings.push(format!("board section {id} could not be fetched: {error}"))
+                }
+            }
         }
-        Ok((raw_pins, warnings))
+        (raw_pins, warnings)
     }
 
     fn parse_pins(

@@ -327,6 +327,166 @@ async fn scans_paginated_board_and_sections_end_to_end() {
     std::fs::remove_file(visual_path).unwrap();
 }
 
+#[tokio::test]
+async fn board_section_discovery_failure_keeps_main_feed_results() {
+    let server = MockServer::start().await;
+    mount_resource(
+        &server,
+        "Board",
+        json!({
+            "slug": "ideas",
+            "username": "alice",
+            "field_set_key": "detailed"
+        }),
+        json!({
+            "resource_response": { "data": {
+                "id": "board-1",
+                "name": "Ideas",
+                "pin_count": 1,
+                "section_count": 1
+            }}
+        }),
+    )
+    .await;
+    mount_resource(
+        &server,
+        "BoardFeed",
+        json!({
+            "board_id": "board-1",
+            "field_set_key": "react_grid_pin",
+            "prepend": false,
+            "page_size": 250,
+            "bookmarks": null
+        }),
+        page(
+            json!([{
+                "id": "101",
+                "images": {"orig": {"url": "https://example.com/main.jpg"}}
+            }]),
+            "-end-",
+        ),
+    )
+    .await;
+    Mock::given(method("GET"))
+        .and(path("/resource/BoardSectionsResource/get/"))
+        .respond_with(ResponseTemplate::new(403))
+        .expect(1)
+        .mount(&server)
+        .await;
+
+    let target = BoardTarget::parse("https://www.pinterest.com/alice/ideas/").unwrap();
+    let client =
+        PinterestClient::with_api_root(target.root.clone(), Url::parse(&server.uri()).unwrap())
+            .unwrap();
+    let result = client.fetch_board(&target).await.unwrap();
+
+    assert_eq!(result.pins_found, 1);
+    assert_eq!(result.pins[0].id, "101");
+    assert!(result.warnings.iter().any(|warning| {
+        warning.contains("board sections could not be fetched") && warning.contains("403")
+    }));
+}
+
+#[tokio::test]
+async fn failed_board_sections_do_not_discard_main_or_other_section_pins() {
+    let server = MockServer::start().await;
+    mount_resource(
+        &server,
+        "Board",
+        json!({
+            "slug": "ideas",
+            "username": "alice",
+            "field_set_key": "detailed"
+        }),
+        json!({
+            "resource_response": { "data": {
+                "id": "board-1",
+                "name": "Ideas",
+                "pin_count": 2,
+                "section_count": 2
+            }}
+        }),
+    )
+    .await;
+    mount_resource(
+        &server,
+        "BoardFeed",
+        json!({
+            "board_id": "board-1",
+            "field_set_key": "react_grid_pin",
+            "prepend": false,
+            "page_size": 250,
+            "bookmarks": null
+        }),
+        page(
+            json!([{
+                "id": "101",
+                "images": {"orig": {"url": "https://example.com/main.jpg"}}
+            }]),
+            "-end-",
+        ),
+    )
+    .await;
+    mount_resource(
+        &server,
+        "BoardSections",
+        json!({"board_id": "board-1"}),
+        page(
+            json!([{ "id": "section-1" }, { "id": "section-2" }]),
+            "-end-",
+        ),
+    )
+    .await;
+    mount_resource(
+        &server,
+        "BoardSectionPins",
+        json!({
+            "section_id": "section-1",
+            "page_size": 250,
+            "bookmarks": null
+        }),
+        page(
+            json!([{
+                "id": "102",
+                "images": {"orig": {"url": "https://example.com/section.jpg"}}
+            }]),
+            "-end-",
+        ),
+    )
+    .await;
+    Mock::given(method("GET"))
+        .and(path("/resource/BoardSectionPinsResource/get/"))
+        .and(query_param(
+            "data",
+            request_data(json!({
+                "section_id": "section-2",
+                "page_size": 250,
+                "bookmarks": null
+            })),
+        ))
+        .respond_with(ResponseTemplate::new(403))
+        .expect(1)
+        .mount(&server)
+        .await;
+
+    let target = BoardTarget::parse("https://www.pinterest.com/alice/ideas/").unwrap();
+    let client =
+        PinterestClient::with_api_root(target.root.clone(), Url::parse(&server.uri()).unwrap())
+            .unwrap();
+    let result = client.fetch_board(&target).await.unwrap();
+
+    let mut pin_ids = result
+        .pins
+        .iter()
+        .map(|pin| pin.id.as_str())
+        .collect::<Vec<_>>();
+    pin_ids.sort_unstable();
+    assert_eq!(pin_ids, ["101", "102"]);
+    assert!(result.warnings.iter().any(|warning| {
+        warning.contains("board section section-2 could not be fetched") && warning.contains("403")
+    }));
+}
+
 /// Mounts a `Boards` listing for `alice` with the given board entries.
 async fn mount_board_listing(server: &MockServer, boards: serde_json::Value) {
     mount_resource(

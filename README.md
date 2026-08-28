@@ -135,6 +135,9 @@ Run `unpin --help` for the complete interface.
 
 - Pinterest board metadata is fetched page by page, including board sections.
   Pins repeated in the main feed and a section are counted once.
+  If section discovery or an individual section feed fails, the main board
+  feed and any successful sections are still analyzed, with the unavailable
+  section reported as a warning.
 - Up to forty-eight selected boards are fetched concurrently, and a board's
   sections are fetched up to sixteen at a time. All Pinterest API requests
   share a 128-request ceiling. Pagination within any single feed remains
