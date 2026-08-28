@@ -28,6 +28,8 @@ use crate::report::{
 };
 
 const DOWNLOAD_CONCURRENCY: usize = 48;
+const IMAGE_DOWNLOAD_ATTEMPTS: usize = 4;
+const IMAGE_RETRY_BASE_DELAY: Duration = Duration::from_millis(250);
 /// A response larger than this is reported as a skipped pin. The body is checked
 /// both from its advertised length and while it streams, because image servers
 /// do not always send a trustworthy `Content-Length`.
@@ -508,21 +510,52 @@ async fn download_bytes(
     image_buffer_budget: &Arc<Semaphore>,
     max_image_bytes: u64,
 ) -> Result<(Vec<u8>, OwnedSemaphorePermit), String> {
-    let response = http
-        .get(media_url)
-        .send()
-        .await
-        .map_err(|error| format!("image download failed: {}", concise_reqwest_error(&error)))?;
+    for attempt in 0..IMAGE_DOWNLOAD_ATTEMPTS {
+        match download_bytes_once(http, media_url, image_buffer_budget, max_image_bytes).await {
+            Ok(download) => return Ok(download),
+            Err(error) if error.retryable && attempt + 1 < IMAGE_DOWNLOAD_ATTEMPTS => {
+                tokio::time::sleep(IMAGE_RETRY_BASE_DELAY.saturating_mul(1_u32 << attempt.min(16)))
+                    .await;
+            }
+            Err(error) => return Err(error.reason),
+        }
+    }
+
+    unreachable!("the image download loop always returns on its final attempt")
+}
+
+struct ImageDownloadError {
+    reason: String,
+    retryable: bool,
+}
+
+async fn download_bytes_once(
+    http: &Client,
+    media_url: &str,
+    image_buffer_budget: &Arc<Semaphore>,
+    max_image_bytes: u64,
+) -> Result<(Vec<u8>, OwnedSemaphorePermit), ImageDownloadError> {
+    let response = http.get(media_url).send().await.map_err(|error| {
+        let retryable = error.is_connect() || error.is_timeout();
+        ImageDownloadError {
+            reason: format!("image download failed: {}", concise_reqwest_error(&error)),
+            retryable,
+        }
+    })?;
 
     if !response.status().is_success() {
-        return Err(format!(
-            "image download returned HTTP {}",
-            response.status()
-        ));
+        let status = response.status();
+        return Err(ImageDownloadError {
+            reason: format!("image download returned HTTP {status}"),
+            retryable: status == reqwest::StatusCode::TOO_MANY_REQUESTS || status.is_server_error(),
+        });
     }
     let advertised_bytes = response.content_length();
     if advertised_bytes.is_some_and(|length| length > max_image_bytes) {
-        return Err(image_size_limit_error(max_image_bytes));
+        return Err(ImageDownloadError {
+            reason: image_size_limit_error(max_image_bytes),
+            retryable: false,
+        });
     }
 
     // Reserve the advertised size when available. Chunked/unknown-length
@@ -531,22 +564,37 @@ async fn download_bytes(
     // A stream that contradicts an advertised length is rejected rather than
     // growing past the amount reserved from the shared buffer budget.
     let reserved_bytes = advertised_bytes.unwrap_or(max_image_bytes);
-    let reserved_permits = u32::try_from(reserved_bytes)
-        .map_err(|_| "image safety limit cannot be represented by the buffer budget".to_owned())?;
+    let reserved_permits = u32::try_from(reserved_bytes).map_err(|_| ImageDownloadError {
+        reason: "image safety limit cannot be represented by the buffer budget".to_owned(),
+        retryable: false,
+    })?;
     let buffer_permit = Arc::clone(image_buffer_budget)
         .acquire_many_owned(reserved_permits)
         .await
-        .map_err(|_| "image buffer budget is unavailable".to_owned())?;
-    let capacity = usize::try_from(reserved_bytes)
-        .map_err(|_| "image safety limit cannot fit in memory on this platform".to_owned())?;
+        .map_err(|_| ImageDownloadError {
+            reason: "image buffer budget is unavailable".to_owned(),
+            retryable: false,
+        })?;
+    let capacity = usize::try_from(reserved_bytes).map_err(|_| ImageDownloadError {
+        reason: "image safety limit cannot fit in memory on this platform".to_owned(),
+        retryable: false,
+    })?;
     let mut bytes = Vec::with_capacity(capacity);
     let mut stream = response.bytes_stream();
     while let Some(chunk) = stream
         .try_next()
         .await
-        .map_err(|error| format!("image download failed: {}", concise_reqwest_error(&error)))?
+        .map_err(|error| ImageDownloadError {
+            reason: format!("image download failed: {}", concise_reqwest_error(&error)),
+            retryable: error.is_body() || error.is_timeout(),
+        })?
     {
-        checked_image_length(bytes.len(), chunk.len(), max_image_bytes, advertised_bytes)?;
+        checked_image_length(bytes.len(), chunk.len(), max_image_bytes, advertised_bytes).map_err(
+            |reason| ImageDownloadError {
+                reason,
+                retryable: false,
+            },
+        )?;
         bytes.extend_from_slice(&chunk);
     }
 
@@ -1132,6 +1180,75 @@ mod tests {
         assert!(error.contains("advertised content length"));
         assert_eq!(checked_image_length(2, 2, 8, Some(4)).unwrap(), 4);
         assert_eq!(checked_image_length(2, 2, 8, None).unwrap(), 4);
+    }
+
+    #[tokio::test]
+    async fn transient_image_server_errors_are_retried() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let mut encoded = Cursor::new(Vec::new());
+        DynamicImage::new_rgb8(2, 2)
+            .write_to(&mut encoded, image::ImageFormat::Png)
+            .unwrap();
+        let encoded = encoded.into_inner();
+        let attempts = Arc::new(AtomicUsize::new(0));
+        let responder_attempts = Arc::clone(&attempts);
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/eventually.png"))
+            .respond_with(move |_: &wiremock::Request| {
+                if responder_attempts.fetch_add(1, Ordering::SeqCst) == 0 {
+                    ResponseTemplate::new(500)
+                } else {
+                    ResponseTemplate::new(200).set_body_bytes(encoded.clone())
+                }
+            })
+            .expect(2)
+            .mount(&server)
+            .await;
+
+        let http = Client::builder().build().unwrap();
+        let image_buffer_budget = Arc::new(Semaphore::new(1024));
+        let download = download_bytes(
+            &http,
+            &format!("{}/eventually.png", server.uri()),
+            &image_buffer_budget,
+            1024,
+        )
+        .await
+        .unwrap();
+
+        assert!(!download.0.is_empty());
+        assert_eq!(attempts.load(Ordering::SeqCst), 2);
+    }
+
+    #[tokio::test]
+    async fn permanent_image_client_errors_are_not_retried() {
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/missing.png"))
+            .respond_with(ResponseTemplate::new(404))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let http = Client::builder().build().unwrap();
+        let error = download_bytes(
+            &http,
+            &format!("{}/missing.png", server.uri()),
+            &Arc::new(Semaphore::new(1024)),
+            1024,
+        )
+        .await
+        .unwrap_err();
+
+        assert!(error.contains("HTTP 404"), "{error}");
     }
 
     #[tokio::test]
