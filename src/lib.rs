@@ -35,7 +35,9 @@ use url::Url;
 
 use crate::cli::Cli;
 use crate::intake::{IntakeError, IntakeRequest, SourceOutcome, SourceSelection};
-use crate::pinterest::{PinterestClient, PinterestError, SkippedPin, Target};
+use crate::pinterest::{
+    PinterestClient, PinterestError, SkippedPin, Target, aggregate_reported_pin_counts,
+};
 use crate::progress::{Lifecycle, NoProgress, Progress, ProgressStep, SetupTask};
 use crate::report::{Report, ScannedBoard, Summary};
 
@@ -241,10 +243,8 @@ pub async fn run_with_api_root_and_progress(
             .retain(|candidate| candidate.scope == crate::report::MatchScope::CrossBoard);
     }
 
-    let pins_reported = scanned_boards
-        .iter()
-        .map(|board| board.pins_reported)
-        .try_fold(0_usize, |total, reported| Some(total + reported?));
+    let pins_reported =
+        aggregate_reported_pin_counts(scanned_boards.iter().map(|board| board.pins_reported));
     let summary = Summary {
         username,
         pins_found: scanned_boards.iter().map(|board| board.pins_found).sum(),

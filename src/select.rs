@@ -4,6 +4,7 @@ use inquire::MultiSelect;
 use thiserror::Error;
 
 use crate::pinterest::BoardRef;
+use crate::pinterest::aggregate_reported_pin_counts;
 
 #[derive(Debug, Error)]
 pub enum SelectError {
@@ -80,10 +81,7 @@ fn terminal_width() -> usize {
 /// Names are padded only as far as the longest one actually needs, and are
 /// truncated when even that will not fit the terminal.
 fn picker_labels(boards: &[BoardRef], terminal_width: usize) -> Vec<String> {
-    let total = boards
-        .iter()
-        .map(|board| board.pins_reported)
-        .try_fold(0_usize, |total, reported| Some(total + reported?));
+    let total = aggregate_reported_pin_counts(boards.iter().map(|board| board.pins_reported));
 
     let mut rows = Vec::with_capacity(boards.len() + 1);
     rows.push(("All pins".to_owned(), pin_count(total)));

@@ -837,6 +837,16 @@ fn value_usize(value: Option<&Value>) -> Option<usize> {
     }
 }
 
+/// Returns a reported-pin aggregate only when every provider count is present
+/// and their sum fits in the platform's `usize`.
+pub(crate) fn aggregate_reported_pin_counts(
+    reported_counts: impl IntoIterator<Item = Option<usize>>,
+) -> Option<usize> {
+    reported_counts
+        .into_iter()
+        .try_fold(0_usize, |total, reported| total.checked_add(reported?))
+}
+
 fn invalid_response(resource: &'static str, message: impl Into<String>) -> PinterestError {
     PinterestError::InvalidResponse {
         resource,
@@ -875,6 +885,16 @@ mod tests {
         assert_eq!(target.username, "alice");
         assert_eq!(target.board_slug, "home ideas");
         assert_eq!(target.root.as_str(), "https://uk.pinterest.com/");
+    }
+
+    #[test]
+    fn reported_pin_count_aggregate_requires_complete_non_overflowing_counts() {
+        assert_eq!(aggregate_reported_pin_counts([Some(2), Some(3)]), Some(5));
+        assert_eq!(aggregate_reported_pin_counts([Some(2), None]), None);
+        assert_eq!(
+            aggregate_reported_pin_counts([Some(usize::MAX), Some(1)]),
+            None
+        );
     }
 
     #[test]
