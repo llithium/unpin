@@ -1040,15 +1040,53 @@ mod tests {
         assert_eq!(
             response_bookmark(&json!({"resource": {"options": {
                 "bookmarks": ["abc"]
-            }}})),
+            }}}))
+            .unwrap(),
             Some("abc".into())
         );
         assert_eq!(
             response_bookmark(&json!({"resource": {"options": {
                 "bookmarks": null
-            }}})),
+            }}}))
+            .unwrap(),
             None
         );
+    }
+
+    #[tokio::test]
+    async fn missing_pagination_metadata_is_not_treated_as_end_of_feed() {
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/resource/FeedResource/get/"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "resource_response": { "data": [] },
+                "resource": { "options": {} }
+            })))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let client = PinterestClient::with_api_root(
+            Url::parse("https://www.pinterest.com/").unwrap(),
+            Url::parse(&server.uri()).unwrap(),
+        )
+        .unwrap();
+        let error = client
+            .api
+            .paginate("Feed", json!({}), &NoProgress)
+            .await
+            .unwrap_err();
+
+        assert!(matches!(
+            error,
+            PinterestError::InvalidResponse {
+                resource: "Feed",
+                message
+            } if message.contains("bookmark metadata is missing")
+        ));
     }
 
     #[tokio::test]

@@ -162,7 +162,7 @@ impl PinterestApi {
                 }
             };
             // Read the bookmark before the results are moved out of the response.
-            let bookmark = response_bookmark(&response);
+            let bookmark = response_bookmark(&response, resource)?;
             let page_results = response_results(response, resource)?;
             let retained_results = all_results
                 .len()
@@ -614,12 +614,32 @@ fn response_results(
     }
 }
 
-fn response_bookmark(response: &Value) -> Option<String> {
-    let bookmarks = response.pointer("/resource/options/bookmarks")?;
+fn response_bookmark(
+    response: &Value,
+    resource: &'static str,
+) -> Result<Option<String>, PinterestError> {
+    let bookmarks = response
+        .pointer("/resource/options/bookmarks")
+        .ok_or_else(|| invalid_response(resource, "pagination bookmark metadata is missing"))?;
     match bookmarks {
-        Value::String(bookmark) => Some(bookmark.clone()),
-        Value::Array(bookmarks) => bookmarks.first()?.as_str().map(str::to_owned),
-        _ => None,
+        Value::String(bookmark) => Ok(Some(bookmark.clone())),
+        Value::Array(bookmarks) => match bookmarks.first() {
+            None => Ok(None),
+            Some(bookmark) => bookmark
+                .as_str()
+                .map(|bookmark| Some(bookmark.to_owned()))
+                .ok_or_else(|| {
+                    invalid_response(
+                        resource,
+                        "pagination bookmark metadata contained a non-string bookmark",
+                    )
+                }),
+        },
+        Value::Null => Ok(None),
+        _ => Err(invalid_response(
+            resource,
+            "pagination bookmark metadata was not a bookmark, list, or null",
+        )),
     }
 }
 
@@ -667,8 +687,8 @@ pub(crate) mod test_support {
         super::read_api_body(response, resource, max_bytes).await
     }
 
-    pub(crate) fn response_bookmark(response: &Value) -> Option<String> {
-        super::response_bookmark(response)
+    pub(crate) fn response_bookmark(response: &Value) -> Result<Option<String>, PinterestError> {
+        super::response_bookmark(response, "Feed")
     }
 
     pub(crate) fn retry_delay(attempt: usize, retry_after: Option<&HeaderValue>) -> Duration {
