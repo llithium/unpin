@@ -213,7 +213,6 @@ pub(crate) async fn collect(
         let (source, source_pins, source_skipped, source_warnings) = normalize_source(
             &mut fetched,
             &mut seen_pin_ids,
-            client.is_authenticated(),
             multiple.then_some(board.name.clone()),
             board.url,
         );
@@ -240,7 +239,6 @@ pub(crate) async fn collect(
                 let (source, source_pins, source_skipped, source_warnings) = normalize_source(
                     &mut fetched,
                     &mut seen_pin_ids,
-                    client.is_authenticated(),
                     None,
                     format!("https://www.pinterest.com/{}/", user.username),
                 );
@@ -288,11 +286,10 @@ pub(crate) async fn collect(
 fn normalize_source(
     fetched: &mut BoardPins,
     seen_pin_ids: &mut HashSet<String>,
-    authenticated: bool,
     warning_source: Option<String>,
     url: String,
 ) -> (IntakeSource, Vec<Pin>, Vec<SkippedPin>, Vec<SourceWarning>) {
-    retain_unseen_source(fetched, seen_pin_ids, authenticated);
+    retain_unseen_source(fetched, seen_pin_ids);
     let source = IntakeSource {
         name: fetched.board_name.clone(),
         url,
@@ -312,11 +309,7 @@ fn normalize_source(
     (source, pins, skipped, warnings)
 }
 
-fn retain_unseen_source(
-    fetched: &mut BoardPins,
-    seen_pin_ids: &mut HashSet<String>,
-    authenticated: bool,
-) {
+fn retain_unseen_source(fetched: &mut BoardPins, seen_pin_ids: &mut HashSet<String>) {
     fetched
         .pins
         .retain(|pin| seen_pin_ids.insert(pin.id.clone()));
@@ -326,16 +319,10 @@ fn retain_unseen_source(
             .is_none_or(|id| seen_pin_ids.insert(id.clone()))
     });
     fetched.pins_found = fetched.pins.len() + fetched.skipped.len();
-    fetched
-        .warnings
-        .retain(|warning| !warning.starts_with("Pinterest reports "));
-    if let Some(warning) = crate::pinterest::incomplete_scan_warning(
-        authenticated,
-        fetched.pins_reported,
-        fetched.pins_found,
-    ) {
-        fetched.warnings.push(warning);
-    }
+    // The provider warning was calculated before this cross-source merge. Do
+    // not compare the reported count with the deduplicated count here: a pin
+    // returned by an earlier source is intentionally absent from this source's
+    // retained list, not missing from the provider response.
 }
 
 /// Works out which sources to scan, prompting when a profile needs a choice.
@@ -558,7 +545,10 @@ mod tests {
             SourceOutcome::Failed { .. } => panic!("the first board should be collected"),
         }
         match &result.sources[1] {
-            SourceOutcome::Collected { source, .. } => assert_eq!(source.pins_found, 0),
+            SourceOutcome::Collected { source, warnings } => {
+                assert_eq!(source.pins_found, 0);
+                assert!(warnings.is_empty(), "{warnings:?}");
+            }
             SourceOutcome::Failed { .. } => panic!("the second board should be collected"),
         }
     }

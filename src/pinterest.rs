@@ -332,6 +332,7 @@ impl PinterestClient {
         self.api.http_client()
     }
 
+    #[cfg(test)]
     pub(crate) fn is_authenticated(&self) -> bool {
         self.api.is_authenticated()
     }
