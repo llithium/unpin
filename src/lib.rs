@@ -7,6 +7,7 @@ pub mod report;
 pub mod select;
 pub mod visual;
 
+mod image_fingerprint;
 mod intake;
 mod pinterest_api;
 
