@@ -38,6 +38,9 @@ const MAX_IMAGE_BYTES: u64 = 100 * 1024 * 1024;
 /// reservation through decoding. This prevents completed downloads from
 /// accumulating to `DOWNLOAD_CONCURRENCY * MAX_IMAGE_BYTES` while CPU work lags.
 const MAX_IN_FLIGHT_IMAGE_BYTES: u64 = 512 * 1024 * 1024;
+/// Chunked image responses have no reliable size to preallocate. Start small
+/// while retaining the full buffer-budget reservation that bounds their growth.
+const UNKNOWN_LENGTH_INITIAL_BUFFER_BYTES: u64 = 64 * 1024;
 /// Images above 16 megapixels are skipped before full-resolution decoding. The
 /// image decoder also receives a matching allocation ceiling as defense in depth;
 /// a breach remains an ordinary skipped-pin reason.
@@ -575,10 +578,13 @@ async fn download_bytes_once(
             reason: "image buffer budget is unavailable".to_owned(),
             retryable: false,
         })?;
-    let capacity = usize::try_from(reserved_bytes).map_err(|_| ImageDownloadError {
-        reason: "image safety limit cannot fit in memory on this platform".to_owned(),
-        retryable: false,
-    })?;
+    let capacity =
+        initial_image_buffer_capacity(advertised_bytes, max_image_bytes).map_err(|_| {
+            ImageDownloadError {
+                reason: "image safety limit cannot fit in memory on this platform".to_owned(),
+                retryable: false,
+            }
+        })?;
     let mut bytes = Vec::with_capacity(capacity);
     let mut stream = response.bytes_stream();
     while let Some(chunk) = stream
@@ -599,6 +605,16 @@ async fn download_bytes_once(
     }
 
     Ok((bytes, buffer_permit))
+}
+
+fn initial_image_buffer_capacity(
+    advertised_bytes: Option<u64>,
+    max_image_bytes: u64,
+) -> Result<usize, std::num::TryFromIntError> {
+    let capacity = advertised_bytes
+        .unwrap_or(UNKNOWN_LENGTH_INITIAL_BUFFER_BYTES)
+        .min(max_image_bytes);
+    usize::try_from(capacity)
 }
 
 fn checked_image_length(
@@ -1267,6 +1283,16 @@ mod tests {
         assert!(error.contains("advertised content length"));
         assert_eq!(checked_image_length(2, 2, 8, Some(4)).unwrap(), 4);
         assert_eq!(checked_image_length(2, 2, 8, None).unwrap(), 4);
+    }
+
+    #[test]
+    fn unknown_length_images_start_with_a_small_bounded_buffer() {
+        assert_eq!(initial_image_buffer_capacity(Some(42), 1024).unwrap(), 42);
+        assert_eq!(
+            initial_image_buffer_capacity(None, MAX_IMAGE_BYTES).unwrap(),
+            UNKNOWN_LENGTH_INITIAL_BUFFER_BYTES as usize
+        );
+        assert_eq!(initial_image_buffer_capacity(None, 32).unwrap(), 32);
     }
 
     #[tokio::test]
