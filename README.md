@@ -185,6 +185,9 @@ Run `unpin --help` for the complete interface.
   one percent. A second 64×64 contrast-normalized structural comparison must
   then score at least 97%, which rejects unrelated images with similar broad
   light/dark layouts.
+- Visual matching stops with an actionable safety error before an excessively
+  large candidate queue can exhaust memory; rerun with `--exact-only` or a
+  lower `--similarity-threshold` to narrow the review.
 - Rankings use decoded pixel area, longest edge, and file size—in that order.
 
 Story/idea pins are analyzed through their static original cover when one is

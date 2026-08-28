@@ -41,6 +41,10 @@ const MAX_IN_FLIGHT_IMAGE_BYTES: u64 = 512 * 1024 * 1024;
 /// a breach remains an ordinary skipped-pin reason.
 const MAX_DECODED_PIXELS: u64 = 16 * 1024 * 1024;
 const MIN_STRUCTURAL_SIMILARITY: f64 = 0.97;
+/// A report larger than this is not a useful interactive review queue and can
+/// otherwise grow quadratically when a permissive similarity threshold is
+/// selected. Stop with an actionable error instead of exhausting memory.
+const MAX_VISUAL_CANDIDATES: usize = 100_000;
 /// Aspect-ratio buckets are expressed in log space so the same relative
 /// tolerance works for portrait, landscape, and square images. A ±3 lookup
 /// covers every pair allowed by the one-percent final check below.
@@ -74,6 +78,11 @@ pub struct AnalysisResult {
 pub enum AnalysisError {
     #[error("failed to build the image HTTP client")]
     Client(#[source] reqwest::Error),
+
+    #[error(
+        "visual matching exceeded the {limit}-candidate safety limit; rerun with --exact-only or a lower --similarity-threshold"
+    )]
+    VisualCandidateLimit { limit: usize },
 }
 
 #[derive(Debug, Clone)]
@@ -439,7 +448,7 @@ async fn analyze_pins_with_limits(
     let visual_candidates = if exact_only {
         Vec::new()
     } else {
-        build_visual_candidates(&images, similarity_threshold)
+        build_visual_candidates(&images, similarity_threshold)?
     };
     progress.step(ProgressStep::Matching {
         lifecycle: Lifecycle::Completed,
@@ -511,17 +520,17 @@ async fn download_bytes(
             response.status()
         ));
     }
-    if response
-        .content_length()
-        .is_some_and(|length| length > max_image_bytes)
-    {
+    let advertised_bytes = response.content_length();
+    if advertised_bytes.is_some_and(|length| length > max_image_bytes) {
         return Err(image_size_limit_error(max_image_bytes));
     }
 
     // Reserve the advertised size when available. Chunked/unknown-length
     // responses reserve the full per-image ceiling before their first body
     // chunk, so a slow decoder cannot be surrounded by many growing buffers.
-    let reserved_bytes = response.content_length().unwrap_or(max_image_bytes);
+    // A stream that contradicts an advertised length is rejected rather than
+    // growing past the amount reserved from the shared buffer budget.
+    let reserved_bytes = advertised_bytes.unwrap_or(max_image_bytes);
     let reserved_permits = u32::try_from(reserved_bytes)
         .map_err(|_| "image safety limit cannot be represented by the buffer budget".to_owned())?;
     let buffer_permit = Arc::clone(image_buffer_budget)
@@ -537,21 +546,34 @@ async fn download_bytes(
         .await
         .map_err(|error| format!("image download failed: {}", concise_reqwest_error(&error)))?
     {
-        let new_length = u64::try_from(bytes.len())
-            .ok()
-            .and_then(|length| {
-                u64::try_from(chunk.len())
-                    .ok()
-                    .and_then(|chunk_length| length.checked_add(chunk_length))
-            })
-            .ok_or_else(|| "image response size overflowed its safety check".to_owned())?;
-        if new_length > max_image_bytes {
-            return Err(image_size_limit_error(max_image_bytes));
-        }
+        checked_image_length(bytes.len(), chunk.len(), max_image_bytes, advertised_bytes)?;
         bytes.extend_from_slice(&chunk);
     }
 
     Ok((bytes, buffer_permit))
+}
+
+fn checked_image_length(
+    current_length: usize,
+    chunk_length: usize,
+    max_image_bytes: u64,
+    advertised_bytes: Option<u64>,
+) -> Result<u64, String> {
+    let new_length = u64::try_from(current_length)
+        .ok()
+        .and_then(|length| {
+            u64::try_from(chunk_length)
+                .ok()
+                .and_then(|chunk_length| length.checked_add(chunk_length))
+        })
+        .ok_or_else(|| "image response size overflowed its safety check".to_owned())?;
+    if new_length > max_image_bytes {
+        return Err(image_size_limit_error(max_image_bytes));
+    }
+    if advertised_bytes.is_some_and(|advertised| new_length > advertised) {
+        return Err("image response exceeded its advertised content length".to_owned());
+    }
+    Ok(new_length)
 }
 
 fn image_size_limit_error(max_image_bytes: u64) -> String {
@@ -608,7 +630,18 @@ fn build_exact_groups(images: &[AnalyzedImage]) -> Vec<DuplicateGroup> {
     groups
 }
 
-fn build_visual_candidates(images: &[AnalyzedImage], threshold: u8) -> Vec<VisualCandidate> {
+fn build_visual_candidates(
+    images: &[AnalyzedImage],
+    threshold: u8,
+) -> Result<Vec<VisualCandidate>, AnalysisError> {
+    build_visual_candidates_with_limit(images, threshold, MAX_VISUAL_CANDIDATES)
+}
+
+fn build_visual_candidates_with_limit(
+    images: &[AnalyzedImage],
+    threshold: u8,
+    max_candidates: usize,
+) -> Result<Vec<VisualCandidate>, AnalysisError> {
     let mut trees = HashMap::<i64, BkTree>::new();
     let mut candidates = Vec::new();
 
@@ -616,17 +649,25 @@ fn build_visual_candidates(images: &[AnalyzedImage], threshold: u8) -> Vec<Visua
         let bucket = aspect_ratio_bucket(image);
         for offset in -ASPECT_RATIO_BUCKET_RADIUS..=ASPECT_RATIO_BUCKET_RADIUS {
             if let Some(tree) = trees.get(&(bucket + offset)) {
-                for other_index in tree.query(image.fingerprint.difference_hash, threshold) {
+                for other_index in tree.query_excluding_sha(
+                    image.fingerprint.difference_hash,
+                    threshold,
+                    &image.fingerprint.sha256,
+                ) {
                     let other = &images[other_index];
-                    if image.fingerprint.sha256 == other.fingerprint.sha256
-                        || !aspect_ratios_match(image, other)
-                    {
+                    if !aspect_ratios_match(image, other) {
                         continue;
                     }
                     let structural_similarity =
                         image.fingerprint.visual_similarity(&other.fingerprint);
                     if structural_similarity < MIN_STRUCTURAL_SIMILARITY {
                         continue;
+                    }
+
+                    if candidates.len() >= max_candidates {
+                        return Err(AnalysisError::VisualCandidateLimit {
+                            limit: max_candidates,
+                        });
                     }
 
                     let distance = (image.fingerprint.difference_hash
@@ -643,10 +684,11 @@ fn build_visual_candidates(images: &[AnalyzedImage], threshold: u8) -> Vec<Visua
                 }
             }
         }
-        trees
-            .entry(bucket)
-            .or_default()
-            .insert(image.fingerprint.difference_hash, index);
+        trees.entry(bucket).or_default().insert(
+            image.fingerprint.difference_hash,
+            &image.fingerprint.sha256,
+            index,
+        );
     }
 
     candidates.sort_by(|left, right| {
@@ -657,7 +699,7 @@ fn build_visual_candidates(images: &[AnalyzedImage], threshold: u8) -> Vec<Visua
             .then_with(|| left.items[0].pin_id.cmp(&right.items[0].pin_id))
             .then_with(|| left.items[1].pin_id.cmp(&right.items[1].pin_id))
     });
-    candidates
+    Ok(candidates)
 }
 
 fn aspect_ratio_bucket(image: &AnalyzedImage) -> i64 {
@@ -728,15 +770,17 @@ struct BkTree {
 struct BkNode {
     hash: u64,
     image_indices: Vec<usize>,
+    sha_groups: HashMap<String, Vec<usize>>,
     children: BTreeMap<u8, usize>,
 }
 
 impl BkTree {
-    fn insert(&mut self, hash: u64, image_index: usize) {
+    fn insert(&mut self, hash: u64, sha256: &str, image_index: usize) {
         if self.nodes.is_empty() {
             self.nodes.push(BkNode {
                 hash,
                 image_indices: vec![image_index],
+                sha_groups: HashMap::from([(sha256.to_owned(), vec![image_index])]),
                 children: BTreeMap::new(),
             });
             return;
@@ -746,7 +790,12 @@ impl BkTree {
         loop {
             let distance = (hash ^ self.nodes[node_index].hash).count_ones() as u8;
             if distance == 0 {
-                self.nodes[node_index].image_indices.push(image_index);
+                let node = &mut self.nodes[node_index];
+                node.image_indices.push(image_index);
+                node.sha_groups
+                    .entry(sha256.to_owned())
+                    .or_default()
+                    .push(image_index);
                 return;
             }
             if let Some(child) = self.nodes[node_index].children.get(&distance).copied() {
@@ -758,6 +807,7 @@ impl BkTree {
             self.nodes.push(BkNode {
                 hash,
                 image_indices: vec![image_index],
+                sha_groups: HashMap::from([(sha256.to_owned(), vec![image_index])]),
                 children: BTreeMap::new(),
             });
             self.nodes[node_index].children.insert(distance, new_index);
@@ -765,7 +815,16 @@ impl BkTree {
         }
     }
 
+    #[cfg(test)]
     fn query(&self, hash: u64, threshold: u8) -> Vec<usize> {
+        self.query_filtered(hash, threshold, None)
+    }
+
+    fn query_excluding_sha(&self, hash: u64, threshold: u8, excluded_sha: &str) -> Vec<usize> {
+        self.query_filtered(hash, threshold, Some(excluded_sha))
+    }
+
+    fn query_filtered(&self, hash: u64, threshold: u8, excluded_sha: Option<&str>) -> Vec<usize> {
         if self.nodes.is_empty() {
             return Vec::new();
         }
@@ -776,7 +835,15 @@ impl BkTree {
             let node = &self.nodes[node_index];
             let distance = (hash ^ node.hash).count_ones() as u8;
             if distance <= threshold {
-                results.extend(node.image_indices.iter().copied());
+                match excluded_sha {
+                    Some(excluded_sha) => node
+                        .sha_groups
+                        .iter()
+                        .filter(|(sha256, _)| sha256.as_str() != excluded_sha)
+                        .flat_map(|(_, indices)| indices.iter().copied())
+                        .for_each(|index| results.push(index)),
+                    None => results.extend(node.image_indices.iter().copied()),
+                }
             }
             let lower = distance.saturating_sub(threshold);
             let upper = distance.saturating_add(threshold);
@@ -842,13 +909,23 @@ mod tests {
     #[test]
     fn bk_tree_finds_values_within_hamming_distance() {
         let mut tree = BkTree::default();
-        tree.insert(0, 0);
-        tree.insert(0b1111, 1);
-        tree.insert(u64::MAX, 2);
+        tree.insert(0, "zero", 0);
+        tree.insert(0b1111, "ones", 1);
+        tree.insert(u64::MAX, "max", 2);
 
         let mut matches = tree.query(0b0011, 2);
         matches.sort_unstable();
         assert_eq!(matches, vec![0, 1]);
+    }
+
+    #[test]
+    fn bk_tree_can_exclude_one_sha_group_without_dropping_other_same_hash_images() {
+        let mut tree = BkTree::default();
+        tree.insert(0, "same", 0);
+        tree.insert(0, "same", 1);
+        tree.insert(0, "different", 2);
+
+        assert_eq!(tree.query_excluding_sha(0, 0, "same"), vec![2]);
     }
 
     #[test]
@@ -1047,6 +1124,14 @@ mod tests {
         assert_eq!(result.analyzed, 0);
         assert_eq!(result.skipped.len(), 1);
         assert!(result.skipped[0].reason.contains("safety limit"));
+    }
+
+    #[test]
+    fn image_buffer_accounting_rejects_a_stream_that_exceeds_content_length() {
+        let error = checked_image_length(2, 2, 8, Some(3)).unwrap_err();
+        assert!(error.contains("advertised content length"));
+        assert_eq!(checked_image_length(2, 2, 8, Some(4)).unwrap(), 4);
+        assert_eq!(checked_image_length(2, 2, 8, None).unwrap(), 4);
     }
 
     #[tokio::test]
@@ -1252,7 +1337,7 @@ mod tests {
         let mut right = analyzed("2", 500, 500, 400, 0b11);
         left.board = Some("Interiors".into());
         right.board = Some("Mood board".into());
-        let candidates = build_visual_candidates(&[left, right], 2);
+        let candidates = build_visual_candidates(&[left, right], 2).unwrap();
         assert_eq!(candidates[0].scope, MatchScope::CrossBoard);
     }
 
@@ -1296,7 +1381,8 @@ mod tests {
                 same_visual_second,
             ],
             1,
-        );
+        )
+        .unwrap();
         assert_eq!(candidates.len(), 2);
         assert_eq!(candidates[0].scope, MatchScope::SameBoard);
         assert_eq!(candidates[1].scope, MatchScope::CrossBoard);
@@ -1323,7 +1409,7 @@ mod tests {
             analyzed("2", 500, 500, 400, 0b11),
             analyzed("3", 500, 250, 300, 0b1),
         ];
-        let candidates = build_visual_candidates(&images, 2);
+        let candidates = build_visual_candidates(&images, 2).unwrap();
         assert_eq!(candidates.len(), 1);
         assert_eq!(candidates[0].hash_distance, 2);
     }
@@ -1340,7 +1426,7 @@ mod tests {
             (aspect_ratio_bucket(&images[0]) - aspect_ratio_bucket(&images[1])).abs()
                 <= ASPECT_RATIO_BUCKET_RADIUS
         );
-        assert_eq!(build_visual_candidates(&images, 2).len(), 1);
+        assert_eq!(build_visual_candidates(&images, 2).unwrap().len(), 1);
     }
 
     #[test]
@@ -1362,6 +1448,24 @@ mod tests {
             right.fingerprint.structural_sum_squares,
         ) = test_structural_statistics(&right.fingerprint.structural_signature);
 
-        assert!(build_visual_candidates(&[left, right], 5).is_empty());
+        assert!(
+            build_visual_candidates(&[left, right], 5)
+                .unwrap()
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn visual_matching_stops_before_candidate_memory_grows_unboundedly() {
+        let images = [
+            analyzed("1", 1000, 1000, 500, 0),
+            analyzed("2", 1000, 1000, 400, 0),
+        ];
+
+        let error = build_visual_candidates_with_limit(&images, 0, 0).unwrap_err();
+        assert_eq!(
+            error.to_string(),
+            "visual matching exceeded the 0-candidate safety limit; rerun with --exact-only or a lower --similarity-threshold"
+        );
     }
 }
