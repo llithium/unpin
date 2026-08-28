@@ -11,6 +11,8 @@ mod image_fingerprint;
 mod intake;
 mod pinterest_api;
 
+use std::collections::BTreeMap;
+
 #[cfg(test)]
 mod test_support {
     use std::sync::OnceLock;
@@ -33,7 +35,7 @@ use url::Url;
 
 use crate::cli::Cli;
 use crate::intake::{IntakeError, IntakeRequest, SourceOutcome, SourceSelection};
-use crate::pinterest::{PinterestClient, PinterestError, Target};
+use crate::pinterest::{PinterestClient, PinterestError, SkippedPin, Target};
 use crate::progress::{Lifecycle, NoProgress, Progress, ProgressStep, SetupTask};
 use crate::report::{Report, ScannedBoard, Summary};
 
@@ -87,6 +89,28 @@ fn listed(reasons: &[String]) -> String {
         return String::new();
     }
     format!("\n  {}", reasons.join("\n  "))
+}
+
+/// Keeps the no-report error actionable when every pin was skipped before a
+/// report could be built. Grouping avoids turning a large all-skipped scan into
+/// one error line per pin while retaining the reasons a user can act on.
+fn no_analyzable_reasons(mut warnings: Vec<String>, skipped: &[SkippedPin]) -> Vec<String> {
+    let mut counts = BTreeMap::new();
+    for pin in skipped {
+        *counts.entry(pin.reason.as_str()).or_insert(0_usize) += 1;
+    }
+
+    let mut counts = counts.into_iter().collect::<Vec<_>>();
+    counts.sort_by(|left, right| right.1.cmp(&left.1).then_with(|| left.0.cmp(right.0)));
+    warnings.extend(counts.into_iter().map(|(reason, count)| {
+        let pins = if count == 1 {
+            "1 pin".to_owned()
+        } else {
+            format!("{count} pins")
+        };
+        format!("{pins} skipped: {reason}")
+    }));
+    warnings
 }
 
 pub async fn run(cli: &Cli) -> Result<Report, AppError> {
@@ -178,7 +202,9 @@ pub async fn run_with_api_root_and_progress(
     }
 
     if pins.is_empty() {
-        return Err(AppError::NoAnalyzablePins { reasons: warnings });
+        return Err(AppError::NoAnalyzablePins {
+            reasons: no_analyzable_reasons(warnings, &skipped),
+        });
     }
 
     let cache_dir = use_default_cache
@@ -194,7 +220,9 @@ pub async fn run_with_api_root_and_progress(
     .await?;
     skipped.append(&mut analysis.skipped);
     if analysis.analyzed == 0 {
-        return Err(AppError::NoAnalyzablePins { reasons: warnings });
+        return Err(AppError::NoAnalyzablePins {
+            reasons: no_analyzable_reasons(warnings, &skipped),
+        });
     }
 
     if cli.same_board_only {

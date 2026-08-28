@@ -629,6 +629,65 @@ async fn total_failure_reports_the_reason_not_an_empty_board() {
 }
 
 #[tokio::test]
+async fn no_analyzable_pins_explain_skipped_reasons() {
+    let server = MockServer::start().await;
+    mount_resource(
+        &server,
+        "Board",
+        json!({
+            "slug": "ideas",
+            "username": "alice",
+            "field_set_key": "detailed"
+        }),
+        json!({
+            "resource_response": { "data": {
+                "id": "board-1",
+                "name": "Ideas",
+                "pin_count": 1,
+                "section_count": 0
+            }}
+        }),
+    )
+    .await;
+    mount_resource(
+        &server,
+        "BoardFeed",
+        json!({
+            "board_id": "board-1",
+            "field_set_key": "react_grid_pin",
+            "prepend": false,
+            "page_size": 250,
+            "bookmarks": null
+        }),
+        page(
+            json!([{
+                "id": "video-1",
+                "is_video": true
+            }]),
+            "-end-",
+        ),
+    )
+    .await;
+
+    let cli = Cli::try_parse_from([
+        "unpin",
+        "https://www.pinterest.com/alice/ideas/",
+        "--no-visual",
+    ])
+    .unwrap();
+    let error = unpin::run_with_api_root(&cli, Some(Url::parse(&server.uri()).unwrap()))
+        .await
+        .unwrap_err();
+    let message = error.to_string();
+
+    assert!(
+        message.contains("no analyzable static image pins were found"),
+        "{message}"
+    );
+    assert!(message.contains("1 pin skipped: video pin"), "{message}");
+}
+
+#[tokio::test]
 async fn board_urls_in_the_report_are_encoded_and_http() {
     let server = MockServer::start().await;
     Mock::given(method("GET"))
