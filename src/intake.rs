@@ -367,6 +367,24 @@ async fn resolve_sources(
         return Err(IntakeError::BoardSelectionNotInteractive);
     }
 
+    // An explicit unorganized-only scan has no reason to discover boards. It
+    // should remain useful even when the profile board listing is unavailable,
+    // and skipping that request also keeps the selection faithful to the CLI.
+    if matches!(
+        &selection,
+        SourceSelection::Requested {
+            boards,
+            include_unorganized: true,
+        } if boards.is_empty()
+    ) {
+        return Ok(ResolvedSources {
+            user: Some(user.clone()),
+            boards: Vec::new(),
+            include_unorganized: true,
+            prefetched_unorganized: None,
+        });
+    }
+
     let boards = client.list_profile_sources(user, progress).await?;
     if boards.is_empty()
         && matches!(

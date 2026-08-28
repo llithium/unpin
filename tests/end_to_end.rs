@@ -473,11 +473,6 @@ async fn explicit_unorganized_selection_skips_board_feeds() {
         .mount(&server)
         .await;
 
-    mount_board_listing(
-        &server,
-        json!([board_entry("board-1", "Interiors", "interiors", 0)]),
-    )
-    .await;
     mount_resource(
         &server,
         "UserPins",
@@ -526,6 +521,13 @@ async fn explicit_unorganized_selection_skips_board_feeds() {
         requests
             .iter()
             .filter(|request| request.url.path() == "/resource/BoardFeedResource/get/")
+            .count(),
+        0
+    );
+    assert_eq!(
+        requests
+            .iter()
+            .filter(|request| request.url.path() == "/resource/BoardsResource/get/")
             .count(),
         0
     );
