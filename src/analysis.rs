@@ -690,18 +690,36 @@ fn build_visual_candidates_with_limit(
     threshold: u8,
     max_candidates: usize,
 ) -> Result<Vec<VisualCandidate>, AnalysisError> {
+    // Every pin with the same SHA-256 has the same visual fingerprint. Compare
+    // each pair of exact-image groups once, then expand a passing comparison
+    // back to the per-pin candidates expected by the report.
+    let mut group_by_sha = HashMap::<&str, usize>::new();
+    let mut fingerprint_groups = Vec::<Vec<usize>>::new();
+    for (index, image) in images.iter().enumerate() {
+        let group_index = match group_by_sha.get(image.fingerprint.sha256.as_str()) {
+            Some(&group_index) => group_index,
+            None => {
+                let group_index = fingerprint_groups.len();
+                group_by_sha.insert(&image.fingerprint.sha256, group_index);
+                fingerprint_groups.push(Vec::new());
+                group_index
+            }
+        };
+        fingerprint_groups[group_index].push(index);
+    }
+
     let mut trees = HashMap::<i64, BkTree>::new();
     let mut candidates = Vec::new();
 
-    for (index, image) in images.iter().enumerate() {
+    for (group_index, members) in fingerprint_groups.iter().enumerate() {
+        let index = members[0];
+        let image = &images[index];
         let bucket = aspect_ratio_bucket(image);
         for offset in -ASPECT_RATIO_BUCKET_RADIUS..=ASPECT_RATIO_BUCKET_RADIUS {
             if let Some(tree) = trees.get(&(bucket + offset)) {
-                for other_index in tree.query_excluding_sha(
-                    image.fingerprint.difference_hash,
-                    threshold,
-                    &image.fingerprint.sha256,
-                ) {
+                for other_group_index in tree.query(image.fingerprint.difference_hash, threshold) {
+                    let other_members = &fingerprint_groups[other_group_index];
+                    let other_index = other_members[0];
                     let other = &images[other_index];
                     if !aspect_ratios_match(image, other) {
                         continue;
@@ -712,30 +730,35 @@ fn build_visual_candidates_with_limit(
                         continue;
                     }
 
-                    if candidates.len() >= max_candidates {
-                        return Err(AnalysisError::VisualCandidateLimit {
-                            limit: max_candidates,
-                        });
-                    }
-
                     let distance = (image.fingerprint.difference_hash
                         ^ other.fingerprint.difference_hash)
                         .count_ones() as u8;
-                    let members = [other_index, index];
-                    let ranked = ranked_items(images, &members);
-                    candidates.push(VisualCandidate {
-                        hash_distance: distance,
-                        similarity_percent: (structural_similarity * 100.0).floor() as u8,
-                        scope: MatchScope::of(&ranked),
-                        items: [ranked[0].clone(), ranked[1].clone()],
-                    });
+                    let similarity_percent = (structural_similarity * 100.0).floor() as u8;
+                    for &other_index in other_members {
+                        for &index in members {
+                            if candidates.len() >= max_candidates {
+                                return Err(AnalysisError::VisualCandidateLimit {
+                                    limit: max_candidates,
+                                });
+                            }
+
+                            let pair = [other_index, index];
+                            let ranked = ranked_items(images, &pair);
+                            candidates.push(VisualCandidate {
+                                hash_distance: distance,
+                                similarity_percent,
+                                scope: MatchScope::of(&ranked),
+                                items: [ranked[0].clone(), ranked[1].clone()],
+                            });
+                        }
+                    }
                 }
             }
         }
         trees.entry(bucket).or_default().insert(
             image.fingerprint.difference_hash,
             &image.fingerprint.sha256,
-            index,
+            group_index,
         );
     }
 
@@ -863,11 +886,11 @@ impl BkTree {
         }
     }
 
-    #[cfg(test)]
     fn query(&self, hash: u64, threshold: u8) -> Vec<usize> {
         self.query_filtered(hash, threshold, None)
     }
 
+    #[cfg(test)]
     fn query_excluding_sha(&self, hash: u64, threshold: u8, excluded_sha: &str) -> Vec<usize> {
         self.query_filtered(hash, threshold, Some(excluded_sha))
     }
@@ -974,6 +997,70 @@ mod tests {
         tree.insert(0, "different", 2);
 
         assert_eq!(tree.query_excluding_sha(0, 0, "same"), vec![2]);
+    }
+
+    #[test]
+    fn visual_matching_expands_unique_fingerprint_pairs_to_pin_pairs() {
+        let mut images = vec![
+            analyzed("left-a", 1200, 800, 42_000, 0),
+            analyzed("right-a", 1200, 800, 42_000, 1),
+            analyzed("left-b", 1200, 800, 42_000, 0),
+            analyzed("right-b", 1200, 800, 42_000, 1),
+        ];
+        images[0].fingerprint.sha256 = "left".into();
+        images[2].fingerprint.sha256 = "left".into();
+        images[1].fingerprint.sha256 = "right".into();
+        images[3].fingerprint.sha256 = "right".into();
+
+        let candidates = build_visual_candidates_with_limit(&images, 5, 4).unwrap();
+        let pairs = candidates
+            .iter()
+            .map(|candidate| {
+                let mut ids = candidate
+                    .items
+                    .iter()
+                    .map(|item| item.pin_id.as_str())
+                    .collect::<Vec<_>>();
+                ids.sort_unstable();
+                ids
+            })
+            .collect::<Vec<_>>();
+
+        assert_eq!(candidates.len(), 4);
+        assert!(pairs.contains(&vec!["left-a", "right-a"]));
+        assert!(pairs.contains(&vec!["left-a", "right-b"]));
+        assert!(pairs.contains(&vec!["left-b", "right-a"]));
+        assert!(pairs.contains(&vec!["left-b", "right-b"]));
+        assert!(matches!(
+            build_visual_candidates_with_limit(&images, 5, 3),
+            Err(AnalysisError::VisualCandidateLimit { limit: 3 })
+        ));
+    }
+
+    #[test]
+    #[ignore = "manual duplicate-heavy visual matching benchmark"]
+    fn benchmark_duplicate_heavy_visual_matching() {
+        let mut images = Vec::new();
+        for group in 0..2 {
+            for member in 0..100 {
+                let mut image =
+                    analyzed(&format!("group-{group}-{member}"), 1200, 800, 42_000, group);
+                image.fingerprint.sha256 = format!("sha-{group}");
+                image.fingerprint.structural_signature = (0..4096)
+                    .map(|value| (value % 256) as u8)
+                    .collect::<Vec<_>>()
+                    .into_boxed_slice();
+                let (sum, squares) =
+                    test_structural_statistics(&image.fingerprint.structural_signature);
+                image.fingerprint.structural_sum = sum;
+                image.fingerprint.structural_sum_squares = squares;
+                images.push(image);
+            }
+        }
+
+        let started = std::time::Instant::now();
+        let candidates = build_visual_candidates(&images, 5).unwrap();
+        eprintln!("{} candidates in {:?}", candidates.len(), started.elapsed());
     }
 
     #[test]
