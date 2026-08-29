@@ -15,6 +15,8 @@ use sha2::{Digest, Sha256};
 const STRUCTURAL_SIGNATURE_SIZE: u32 = 64;
 const DIFFERENCE_HASH_WIDTH: u32 = 9;
 const DIFFERENCE_HASH_HEIGHT: u32 = 8;
+/// Keep the decoded raster bounded even when a compressed image is small.
+pub(crate) const MAX_DECODED_PIXELS: u64 = 16 * 1024 * 1024;
 
 #[derive(Debug, Clone, Eq, PartialEq, Serialize, Deserialize)]
 pub(crate) struct ImageFingerprint {

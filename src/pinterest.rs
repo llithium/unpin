@@ -9,6 +9,7 @@ use serde_json::{Value, json};
 use url::Url;
 
 use crate::auth::{BrowserCookie, ScopedCookie, scope_explicit_cookies};
+use crate::image_fingerprint::MAX_DECODED_PIXELS;
 use crate::pinterest_api::PinterestApi;
 use crate::progress::{Lifecycle, NoProgress, Progress, ProgressStep, SetupTask};
 
@@ -28,6 +29,42 @@ const BOARD_PAGE_SIZE: usize = 250;
 /// edge to sit on, so `paginate` retries once without the option when a request
 /// is refused, giving the round trips back rather than failing the scan.
 const FEED_PAGE_SIZE: usize = 250;
+const IMAGE_RENDITION_KEYS: [&str; 9] = [
+    "orig",
+    "originals",
+    "1200x",
+    "750x",
+    "736x",
+    "564x",
+    "474x",
+    "236x",
+    "170x",
+];
+const FLAT_IMAGE_SPEC_KEYS: [&str; 12] = [
+    "imageSpec_orig",
+    "imageSpec_originals",
+    "imageSpec_1200x",
+    "imageSpec_750x",
+    "imageSpec_736x",
+    "imageSpec_564x",
+    "imageSpec_474x",
+    "imageSpec_236x",
+    "imageSpec_170x",
+    "imageAdjustedSpec_orig",
+    "imageAdjustedSpec_1200x",
+    "imageAdjustedSpec_750x",
+];
+const FLAT_IMAGE_KEYS: [&str; 9] = [
+    "imageOrig",
+    "imageOriginals",
+    "image1200x",
+    "image750x",
+    "image736x",
+    "image564x",
+    "image474x",
+    "image236x",
+    "image170x",
+];
 /// Sections belong to one board that is already sharing the board-level
 /// concurrency budget, so this controls how much work can queue behind the
 /// shared request limit.
@@ -787,10 +824,43 @@ fn is_unorganized_pin(raw: &Value) -> bool {
 
 fn parse_pin(raw: &Value, board_name: &str) -> Result<Pin, String> {
     let id = value_string(raw.get("id")).ok_or_else(|| "pin ID is missing".to_owned())?;
-    let is_story = raw.get("story_pin_data").is_some_and(is_present);
-    let is_carousel = raw.get("carousel_data").is_some_and(is_present);
-    let is_video = raw.get("videos").is_some_and(is_present)
-        || raw.get("is_video").and_then(Value::as_bool) == Some(true);
+    let is_story = raw
+        .get("story_pin_data")
+        .is_some_and(|value| !value.is_null())
+        || raw
+            .get("story_pin_data_id")
+            .is_some_and(|value| !value.is_null())
+        || raw
+            .get("storyPinData")
+            .is_some_and(|value| !value.is_null())
+        || raw
+            .get("storyPinDataId")
+            .is_some_and(|value| !value.is_null());
+    let is_carousel = raw
+        .get("carousel_data")
+        .is_some_and(|value| !value.is_null())
+        || raw
+            .get("carouselData")
+            .is_some_and(|value| !value.is_null())
+        || raw
+            .get("carousel_slots")
+            .is_some_and(|value| !value.is_null())
+        || raw
+            .get("carouselSlots")
+            .is_some_and(|value| !value.is_null())
+        || raw.get("is_carousel").and_then(Value::as_bool) == Some(true)
+        || raw.get("isCarousel").and_then(Value::as_bool) == Some(true);
+    let is_video = raw.get("videos").is_some_and(|value| !value.is_null())
+        || raw.get("is_video").and_then(Value::as_bool) == Some(true)
+        || raw.get("isVideo").and_then(Value::as_bool) == Some(true)
+        || raw.get("video").is_some_and(|value| !value.is_null())
+        || raw.get("videoData").is_some_and(|value| !value.is_null())
+        || raw
+            .get("video_status")
+            .is_some_and(|value| !value.is_null())
+        || raw.get("videoStatus").is_some_and(|value| !value.is_null())
+        || raw.pointer("/media/media_type").and_then(Value::as_str) == Some("video")
+        || raw.pointer("/media/mediaType").and_then(Value::as_str) == Some("video");
 
     // The analysis pipeline intentionally operates on images. Pinterest still
     // supplies a static representation for videos, and carousel slots expose
@@ -799,11 +869,11 @@ fn parse_pin(raw: &Value, board_name: &str) -> Result<Pin, String> {
     let image = if is_carousel {
         carousel_cover(raw).or_else(|| top_level_image(raw))
     } else if is_video {
-        raw.pointer("/images/orig")
-            .filter(|image| image_url(image).is_some())
-            .or_else(|| video_preview(raw))
+        video_preview(raw)
+    } else if is_story {
+        story_cover(raw).or_else(|| top_level_image(raw))
     } else {
-        raw.pointer("/images/orig")
+        top_level_image(raw)
     };
     let image = image.ok_or_else(|| {
         if is_story {
@@ -841,53 +911,85 @@ fn parse_pin(raw: &Value, board_name: &str) -> Result<Pin, String> {
 /// provider's display order, making the first slide a stable representative in
 /// the image-only analysis pipeline.
 fn carousel_cover(raw: &Value) -> Option<&Value> {
-    raw.pointer("/carousel_data/carousel_slots")
-        .and_then(Value::as_array)
+    let nested = ["carousel_data", "carouselData"]
         .into_iter()
+        .filter_map(|key| raw.get(key))
+        .filter_map(|data| {
+            ["carousel_slots", "carouselSlots"]
+                .into_iter()
+                .find_map(|key| data.get(key).and_then(Value::as_array))
+        })
         .flatten()
-        .find_map(carousel_slot_image)
+        .find_map(carousel_slot_image);
+    nested.or_else(|| {
+        ["carousel_slots", "carouselSlots"]
+            .into_iter()
+            .filter_map(|key| raw.get(key).and_then(Value::as_array))
+            .flatten()
+            .find_map(carousel_slot_image)
+    })
 }
 
 fn carousel_slot_image(slot: &Value) -> Option<&Value> {
-    let images = slot.get("images")?.as_object()?;
-    // `orig` is what ordinary pins expose. The other keys are kept as
-    // fallbacks because Pinterest sometimes omits that rendition for a slot.
-    ["orig", "originals", "736x", "564x", "474x", "236x"]
+    top_level_image(slot)
+}
+
+fn story_cover(raw: &Value) -> Option<&Value> {
+    ["story_pin_data", "storyPinData"]
         .into_iter()
-        .find_map(|key| images.get(key).filter(|image| image_url(image).is_some()))
-        .or_else(|| images.values().find(|image| image_url(image).is_some()))
+        .filter_map(|key| raw.get(key))
+        .find_map(find_story_image)
+}
+
+fn find_story_image(value: &Value) -> Option<&Value> {
+    match value {
+        Value::Object(object) => {
+            top_level_image(value).or_else(|| object.values().find_map(find_story_image))
+        }
+        Value::Array(values) => values.iter().find_map(find_story_image),
+        _ => None,
+    }
 }
 
 fn top_level_image(raw: &Value) -> Option<&Value> {
-    ["orig", "originals", "736x", "564x", "474x", "236x"]
+    if static_image_url(raw).is_some() {
+        return Some(raw);
+    }
+    let candidates = image_candidates(raw);
+    let first = candidates
+        .iter()
+        .copied()
+        .find(|image| static_image_url(image).is_some());
+
+    candidates
         .into_iter()
-        .filter_map(|key| raw.pointer(&format!("/images/{key}")))
-        .find(|image| image_url(image).is_some())
+        .filter(|image| static_image_url(image).is_some())
+        .find(|image| image_is_safe(image))
+        .or(first)
+        .or_else(|| raw.get("image").and_then(top_level_image))
 }
 
 /// Some video responses include a poster under the video rendition rather than
 /// under `/images/orig`. Only fields known to hold still-image metadata are
 /// considered; video URLs themselves must never enter image analysis.
 fn video_preview(raw: &Value) -> Option<&Value> {
-    [
-        "/images/originals",
-        "/images/736x",
-        "/images/564x",
-        "/videos/thumbnail",
-        "/videos/poster",
-    ]
-    .into_iter()
-    .filter_map(|pointer| raw.pointer(pointer))
-    .find(|image| image_url(image).is_some())
-    .or_else(|| find_video_preview(raw.get("videos")?))
+    top_level_image(raw).or_else(|| {
+        ["videos", "video", "videoData"]
+            .into_iter()
+            .filter_map(|key| raw.get(key))
+            .find_map(find_video_preview)
+    })
 }
 
 fn find_video_preview(value: &Value) -> Option<&Value> {
     match value {
         Value::Object(object) => {
-            for key in ["thumbnail", "poster", "image"] {
+            if let Some(image) = top_level_image(value) {
+                return Some(image);
+            }
+            for key in ["thumbnail", "thumbnailUrl", "poster", "posterUrl", "image"] {
                 if let Some(candidate) = object.get(key)
-                    && image_url(candidate).is_some()
+                    && static_image_url(candidate).is_some()
                 {
                     return Some(candidate);
                 }
@@ -908,14 +1010,109 @@ fn image_url(image: &Value) -> Option<&str> {
     is_http_url(url).then_some(url)
 }
 
-fn is_http_url(url: &str) -> bool {
-    url.starts_with("https://") || url.starts_with("http://")
+fn static_image_url(image: &Value) -> Option<&str> {
+    let url = image_url(image)?;
+    let path = url
+        .split(['?', '#'])
+        .next()
+        .unwrap_or(url)
+        .to_ascii_lowercase();
+    if path
+        .split('/')
+        .any(|segment| matches!(segment, "video" | "videos"))
+    {
+        return None;
+    }
+    [".mp4", ".m4v", ".mov", ".webm", ".m3u8"]
+        .iter()
+        .all(|suffix| !path.ends_with(suffix))
+        .then_some(url)
 }
 
-fn is_present(value: &Value) -> bool {
-    !value.is_null()
-        && value.as_object().is_none_or(|object| !object.is_empty())
-        && value.as_array().is_none_or(|array| !array.is_empty())
+fn image_candidates(raw: &Value) -> Vec<&Value> {
+    let mut candidates = Vec::new();
+    if let Some(images) = raw.get("images") {
+        if image_url(images).is_some() {
+            candidates.push(images);
+        }
+        if let Some(images) = images.as_object() {
+            for key in IMAGE_RENDITION_KEYS {
+                if let Some(image) = images.get(key) {
+                    push_image_candidate(&mut candidates, image);
+                }
+            }
+            // Keep unknown rendition names as a forward-compatible fallback;
+            // the static-URL and pixel checks below still vet each candidate.
+            for (key, image) in images {
+                if !IMAGE_RENDITION_KEYS.contains(&key.as_str()) {
+                    push_image_candidate(&mut candidates, image);
+                }
+            }
+        }
+    }
+    for key in FLAT_IMAGE_SPEC_KEYS.into_iter().chain(FLAT_IMAGE_KEYS) {
+        if let Some(image) = raw.get(key) {
+            push_image_candidate(&mut candidates, image);
+        }
+    }
+    for key in ["imageLargeUrl", "image_large_url"] {
+        if let Some(image) = raw.get(key) {
+            candidates.push(image);
+        }
+    }
+    candidates
+}
+
+fn push_image_candidate<'a>(candidates: &mut Vec<&'a Value>, image: &'a Value) {
+    candidates.push(image);
+    if let Some(object) = image.as_object() {
+        for key in IMAGE_RENDITION_KEYS {
+            if let Some(nested) = object.get(key) {
+                push_image_candidate(candidates, nested);
+            }
+        }
+    }
+}
+
+fn image_is_safe(image: &Value) -> bool {
+    match (
+        value_u32(image.get("width")),
+        value_u32(image.get("height")),
+    ) {
+        (Some(width), Some(height)) => {
+            width > 0 && height > 0 && u64::from(width) * u64::from(height) <= MAX_DECODED_PIXELS
+        }
+        // Pinterest's bounded renditions sometimes omit their dimensions in
+        // feed responses. Their URL still carries the CDN width, which is a
+        // safer choice than an unbounded `originals` URL with no metadata.
+        _ => is_bounded_rendition_url(image),
+    }
+}
+
+fn is_bounded_rendition_url(image: &Value) -> bool {
+    let Some(url) = static_image_url(image) else {
+        return false;
+    };
+    let path = url.split(['?', '#']).next().unwrap_or(url);
+    path.split('/').any(|segment| {
+        matches!(
+            segment,
+            "60x"
+                | "136x"
+                | "136x136"
+                | "170x"
+                | "236x"
+                | "474x"
+                | "564x"
+                | "736x"
+                | "750x"
+                | "1200x"
+        )
+    })
+}
+
+fn is_http_url(url: &str) -> bool {
+    url.starts_with("https://") || url.starts_with("http://")
 }
 
 fn value_string(value: Option<&Value>) -> Option<String> {
@@ -1205,6 +1402,168 @@ mod tests {
     }
 
     #[test]
+    fn parses_flattened_image_specs_from_current_feed_shape() {
+        let pin = parse_pin(
+            &json!({
+                "id": "129",
+                "imageSpec_orig": {
+                    "url": "https://i.pinimg.com/originals/current.jpg",
+                    "width": 1200,
+                    "height": 800
+                },
+                "imageSpec_736x": {
+                    "url": "https://i.pinimg.com/736x/current.jpg",
+                    "width": 736,
+                    "height": 491
+                }
+            }),
+            "Ideas",
+        )
+        .unwrap();
+
+        assert_eq!(pin.media_url, "https://i.pinimg.com/originals/current.jpg");
+        assert_eq!(pin.metadata_width, Some(1200));
+        assert_eq!(pin.metadata_height, Some(800));
+    }
+
+    #[test]
+    fn parses_nested_logged_in_image_renditions() {
+        let pin = parse_pin(
+            &json!({
+                "id": "135",
+                "images": {"orig": {
+                    "1200x": {
+                        "url": "https://i.pinimg.com/1200x/nested.jpg",
+                        "width": 1200,
+                        "height": 800
+                    },
+                    "736x": {
+                        "url": "https://i.pinimg.com/736x/nested.jpg",
+                        "width": 736,
+                        "height": 491
+                    }
+                }}
+            }),
+            "Ideas",
+        )
+        .unwrap();
+
+        assert_eq!(pin.media_url, "https://i.pinimg.com/1200x/nested.jpg");
+        assert_eq!(pin.metadata_width, Some(1200));
+    }
+
+    #[test]
+    fn parses_image_wrapper_renditions() {
+        let pin = parse_pin(
+            &json!({
+                "id": "136",
+                "image": {"images": {
+                    "originals": {
+                        "url": "https://i.pinimg.com/originals/wrapped.jpg",
+                        "width": 900,
+                        "height": 600
+                    }
+                }}
+            }),
+            "Ideas",
+        )
+        .unwrap();
+
+        assert_eq!(pin.media_url, "https://i.pinimg.com/originals/wrapped.jpg");
+        assert_eq!(pin.metadata_height, Some(600));
+    }
+
+    #[test]
+    fn selects_a_safe_rendition_when_the_original_exceeds_the_pixel_limit() {
+        let pin = parse_pin(
+            &json!({
+                "id": "130",
+                "images": {
+                    "orig": {
+                        "url": "https://i.pinimg.com/originals/large.jpg",
+                        "width": 5120,
+                        "height": 4096
+                    },
+                    "736x": {
+                        "url": "https://i.pinimg.com/736x/large.jpg",
+                        "width": 736,
+                        "height": 589
+                    }
+                }
+            }),
+            "Ideas",
+        )
+        .unwrap();
+
+        assert_eq!(pin.media_url, "https://i.pinimg.com/736x/large.jpg");
+        assert_eq!(pin.metadata_width, Some(736));
+        assert_eq!(pin.metadata_height, Some(589));
+    }
+
+    #[test]
+    fn selects_a_bounded_rendition_when_original_dimensions_are_omitted() {
+        let pin = parse_pin(
+            &json!({
+                "id": "132",
+                "imageSpec_orig": {
+                    "url": "https://i.pinimg.com/originals/no-dimensions.jpg"
+                },
+                "imageSpec_736x": {
+                    "url": "https://i.pinimg.com/736x/no-dimensions.jpg"
+                }
+            }),
+            "Ideas",
+        )
+        .unwrap();
+
+        assert_eq!(pin.media_url, "https://i.pinimg.com/736x/no-dimensions.jpg");
+    }
+
+    #[test]
+    fn accepts_a_flattened_camel_case_image_rendition() {
+        let pin = parse_pin(
+            &json!({
+                "id": "134",
+                "image236x": {
+                    "url": "https://i.pinimg.com/236x/camel-case.jpg",
+                    "width": 236,
+                    "height": 314
+                }
+            }),
+            "Ideas",
+        )
+        .unwrap();
+
+        assert_eq!(pin.media_url, "https://i.pinimg.com/236x/camel-case.jpg");
+        assert_eq!(pin.metadata_width, Some(236));
+    }
+
+    #[test]
+    fn parses_a_story_cover_from_flattened_page_data() {
+        let pin = parse_pin(
+            &json!({
+                "id": "133",
+                "storyPinData": {
+                    "pages": [{"blocks": [{
+                        "imageSpec_orig": {
+                            "url": "https://i.pinimg.com/originals/story-page.jpg",
+                            "width": 900,
+                            "height": 1600
+                        }
+                    }]}]
+                }
+            }),
+            "Ideas",
+        )
+        .unwrap();
+
+        assert_eq!(
+            pin.media_url,
+            "https://i.pinimg.com/originals/story-page.jpg"
+        );
+    }
+
+    #[test]
     fn finds_video_preview_nested_in_a_video_rendition() {
         let pin = parse_pin(
             &json!({
@@ -1222,6 +1581,25 @@ mod tests {
         .unwrap();
 
         assert_eq!(pin.media_url, "https://example.com/thumbnail.jpg");
+    }
+
+    #[test]
+    fn does_not_treat_a_video_rendition_as_a_static_preview() {
+        let error = parse_pin(
+            &json!({
+                "id": "131",
+                "videos": {"video_list": {
+                    "V_720P": {
+                        "url": "https://example.com/video.mp4",
+                        "image": "https://v1.pinimg.com/videos/abc123"
+                    }
+                }}
+            }),
+            "Ideas",
+        )
+        .unwrap_err();
+
+        assert_eq!(error, "video pin has no usable static preview");
     }
 
     #[test]

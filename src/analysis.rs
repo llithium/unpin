@@ -14,13 +14,14 @@ use sha2::{Digest, Sha256};
 use tempfile::Builder;
 use thiserror::Error;
 use tokio::sync::{OwnedSemaphorePermit, Semaphore};
+use url::Url;
 
 #[cfg(test)]
 use image::DynamicImage;
 #[cfg(test)]
 use std::io::Cursor;
 
-use crate::image_fingerprint::ImageFingerprint;
+use crate::image_fingerprint::{ImageFingerprint, MAX_DECODED_PIXELS};
 use crate::pinterest::{Pin, SkippedPin};
 use crate::progress::{Lifecycle, NoProgress, Progress, ProgressStep};
 use crate::report::{
@@ -41,10 +42,7 @@ const MAX_IN_FLIGHT_IMAGE_BYTES: u64 = 512 * 1024 * 1024;
 /// Chunked image responses have no reliable size to preallocate. Start small
 /// while retaining the full buffer-budget reservation that bounds their growth.
 const UNKNOWN_LENGTH_INITIAL_BUFFER_BYTES: u64 = 64 * 1024;
-/// Images above 16 megapixels are skipped before full-resolution decoding. The
-/// image decoder also receives a matching allocation ceiling as defense in depth;
-/// a breach remains an ordinary skipped-pin reason.
-const MAX_DECODED_PIXELS: u64 = 16 * 1024 * 1024;
+const PINTEREST_RENDITION_FALLBACKS: [&str; 4] = ["736x", "564x", "474x", "236x"];
 const MIN_STRUCTURAL_SIMILARITY: f64 = 0.97;
 /// A report larger than this is not a useful interactive review queue and can
 /// otherwise grow quadratically when a permissive similarity threshold is
@@ -97,6 +95,12 @@ struct AnalyzedImage {
     board: Option<String>,
     image_url: String,
     fingerprint: ImageFingerprint,
+}
+
+struct DownloadedImage {
+    media_url: String,
+    bytes: Vec<u8>,
+    buffer_permit: OwnedSemaphorePermit,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -366,8 +370,8 @@ async fn analyze_pins_with_limits(
     let mut misses = Vec::new();
     for ((media_url, pins), hit) in entries.into_iter().zip(hits) {
         match hit {
-            Some(fingerprint) => {
-                images.extend(analyzed_images(&media_url, pins, &fingerprint));
+            Some((cached_media_url, fingerprint)) => {
+                images.extend(analyzed_images(&cached_media_url, pins, &fingerprint));
                 completed += 1;
                 progress.step(ProgressStep::ImageAnalysis {
                     completed,
@@ -389,19 +393,23 @@ async fn analyze_pins_with_limits(
         let http = http.clone();
         let image_buffer_budget = Arc::clone(&image_buffer_budget);
         async move {
-            let bytes =
-                download_bytes(&http, &media_url, &image_buffer_budget, max_image_bytes).await;
-            (media_url, pins, bytes)
+            let download =
+                download_image(&http, &media_url, &image_buffer_budget, max_image_bytes).await;
+            (media_url, pins, download)
         }
     }))
     .buffer_unordered(DOWNLOAD_CONCURRENCY)
-    .map(|(media_url, pins, bytes)| {
+    .map(|(media_url, pins, download)| {
         let cache = cache.clone();
         async move {
-            let fingerprint = match bytes {
-                Ok((bytes, buffer_permit)) => {
+            let (media_url, fingerprint) = match download {
+                Ok(DownloadedImage {
+                    media_url,
+                    bytes,
+                    buffer_permit,
+                }) => {
                     let cached_url = media_url.clone();
-                    tokio::task::spawn_blocking(move || {
+                    let fingerprint = tokio::task::spawn_blocking(move || {
                         // Keep the compressed-buffer reservation until the
                         // decoded image and its derived hashes are finished.
                         let _buffer_permit = buffer_permit;
@@ -413,9 +421,10 @@ async fn analyze_pins_with_limits(
                         Ok(fingerprint)
                     })
                     .await
-                    .unwrap_or_else(|_| Err("image analysis did not finish".to_owned()))
+                    .unwrap_or_else(|_| Err("image analysis did not finish".to_owned()));
+                    (media_url, fingerprint)
                 }
-                Err(reason) => Err(reason),
+                Err(reason) => (media_url, Err(reason)),
             };
             (media_url, pins, fingerprint)
         }
@@ -473,7 +482,7 @@ async fn cached_fingerprints(
     cache: Option<&FingerprintCache>,
     entries: &[(String, Vec<Pin>)],
     require_visual: bool,
-) -> Vec<Option<ImageFingerprint>> {
+) -> Vec<Option<(String, ImageFingerprint)>> {
     let Some(cache) = cache.cloned() else {
         return vec![None; entries.len()];
     };
@@ -484,7 +493,15 @@ async fn cached_fingerprints(
     let total = urls.len();
     tokio::task::spawn_blocking(move || {
         urls.iter()
-            .map(|media_url| cache.get(media_url, require_visual))
+            .map(|media_url| {
+                image_download_candidates(media_url)
+                    .into_iter()
+                    .find_map(|candidate| {
+                        cache
+                            .get(&candidate, require_visual)
+                            .map(|fingerprint| (candidate, fingerprint))
+                    })
+            })
             .collect::<Vec<_>>()
     })
     .await
@@ -507,12 +524,93 @@ fn analyzed_images(
         .collect()
 }
 
+async fn download_image(
+    http: &Client,
+    media_url: &str,
+    image_buffer_budget: &Arc<Semaphore>,
+    max_image_bytes: u64,
+) -> Result<DownloadedImage, String> {
+    let mut last_error = None;
+    for candidate in image_download_candidates(media_url) {
+        match download_bytes_with_details(http, &candidate, image_buffer_budget, max_image_bytes)
+            .await
+        {
+            Ok((bytes, buffer_permit)) => {
+                return Ok(DownloadedImage {
+                    media_url: candidate,
+                    bytes,
+                    buffer_permit,
+                });
+            }
+            Err(error) if error.status == Some(reqwest::StatusCode::FORBIDDEN) => {
+                last_error = Some(error.reason);
+            }
+            Err(error) => return Err(error.reason),
+        }
+    }
+
+    Err(last_error.unwrap_or_else(|| "image download failed".to_owned()))
+}
+
+fn image_download_candidates(media_url: &str) -> Vec<String> {
+    let mut candidates = vec![media_url.to_owned()];
+    let Ok(url) = Url::parse(media_url) else {
+        return candidates;
+    };
+    let Some(host) = url.host_str() else {
+        return candidates;
+    };
+    if host != "pinimg.com" && !host.ends_with(".pinimg.com") {
+        return candidates;
+    }
+    let Some(path_segments) = url.path_segments() else {
+        return candidates;
+    };
+    let path_segments = path_segments.map(str::to_owned).collect::<Vec<_>>();
+    let Some(original_index) = path_segments
+        .iter()
+        .position(|segment| segment == "originals")
+    else {
+        return candidates;
+    };
+
+    for rendition in PINTEREST_RENDITION_FALLBACKS {
+        let mut candidate = url.clone();
+        let Ok(mut segments) = candidate.path_segments_mut() else {
+            continue;
+        };
+        segments.clear();
+        for (index, segment) in path_segments.iter().enumerate() {
+            segments.push(if index == original_index {
+                rendition
+            } else {
+                segment
+            });
+        }
+        drop(segments);
+        candidates.push(candidate.into());
+    }
+    candidates
+}
+
+#[cfg(test)]
 async fn download_bytes(
     http: &Client,
     media_url: &str,
     image_buffer_budget: &Arc<Semaphore>,
     max_image_bytes: u64,
 ) -> Result<(Vec<u8>, OwnedSemaphorePermit), String> {
+    download_bytes_with_details(http, media_url, image_buffer_budget, max_image_bytes)
+        .await
+        .map_err(|error| error.reason)
+}
+
+async fn download_bytes_with_details(
+    http: &Client,
+    media_url: &str,
+    image_buffer_budget: &Arc<Semaphore>,
+    max_image_bytes: u64,
+) -> Result<(Vec<u8>, OwnedSemaphorePermit), ImageDownloadError> {
     for attempt in 0..IMAGE_DOWNLOAD_ATTEMPTS {
         match download_bytes_once(http, media_url, image_buffer_budget, max_image_bytes).await {
             Ok(download) => return Ok(download),
@@ -520,7 +618,7 @@ async fn download_bytes(
                 tokio::time::sleep(IMAGE_RETRY_BASE_DELAY.saturating_mul(1_u32 << attempt.min(16)))
                     .await;
             }
-            Err(error) => return Err(error.reason),
+            Err(error) => return Err(error),
         }
     }
 
@@ -530,6 +628,7 @@ async fn download_bytes(
 struct ImageDownloadError {
     reason: String,
     retryable: bool,
+    status: Option<reqwest::StatusCode>,
 }
 
 async fn download_bytes_once(
@@ -543,6 +642,7 @@ async fn download_bytes_once(
         ImageDownloadError {
             reason: format!("image download failed: {}", concise_reqwest_error(&error)),
             retryable,
+            status: None,
         }
     })?;
 
@@ -551,6 +651,7 @@ async fn download_bytes_once(
         return Err(ImageDownloadError {
             reason: format!("image download returned HTTP {status}"),
             retryable: status == reqwest::StatusCode::TOO_MANY_REQUESTS || status.is_server_error(),
+            status: Some(status),
         });
     }
     let advertised_bytes = response.content_length();
@@ -558,6 +659,7 @@ async fn download_bytes_once(
         return Err(ImageDownloadError {
             reason: image_size_limit_error(max_image_bytes),
             retryable: false,
+            status: None,
         });
     }
 
@@ -570,6 +672,7 @@ async fn download_bytes_once(
     let reserved_permits = u32::try_from(reserved_bytes).map_err(|_| ImageDownloadError {
         reason: "image safety limit cannot be represented by the buffer budget".to_owned(),
         retryable: false,
+        status: None,
     })?;
     let buffer_permit = Arc::clone(image_buffer_budget)
         .acquire_many_owned(reserved_permits)
@@ -577,12 +680,14 @@ async fn download_bytes_once(
         .map_err(|_| ImageDownloadError {
             reason: "image buffer budget is unavailable".to_owned(),
             retryable: false,
+            status: None,
         })?;
     let capacity =
         initial_image_buffer_capacity(advertised_bytes, max_image_bytes).map_err(|_| {
             ImageDownloadError {
                 reason: "image safety limit cannot fit in memory on this platform".to_owned(),
                 retryable: false,
+                status: None,
             }
         })?;
     let mut bytes = Vec::with_capacity(capacity);
@@ -593,12 +698,14 @@ async fn download_bytes_once(
         .map_err(|error| ImageDownloadError {
             reason: format!("image download failed: {}", concise_reqwest_error(&error)),
             retryable: error.is_body() || error.is_timeout(),
+            status: None,
         })?
     {
         checked_image_length(bytes.len(), chunk.len(), max_image_bytes, advertised_bytes).map_err(
             |reason| ImageDownloadError {
                 reason,
                 retryable: false,
+                status: None,
             },
         )?;
         bytes.extend_from_slice(&chunk);
@@ -1238,6 +1345,41 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn analysis_uses_a_cached_bounded_rendition_for_a_forbidden_original() {
+        let directory = tempfile::tempdir().unwrap();
+        let original_url = "http://i.pinimg.com/originals/cached.jpg";
+        let fallback_url = "http://i.pinimg.com/736x/cached.jpg";
+        let cache = FingerprintCache::new(directory.path().to_path_buf());
+        cache.put(fallback_url, &fingerprint());
+        let hit =
+            cached_fingerprints(Some(&cache), &[(original_url.to_owned(), Vec::new())], true).await;
+        assert_eq!(
+            hit[0].as_ref().map(|(url, _)| url.as_str()),
+            Some(fallback_url)
+        );
+        let pin = Pin {
+            id: "cached-fallback-pin".into(),
+            media_url: original_url.into(),
+            metadata_width: None,
+            metadata_height: None,
+            board: None,
+        };
+
+        let result = analyze_pins_with_progress_and_cache(
+            vec![pin],
+            false,
+            5,
+            &NoProgress,
+            Some(directory.path().to_path_buf()),
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(result.analyzed, 1);
+        assert!(result.skipped.is_empty());
+    }
+
+    #[tokio::test]
     async fn image_streams_over_the_byte_limit_are_skipped() {
         use wiremock::matchers::{method, path};
         use wiremock::{Mock, MockServer, ResponseTemplate};
@@ -1362,6 +1504,42 @@ mod tests {
         .unwrap_err();
 
         assert!(error.contains("HTTP 404"), "{error}");
+    }
+
+    #[tokio::test]
+    async fn forbidden_originals_can_fall_back_to_a_bounded_pinterest_rendition() {
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/originals/example.jpg"))
+            .respond_with(ResponseTemplate::new(403))
+            .expect(1)
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/736x/example.jpg"))
+            .respond_with(ResponseTemplate::new(200).set_body_bytes(b"image".to_vec()))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let http = Client::builder()
+            .resolve("i.pinimg.com", *server.address())
+            .build()
+            .unwrap();
+        let download = download_image(
+            &http,
+            "http://i.pinimg.com/originals/example.jpg",
+            &Arc::new(Semaphore::new(1024)),
+            1024,
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(download.media_url, "http://i.pinimg.com/736x/example.jpg");
+        assert_eq!(download.bytes, b"image");
     }
 
     #[tokio::test]
