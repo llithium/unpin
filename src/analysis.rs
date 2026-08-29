@@ -563,31 +563,21 @@ fn image_download_candidates(media_url: &str) -> Vec<String> {
     if host != "pinimg.com" && !host.ends_with(".pinimg.com") {
         return candidates;
     }
-    let Some(path_segments) = url.path_segments() else {
-        return candidates;
-    };
-    let path_segments = path_segments.map(str::to_owned).collect::<Vec<_>>();
+    // Work with the URL's serialized path. `path_segments()` returns already
+    // percent-encoded text, while `path_segments_mut().push()` treats its input
+    // as decoded and would encode every `%` again.
+    let mut path_segments = url.path().split('/').collect::<Vec<_>>();
     let Some(original_index) = path_segments
         .iter()
-        .position(|segment| segment == "originals")
+        .position(|segment| *segment == "originals")
     else {
         return candidates;
     };
 
     for rendition in PINTEREST_RENDITION_FALLBACKS {
         let mut candidate = url.clone();
-        let Ok(mut segments) = candidate.path_segments_mut() else {
-            continue;
-        };
-        segments.clear();
-        for (index, segment) in path_segments.iter().enumerate() {
-            segments.push(if index == original_index {
-                rendition
-            } else {
-                segment
-            });
-        }
-        drop(segments);
+        path_segments[original_index] = rendition;
+        candidate.set_path(&path_segments.join("/"));
         candidates.push(candidate.into());
     }
     candidates
@@ -1504,6 +1494,24 @@ mod tests {
         .unwrap_err();
 
         assert!(error.contains("HTTP 404"), "{error}");
+    }
+
+    #[test]
+    fn rendition_fallbacks_preserve_encoded_paths_and_url_suffixes() {
+        let candidates = image_download_candidates(
+            "https://i.pinimg.com/originals/folder%20name/%E2%9C%93.jpg?token=a%2Fb#preview",
+        );
+
+        assert_eq!(
+            candidates[1],
+            "https://i.pinimg.com/736x/folder%20name/%E2%9C%93.jpg?token=a%2Fb#preview"
+        );
+        assert!(
+            candidates
+                .iter()
+                .all(|candidate| !candidate.contains("%25")),
+            "{candidates:?}"
+        );
     }
 
     #[tokio::test]
