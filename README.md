@@ -219,8 +219,8 @@ by reason; JSON and the HTML report retain every individual skipped-pin record.
 
 ```console
 cargo fmt --all -- --check
-cargo test --locked
-cargo clippy --all-targets --all-features -- -D warnings
+cargo test --locked --all-targets --all-features
+cargo clippy --locked --all-targets --all-features -- -D warnings
 ```
 
 Pull requests run this same verification gate in CI.
