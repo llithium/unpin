@@ -7,6 +7,8 @@ use std::time::Duration;
 use console::Term;
 use indicatif::{MultiProgress, ProgressBar, ProgressDrawTarget, ProgressStyle};
 
+use crate::terminal_text::sanitize_terminal_text;
+
 #[derive(Debug, Clone, Eq, PartialEq)]
 pub enum Lifecycle {
     Started,
@@ -436,7 +438,10 @@ impl Progress for TerminalProgress {
                 lifecycle: Lifecycle::Completed,
             } => {
                 let mut state = self.state.lock().unwrap();
-                Self::finish_slot(&mut state.setup, format!("Found board “{name}”"));
+                Self::finish_slot(
+                    &mut state.setup,
+                    format!("Found board “{}”", sanitize_terminal_text(&name)),
+                );
             }
             ProgressStep::Setup {
                 task:
@@ -449,7 +454,10 @@ impl Progress for TerminalProgress {
                 let mut state = self.state.lock().unwrap();
                 self.add_group(&mut state, ProgressGroup::Setup);
                 Self::finish_slot(&mut state.setup, "Pinterest session ready".into());
-                state.setup = Some(self.add_active_row(format!("Listing boards for {username}")));
+                state.setup = Some(self.add_active_row(format!(
+                    "Listing boards for {}",
+                    sanitize_terminal_text(&username)
+                )));
             }
             ProgressStep::Setup {
                 task:
@@ -487,6 +495,7 @@ impl Progress for TerminalProgress {
                 total,
                 lifecycle: Lifecycle::Started,
             } => {
+                let name = sanitize_terminal_text(&name);
                 let mut state = self.state.lock().unwrap();
                 self.add_group(&mut state, ProgressGroup::Boards);
                 if state.boards_total != total {
@@ -513,6 +522,7 @@ impl Progress for TerminalProgress {
                 total,
                 lifecycle: Lifecycle::Completed,
             } => {
+                let name = sanitize_terminal_text(&name);
                 let mut state = self.state.lock().unwrap();
                 state.boards_total = total;
                 // Completion steps carry an atomic snapshot, but a task may
@@ -688,7 +698,7 @@ impl Progress for TerminalProgress {
             } => {
                 let mut state = self.state.lock().unwrap();
                 self.add_group(&mut state, ProgressGroup::Report);
-                let message = format!("HTML report: {path}");
+                let message = format!("HTML report: {}", sanitize_terminal_text(&path));
                 if let Some(bar) = state.report.take() {
                     Self::complete_row(&bar, message);
                 } else {
@@ -813,6 +823,31 @@ pub mod tests {
                 }
             ]
         );
+    }
+
+    #[test]
+    fn provider_board_labels_are_sanitized_before_terminal_rendering() {
+        let progress = silent_visible_progress();
+        let name = "Board\n\u{1b}[31m\t";
+
+        progress.step(ProgressStep::SourceCollection {
+            name: name.into(),
+            current: 1,
+            completed: 0,
+            total: 1,
+            lifecycle: Lifecycle::Started,
+        });
+        progress.step(ProgressStep::SourceCollection {
+            name: name.into(),
+            current: 1,
+            completed: 1,
+            total: 1,
+            lifecycle: Lifecycle::Completed,
+        });
+
+        let state = progress.state.lock().unwrap();
+        assert_eq!(state.board_rows[0].name, "Board��[31m�");
+        assert!(state.board_rows[0].finished);
     }
 
     #[test]

@@ -91,6 +91,7 @@ impl Target {
     fn parse_url(input: &str) -> Result<Self, PinterestError> {
         let url = Url::parse(input)
             .map_err(|_| PinterestError::InvalidTarget("not a valid absolute URL".into()))?;
+        reject_url_userinfo(&url)?;
 
         if url.scheme() != "https" && url.scheme() != "http" {
             return Err(PinterestError::InvalidTarget(
@@ -237,6 +238,15 @@ fn decode_segment(segment: &str) -> Result<String, PinterestError> {
 
 fn is_pinterest_host(host: &str) -> bool {
     host == "pinterest.com" || host.ends_with(".pinterest.com")
+}
+
+fn reject_url_userinfo(url: &Url) -> Result<(), PinterestError> {
+    if !url.username().is_empty() || url.password().is_some() {
+        return Err(PinterestError::InvalidTarget(
+            "target URLs must not contain embedded credentials".into(),
+        ));
+    }
+    Ok(())
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Eq, PartialEq)]
@@ -957,6 +967,48 @@ mod tests {
     }
 
     #[test]
+    fn rejects_credential_bearing_target_urls() {
+        for input in [
+            "https://alice@www.pinterest.com/alice/board/",
+            "https://alice:secret@www.pinterest.com/alice/board/",
+            "https://alice:@www.pinterest.com/alice/board/",
+        ] {
+            assert!(
+                matches!(
+                    Target::parse(input),
+                    Err(PinterestError::InvalidTarget(message))
+                        if message.contains("embedded credentials")
+                ),
+                "{input:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn rejects_credential_bearing_client_urls() {
+        let api_root = Url::parse("https://www.pinterest.com/").unwrap();
+        let result = PinterestClient::with_api_root(
+            Url::parse("https://alice@www.pinterest.com/").unwrap(),
+            api_root.clone(),
+        );
+        assert!(matches!(
+            result,
+            Err(PinterestError::InvalidTarget(message))
+                if message.contains("embedded credentials")
+        ));
+
+        let result = PinterestClient::with_api_root(
+            Url::parse("https://www.pinterest.com/").unwrap(),
+            Url::parse("https://alice:secret@www.pinterest.com/").unwrap(),
+        );
+        assert!(matches!(
+            result,
+            Err(PinterestError::InvalidTarget(message))
+                if message.contains("embedded credentials")
+        ));
+    }
+
+    #[test]
     fn board_target_parse_rejects_profile_targets() {
         assert!(BoardTarget::parse("https://www.pinterest.com/alice/").is_err());
         assert!(BoardTarget::parse("alice").is_err());
@@ -1177,6 +1229,67 @@ mod tests {
             } if message.contains("safety limit")
         ));
         let _ = server.await;
+    }
+
+    #[tokio::test]
+    async fn retries_transient_api_response_body_failures() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        use tokio::net::TcpListener;
+        use tokio::time::timeout;
+
+        let listener = TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            let mut accepted = 0;
+            for _ in 0..4 {
+                let Ok(Ok((mut stream, _))) =
+                    timeout(Duration::from_secs(5), listener.accept()).await
+                else {
+                    break;
+                };
+                accepted += 1;
+                let mut request = Vec::new();
+                let mut buffer = [0_u8; 1024];
+                while !request.windows(4).any(|window| window == b"\r\n\r\n") {
+                    let bytes = stream.read(&mut buffer).await.unwrap();
+                    if bytes == 0 {
+                        break;
+                    }
+                    request.extend_from_slice(&buffer[..bytes]);
+                }
+
+                // The declared length is intentionally larger than the body;
+                // the peer closing the connection makes this a body transport
+                // failure rather than malformed JSON.
+                let _ = stream
+                    .write_all(
+                        b"HTTP/1.1 200 OK\r\nContent-Length: 20\r\nConnection: close\r\n\r\ntruncated",
+                    )
+                    .await;
+            }
+            accepted
+        });
+
+        let client = PinterestClient::with_api_root(
+            Url::parse("https://www.pinterest.com/").unwrap(),
+            Url::parse(&format!("http://{address}/")).unwrap(),
+        )
+        .unwrap();
+        let error = client
+            .api
+            .call("Feed", json!({}), &NoProgress)
+            .await
+            .unwrap_err();
+
+        assert!(matches!(
+            error,
+            PinterestError::Request {
+                resource: "Feed",
+                ..
+            }
+        ));
+        assert!(!error.to_string().contains("truncated"));
+        assert_eq!(server.await.unwrap(), 4);
     }
 
     #[tokio::test]

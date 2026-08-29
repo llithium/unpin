@@ -5,6 +5,7 @@ pub mod pinterest;
 pub mod progress;
 pub mod report;
 pub mod select;
+pub mod terminal_text;
 pub mod visual;
 
 mod image_fingerprint;

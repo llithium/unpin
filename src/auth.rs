@@ -1,4 +1,3 @@
-#[cfg(unix)]
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 

@@ -6,6 +6,7 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
 use crate::pinterest::SkippedPin;
+use crate::terminal_text::sanitize_terminal_text;
 
 #[derive(Debug, Clone, Serialize, Deserialize, Eq, PartialEq)]
 #[serde(rename_all = "snake_case")]
@@ -318,7 +319,7 @@ impl Report {
                     output,
                     "  {:>5}  {}",
                     theme.strong(board.pins_found),
-                    board.name
+                    sanitize_terminal_text(&board.name)
                 );
             }
         }
@@ -375,14 +376,19 @@ impl Report {
                     output,
                     "  {}  {}",
                     theme.warning(format!("{count:>3}×")),
-                    reason
+                    sanitize_terminal_text(reason)
                 );
             }
 
             if self.skipped.len() <= 12 {
                 for skipped in &self.skipped {
                     if let (Some(id), Some(url)) = (&skipped.pin_id, &skipped.pin_url) {
-                        let _ = writeln!(output, "       {}  {}", theme.dim(id), skipped.reason);
+                        let _ = writeln!(
+                            output,
+                            "       {}  {}",
+                            theme.dim(id),
+                            sanitize_terminal_text(&skipped.reason)
+                        );
                         let _ = writeln!(
                             output,
                             "       {}  {}",
@@ -403,7 +409,12 @@ impl Report {
         if !self.warnings.is_empty() {
             let _ = writeln!(output, "\n{}", theme.warning("WARNINGS"));
             for warning in &self.warnings {
-                let _ = writeln!(output, "  {} {warning}", theme.warning("!"));
+                let _ = writeln!(
+                    output,
+                    "  {} {}",
+                    theme.warning("!"),
+                    sanitize_terminal_text(warning)
+                );
             }
         }
 
@@ -464,7 +475,7 @@ struct TextTheme {
 
 impl TextTheme {
     fn paint(&self, style: Style, value: impl ToString) -> String {
-        let value = value.to_string();
+        let value = sanitize_terminal_text(&value.to_string());
         if self.color {
             style.force_styling(true).apply_to(value).to_string()
         } else {
@@ -658,6 +669,48 @@ mod tests {
 
         let colored = report.render_text_with_color(true);
         assert!(colored.contains("\u{1b}["));
+    }
+
+    #[test]
+    fn text_output_sanitizes_dynamic_values_without_changing_json_values() {
+        let unsafe_text = "Board\n\u{1b}[31m\t";
+        let report = Report {
+            summary: Summary {
+                username: Some("alice".into()),
+                boards: vec![scanned(unsafe_text, 1), scanned("Other", 1)],
+                pins_reported: Some(2),
+                pins_found: 2,
+                analyzed: 2,
+                skipped: 1,
+                exact_groups: 0,
+                visual_candidates: 0,
+            },
+            exact_groups: vec![],
+            visual_candidates: vec![],
+            skipped: vec![SkippedPin {
+                pin_id: Some("pin\n1".into()),
+                pin_url: Some("https://www.pinterest.com/pin/pin-1/".into()),
+                reason: "reason\nwith control".into(),
+                board: Some(unsafe_text.into()),
+            }],
+            warnings: vec![format!("warning: {unsafe_text}")],
+            visual_report: None,
+        };
+
+        let text = report.render_text();
+        assert!(
+            text.chars()
+                .filter(|&character| character != '\n')
+                .all(|character| !character.is_control())
+        );
+        assert!(text.contains("Board�"));
+        assert!(text.contains("reason�with control"));
+        assert!(text.contains("warning: Board�"));
+
+        let json: serde_json::Value = serde_json::from_str(&report.render_json().unwrap()).unwrap();
+        assert_eq!(json["summary"]["boards"][0]["name"], unsafe_text);
+        assert_eq!(json["skipped"][0]["reason"], "reason\nwith control");
+        assert_eq!(json["warnings"][0], format!("warning: {unsafe_text}"));
     }
 
     #[test]

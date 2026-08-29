@@ -93,6 +93,8 @@ impl PinterestApi {
         api_root: Url,
         cookies: Vec<ScopedCookie>,
     ) -> Result<Self, PinterestError> {
+        reject_url_userinfo(&root)?;
+        reject_url_userinfo(&api_root)?;
         let authenticated = !cookies.is_empty();
         validate_cookie_transport(&root, &api_root, authenticated)?;
         let headers = build_headers(&root)?;
@@ -249,12 +251,21 @@ impl PinterestApi {
                     Ok(response) => {
                         let status = response.status();
                         if status.is_success() {
-                            let body =
-                                read_api_body(response, resource, MAX_API_RESPONSE_BYTES).await?;
-                            return serde_json::from_slice(&body)
-                                .map_err(|source| request_error(resource, source));
-                        }
-                        if attempt + 1 < MAX_REQUEST_ATTEMPTS && is_retryable_status(status) {
+                            match read_api_body(response, resource, MAX_API_RESPONSE_BYTES).await {
+                                Ok(body) => {
+                                    return serde_json::from_slice(&body)
+                                        .map_err(|source| request_error(resource, source));
+                                }
+                                Err(error)
+                                    if attempt + 1 < MAX_REQUEST_ATTEMPTS
+                                        && is_retryable_body_error(&error) =>
+                                {
+                                    retry_delay(attempt, None)
+                                }
+                                Err(error) => return Err(error),
+                            }
+                        } else if attempt + 1 < MAX_REQUEST_ATTEMPTS && is_retryable_status(status)
+                        {
                             retry_delay(attempt, response.headers().get("retry-after"))
                         } else {
                             return Err(PinterestError::Http { resource, status });
@@ -340,6 +351,26 @@ fn is_bad_request(error: &PinterestError) -> bool {
         error,
         PinterestError::Http { status, .. } if *status == reqwest::StatusCode::BAD_REQUEST
     )
+}
+
+fn is_retryable_body_error(error: &PinterestError) -> bool {
+    let PinterestError::Request { source, .. } = error else {
+        return false;
+    };
+
+    let mut current: &(dyn StdError + 'static) = source.as_ref();
+    loop {
+        if current
+            .downcast_ref::<reqwest::Error>()
+            .is_some_and(|source| source.is_body() || source.is_timeout())
+        {
+            return true;
+        }
+        let Some(next) = current.source() else {
+            return false;
+        };
+        current = next;
+    }
 }
 
 /// Removes the `page_size` option, reporting whether there was one to remove.
@@ -548,6 +579,15 @@ fn validate_cookie_transport(
         return Err(PinterestError::CrossOriginCookieTransport);
     }
 
+    Ok(())
+}
+
+fn reject_url_userinfo(url: &Url) -> Result<(), PinterestError> {
+    if !url.username().is_empty() || url.password().is_some() {
+        return Err(PinterestError::InvalidTarget(
+            "target URLs must not contain embedded credentials".into(),
+        ));
+    }
     Ok(())
 }
 

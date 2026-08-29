@@ -4,6 +4,7 @@ use std::process::ExitCode;
 use clap::Parser;
 use unpin::cli::{Cli, OutputFormat};
 use unpin::progress::{Progress, ProgressStep, TerminalProgress};
+use unpin::terminal_text::sanitize_terminal_text;
 
 #[tokio::main]
 async fn main() -> ExitCode {
@@ -19,7 +20,7 @@ async fn main() -> ExitCode {
             progress.step(ProgressStep::Scan {
                 lifecycle: unpin::progress::Lifecycle::Failed,
             });
-            eprintln!("error: {error}");
+            eprintln!("error: {}", sanitize_terminal_text(&error.to_string()));
             return ExitCode::FAILURE;
         }
     };
@@ -34,7 +35,7 @@ async fn main() -> ExitCode {
                 progress.step(ProgressStep::Scan {
                     lifecycle: unpin::progress::Lifecycle::Failed,
                 });
-                eprintln!("error: {error}");
+                eprintln!("error: {}", sanitize_terminal_text(&error.to_string()));
                 return ExitCode::FAILURE;
             }
         };
@@ -56,7 +57,10 @@ async fn main() -> ExitCode {
                     progress.step(ProgressStep::Scan {
                         lifecycle: unpin::progress::Lifecycle::Failed,
                     });
-                    eprintln!("error: failed to serialize report: {error}");
+                    eprintln!(
+                        "error: failed to serialize report: {}",
+                        sanitize_terminal_text(&error.to_string())
+                    );
                     return ExitCode::FAILURE;
                 }
             },
@@ -71,14 +75,20 @@ async fn main() -> ExitCode {
         print!("{output}");
     }
     if !progress_visible && let Some(report_path) = &report_to_open {
-        eprintln!("HTML report: {}", report_path.display());
+        eprintln!(
+            "HTML report: {}",
+            sanitize_terminal_text(&report_path.display().to_string())
+        );
     }
 
     if let Some(report_path) = report_to_open
         && !cli.no_open
         && let Err(error) = unpin::visual::open_report(&report_path)
     {
-        eprintln!("warning: could not open the visual report in a browser: {error}");
+        eprintln!(
+            "warning: could not open the visual report in a browser: {}",
+            sanitize_terminal_text(&error.to_string())
+        );
     }
 
     ExitCode::SUCCESS

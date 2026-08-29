@@ -1495,6 +1495,7 @@ async fn malformed_pinterest_json_is_a_clean_error() {
     Mock::given(method("GET"))
         .and(path("/resource/BoardResource/get/"))
         .respond_with(ResponseTemplate::new(200).set_body_string("not-json"))
+        .expect(1)
         .mount(&server)
         .await;
 
