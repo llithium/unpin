@@ -325,7 +325,7 @@ impl Report {
         }
 
         if self.exact_groups.is_empty() && self.visual_candidates.is_empty() {
-            let _ = writeln!(output, "\n{}", theme.dim("No duplicate image pins found."));
+            let _ = writeln!(output, "\n{}", theme.dim("No duplicate visual pins found."));
         }
 
         for (index, group) in self.exact_groups.iter().enumerate() {

@@ -1,7 +1,7 @@
 use clap::{Parser, ValueEnum};
 use std::path::PathBuf;
 
-/// Find duplicate image pins in a Pinterest board or profile.
+/// Find duplicate visual pins in a Pinterest board or profile.
 #[derive(Debug, Clone, Parser)]
 #[command(name = "unpin", version, about)]
 pub struct Cli {

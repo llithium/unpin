@@ -787,29 +787,45 @@ fn is_unorganized_pin(raw: &Value) -> bool {
 
 fn parse_pin(raw: &Value, board_name: &str) -> Result<Pin, String> {
     let id = value_string(raw.get("id")).ok_or_else(|| "pin ID is missing".to_owned())?;
-
-    if raw.get("carousel_data").is_some_and(is_present) {
-        return Err("multi-image carousel pin".into());
-    }
-    if raw.get("videos").is_some_and(is_present)
-        || raw.get("is_video").and_then(Value::as_bool) == Some(true)
-    {
-        return Err("video pin".into());
-    }
-
     let is_story = raw.get("story_pin_data").is_some_and(is_present);
-    let image = raw.pointer("/images/orig").ok_or_else(|| {
+    let is_carousel = raw.get("carousel_data").is_some_and(is_present);
+    let is_video = raw.get("videos").is_some_and(is_present)
+        || raw.get("is_video").and_then(Value::as_bool) == Some(true);
+
+    // The analysis pipeline intentionally operates on images. Pinterest still
+    // supplies a static representation for videos, and carousel slots expose
+    // their own images; normalize those representations here so the rest of
+    // the scan does not need to understand provider-specific media shapes.
+    let image = if is_carousel {
+        carousel_cover(raw).or_else(|| top_level_image(raw))
+    } else if is_video {
+        raw.pointer("/images/orig")
+            .filter(|image| image_url(image).is_some())
+            .or_else(|| video_preview(raw))
+    } else {
+        raw.pointer("/images/orig")
+    };
+    let image = image.ok_or_else(|| {
         if is_story {
             "story pin has no usable static cover".to_owned()
+        } else if is_carousel {
+            "carousel pin has no usable static cover".to_owned()
+        } else if is_video {
+            "video pin has no usable static preview".to_owned()
         } else {
             "original image metadata is missing".to_owned()
         }
     })?;
-    let media_url = image
-        .get("url")
-        .and_then(Value::as_str)
-        .filter(|url| url.starts_with("https://") || url.starts_with("http://"))
-        .ok_or_else(|| "original image URL is missing or invalid".to_owned())?
+    let media_url = image_url(image)
+        .ok_or_else(|| {
+            if is_carousel {
+                "carousel pin has no usable static cover".to_owned()
+            } else if is_video {
+                "video pin has no usable static preview".to_owned()
+            } else {
+                "original image URL is missing or invalid".to_owned()
+            }
+        })?
         .to_owned();
 
     Ok(Pin {
@@ -819,6 +835,81 @@ fn parse_pin(raw: &Value, board_name: &str) -> Result<Pin, String> {
         metadata_height: value_u32(image.get("height")),
         board: Some(board_name.to_owned()),
     })
+}
+
+/// Finds the first carousel slot with a usable image. Slot order is the
+/// provider's display order, making the first slide a stable representative in
+/// the image-only analysis pipeline.
+fn carousel_cover(raw: &Value) -> Option<&Value> {
+    raw.pointer("/carousel_data/carousel_slots")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .find_map(carousel_slot_image)
+}
+
+fn carousel_slot_image(slot: &Value) -> Option<&Value> {
+    let images = slot.get("images")?.as_object()?;
+    // `orig` is what ordinary pins expose. The other keys are kept as
+    // fallbacks because Pinterest sometimes omits that rendition for a slot.
+    ["orig", "originals", "736x", "564x", "474x", "236x"]
+        .into_iter()
+        .find_map(|key| images.get(key).filter(|image| image_url(image).is_some()))
+        .or_else(|| images.values().find(|image| image_url(image).is_some()))
+}
+
+fn top_level_image(raw: &Value) -> Option<&Value> {
+    ["orig", "originals", "736x", "564x", "474x", "236x"]
+        .into_iter()
+        .filter_map(|key| raw.pointer(&format!("/images/{key}")))
+        .find(|image| image_url(image).is_some())
+}
+
+/// Some video responses include a poster under the video rendition rather than
+/// under `/images/orig`. Only fields known to hold still-image metadata are
+/// considered; video URLs themselves must never enter image analysis.
+fn video_preview(raw: &Value) -> Option<&Value> {
+    [
+        "/images/originals",
+        "/images/736x",
+        "/images/564x",
+        "/videos/thumbnail",
+        "/videos/poster",
+    ]
+    .into_iter()
+    .filter_map(|pointer| raw.pointer(pointer))
+    .find(|image| image_url(image).is_some())
+    .or_else(|| find_video_preview(raw.get("videos")?))
+}
+
+fn find_video_preview(value: &Value) -> Option<&Value> {
+    match value {
+        Value::Object(object) => {
+            for key in ["thumbnail", "poster", "image"] {
+                if let Some(candidate) = object.get(key)
+                    && image_url(candidate).is_some()
+                {
+                    return Some(candidate);
+                }
+            }
+            object.values().find_map(find_video_preview)
+        }
+        Value::Array(values) => values.iter().find_map(find_video_preview),
+        _ => None,
+    }
+}
+
+fn image_url(image: &Value) -> Option<&str> {
+    let url = match image {
+        Value::Object(object) => object.get("url").and_then(Value::as_str),
+        Value::String(url) => Some(url.as_str()),
+        _ => None,
+    }?;
+    is_http_url(url).then_some(url)
+}
+
+fn is_http_url(url: &str) -> bool {
+    url.starts_with("https://") || url.starts_with("http://")
 }
 
 fn is_present(value: &Value) -> bool {
@@ -1059,7 +1150,7 @@ mod tests {
     }
 
     #[test]
-    fn parses_static_image_and_rejects_other_media() {
+    fn parses_static_image_and_media_previews() {
         let pin = parse_pin(
             &json!({
                 "id": "123",
@@ -1076,18 +1167,77 @@ mod tests {
         assert_eq!(pin.metadata_width, Some(1200));
         assert_eq!(pin.board.as_deref(), Some("Ideas"));
 
-        assert!(
-            parse_pin(
-                &json!({
-                    "id": "124",
-                    "videos": {"video_list": {}},
-                    "images": {"orig": {"url": "https://example.com/poster.jpg"}}
-                }),
-                "Ideas",
-            )
-            .unwrap_err()
-            .contains("video")
-        );
+        let video = parse_pin(
+            &json!({
+                "id": "124",
+                "is_video": true,
+                "videos": {"video_list": {}},
+                "images": {"orig": {
+                    "url": "https://example.com/poster.jpg",
+                    "width": 640,
+                    "height": 360
+                }}
+            }),
+            "Ideas",
+        )
+        .unwrap();
+        assert_eq!(video.media_url, "https://example.com/poster.jpg");
+        assert_eq!(video.metadata_width, Some(640));
+
+        let carousel = parse_pin(
+            &json!({
+                "id": "125",
+                "carousel_data": {
+                    "carousel_slots": [
+                        {"id": "slide-1", "images": {
+                            "736x": {"url": "https://example.com/slide-1.jpg"}
+                        }},
+                        {"id": "slide-2", "images": {
+                            "orig": {"url": "https://example.com/slide-2.jpg"}
+                        }}
+                    ]
+                }
+            }),
+            "Ideas",
+        )
+        .unwrap();
+        assert_eq!(carousel.media_url, "https://example.com/slide-1.jpg");
+    }
+
+    #[test]
+    fn finds_video_preview_nested_in_a_video_rendition() {
+        let pin = parse_pin(
+            &json!({
+                "id": "126",
+                "is_video": true,
+                "videos": {"video_list": {
+                    "V_720P": {
+                        "url": "https://example.com/video.mp4",
+                        "thumbnail": "https://example.com/thumbnail.jpg"
+                    }
+                }}
+            }),
+            "Ideas",
+        )
+        .unwrap();
+
+        assert_eq!(pin.media_url, "https://example.com/thumbnail.jpg");
+    }
+
+    #[test]
+    fn media_without_a_static_preview_remains_skipped() {
+        let video_error = parse_pin(&json!({"id": "127", "is_video": true}), "Ideas").unwrap_err();
+        assert_eq!(video_error, "video pin has no usable static preview");
+
+        let carousel_error = parse_pin(
+            &json!({
+                "id": "128",
+                "carousel_data": {"carousel_slots": []}
+            }),
+            "Ideas",
+        )
+        .unwrap_err();
+        assert_eq!(carousel_error, "carousel pin has no usable static cover");
     }
 
     #[test]

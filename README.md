@@ -1,8 +1,8 @@
 # unpin
 
-`unpin` finds duplicate static-image pins in public Pinterest boards, compares
-their resolutions, and prints direct pin links so you can decide what to delete.
-It never changes your Pinterest account.
+`unpin` finds duplicate visual pins in public Pinterest boards, compares their
+resolutions, and prints direct pin links so you can decide what to delete. It
+never changes your Pinterest account.
 
 The program is written in Rust and talks directly to the same undocumented
 Pinterest web resources used by Pinterest's site. It does **not** invoke or
@@ -82,8 +82,8 @@ still showing the latest resource, page, and item count.
 
 By default, every successful run creates a unique `unpin-*.html` comparison
 report in your operating system's temporary directory and opens it in the
-default browser. The report places matching images side by side with
-resolutions, recommendations, and links to the original pin and image. HTML
+default browser. The report places matching visual previews side by side with
+resolutions, recommendations, and links to the original pin and preview. HTML
 and CLI reports are mutually exclusive; use `--no-visual` to print the CLI
 report instead. The HTML path appears as a completed progress step on stderr.
 
@@ -162,10 +162,10 @@ Run `unpin --help` for the complete interface.
 - When Pinterest's reported total is larger than the number returned by its web
   API, text, JSON, and HTML output show both counts and include an incomplete
   scan warning.
-- Ordinary, single-image pins are downloaded with a forty-eight-request
-  concurrency limit and a 100 MiB per-image safety limit. Decoding and hashing
-  run on a separate pool sized to the machine's processors, so images keep
-  downloading while earlier ones are still being analyzed.
+- Static image previews are downloaded with a forty-eight-request concurrency
+  limit and a 100 MiB per-image safety limit. Decoding and hashing run on a
+  separate pool sized to the machine's processors, so previews keep downloading
+  while earlier ones are still being analyzed.
 - Successful image fingerprints are cached for 30 days in the operating
   system's user cache directory. The cache contains dimensions, file size, and
   derived hashes—not raw images, Pinterest responses, or browser cookies. Set
@@ -191,10 +191,11 @@ Run `unpin --help` for the complete interface.
 - Rankings use decoded pixel area, longest edge, and file size—in that order.
 
 Story/idea pins are analyzed through their static original cover when one is
-available. Videos, carousels, missing images, and failed downloads appear in the
-skipped list rather than aborting an otherwise useful scan. Interactive text
-groups large skipped sets by reason; JSON and the HTML report retain every
-individual skipped-pin record.
+available. Video pins use their static preview or poster, and carousel pins use
+the first valid carousel slide as their representative preview. Pins without a
+usable preview and failed downloads appear in the skipped list rather than
+aborting an otherwise useful scan. Interactive text groups large skipped sets
+by reason; JSON and the HTML report retain every individual skipped-pin record.
 
 ## Limitations
 
@@ -203,8 +204,9 @@ individual skipped-pin record.
   secret boards. Signed-in scans can use an explicitly selected local browser
   session; browser cookie values are never persisted.
 - Pinterest's web resources are undocumented and may change without notice.
-- Visual matches are candidates for human review, not proof that two images are
-  interchangeable.
+- Visual matches are candidates for human review, not proof that two pins are
+  interchangeable. Video content itself is not decoded, and a carousel is
+  represented by its first valid slide.
 - HTML reports embed their controls and styling, but reference Pinterest's
   remote originals and pin links, so network access is still required when
   viewing images or opening those links.

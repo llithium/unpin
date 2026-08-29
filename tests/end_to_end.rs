@@ -85,6 +85,26 @@ async fn scans_paginated_board_and_sections_end_to_end() {
         .expect(1)
         .mount(&server)
         .await;
+    Mock::given(method("GET"))
+        .and(path("/poster.jpg"))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .insert_header("content-type", "image/png")
+                .set_body_bytes(image_bytes(10, 8)),
+        )
+        .expect(1)
+        .mount(&server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/carousel.jpg"))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .insert_header("content-type", "image/png")
+                .set_body_bytes(image_bytes(12, 12)),
+        )
+        .expect(1)
+        .mount(&server)
+        .await;
 
     mount_resource(
         &server,
@@ -98,7 +118,7 @@ async fn scans_paginated_board_and_sections_end_to_end() {
             "resource_response": { "data": {
                 "id": "board-1",
                 "name": "Ideas",
-                "pin_count": 4,
+                "pin_count": 5,
                 "section_count": 1,
                 "ignored_schema_field": {"can_change": true}
             }}
@@ -178,6 +198,14 @@ async fn scans_paginated_board_and_sections_end_to_end() {
                     "images": {"orig": {
                         "url": format!("{}/poster.jpg", server.uri())
                     }}
+                },
+                {
+                    "id": "104",
+                    "carousel_data": {"carousel_slots": [
+                        {"id": "slide-1", "images": {"orig": {
+                            "url": format!("{}/carousel.jpg", server.uri())
+                        }}}
+                    ]}
                 }
             ]),
             "-end-",
@@ -205,16 +233,16 @@ async fn scans_paginated_board_and_sections_end_to_end() {
     assert_eq!(report.summary.boards.len(), 1);
     assert_eq!(report.summary.boards[0].name, "Ideas");
     assert_eq!(report.title(), "Ideas");
-    assert_eq!(report.summary.pins_reported, Some(4));
-    assert_eq!(report.summary.pins_found, 3);
-    assert_eq!(report.summary.analyzed, 2);
-    assert_eq!(report.summary.skipped, 1);
+    assert_eq!(report.summary.pins_reported, Some(5));
+    assert_eq!(report.summary.pins_found, 4);
+    assert_eq!(report.summary.analyzed, 4);
+    assert_eq!(report.summary.skipped, 0);
     assert_eq!(report.summary.exact_groups, 1);
     assert_eq!(report.summary.visual_candidates, 0);
     assert_eq!(report.warnings.len(), 1);
-    assert!(report.warnings[0].contains("returned only 3 anonymously"));
+    assert!(report.warnings[0].contains("returned only 4 anonymously"));
     assert_eq!(report.exact_groups[0].items.len(), 2);
-    assert!(report.skipped[0].reason.contains("video"));
+    assert!(report.skipped.is_empty());
     assert!(progress.steps().contains(&ProgressStep::Setup {
         task: SetupTask::BoardMetadata { name: None },
         lifecycle: Lifecycle::Started,
@@ -233,12 +261,12 @@ async fn scans_paginated_board_and_sections_end_to_end() {
     }));
     assert!(progress.steps().contains(&ProgressStep::ImageAnalysis {
         completed: 0,
-        total: 1,
+        total: 3,
         lifecycle: Lifecycle::Started
     }));
     assert!(progress.steps().contains(&ProgressStep::ImageAnalysis {
-        completed: 1,
-        total: 1,
+        completed: 3,
+        total: 3,
         lifecycle: Lifecycle::Completed,
     }));
     assert!(progress.steps().contains(&ProgressStep::SectionCollection {
@@ -843,7 +871,7 @@ async fn no_analyzable_pins_explain_skipped_reasons() {
     let message = error.to_string();
 
     assert!(
-        message.contains("no analyzable static image pins were found"),
+        message.contains("no analyzable visual pins were found"),
         "{message}"
     );
     assert!(message.contains("1 pin skipped: video pin"), "{message}");

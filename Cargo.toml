@@ -2,7 +2,7 @@
 name = "unpin"
 version = "0.1.0"
 edition = "2024"
-description = "Find duplicate image pins in a Pinterest board"
+description = "Find duplicate visual pins in a Pinterest board"
 
 [dependencies]
 askama = "0.14"

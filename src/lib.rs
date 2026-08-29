@@ -67,7 +67,7 @@ pub enum AppError {
     #[error("no board could be scanned{}", listed(reasons))]
     AllBoardsFailed { reasons: Vec<String> },
 
-    #[error("no analyzable static image pins were found{}", listed(reasons))]
+    #[error("no analyzable visual pins were found{}", listed(reasons))]
     NoAnalyzablePins { reasons: Vec<String> },
 }
 
