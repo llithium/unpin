@@ -29,6 +29,11 @@ const BOARD_PAGE_SIZE: usize = 250;
 /// edge to sit on, so `paginate` retries once without the option when a request
 /// is refused, giving the round trips back rather than failing the scan.
 const FEED_PAGE_SIZE: usize = 250;
+/// Section feeds enforce a lower undocumented limit than board and user feeds:
+/// 50 is accepted, while 75 and larger are rejected with HTTP 400. Keeping a
+/// separate value avoids a failed request and the 25-item default fallback for
+/// every section while still shortening each sequential bookmark chain.
+const SECTION_FEED_PAGE_SIZE: usize = 50;
 const IMAGE_RENDITION_KEYS: [&str; 9] = [
     "orig",
     "originals",
@@ -704,7 +709,7 @@ impl PinterestClient {
                             "BoardSectionPins",
                             json!({
                                 "section_id": id,
-                                "page_size": FEED_PAGE_SIZE,
+                                "page_size": SECTION_FEED_PAGE_SIZE,
                                 "bookmarks": null
                             }),
                             progress,

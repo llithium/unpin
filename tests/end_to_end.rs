@@ -182,7 +182,7 @@ async fn scans_paginated_board_and_sections_end_to_end() {
     mount_resource(
         &server,
         "BoardSectionPins",
-        json!({"section_id": "section-1", "page_size": 250, "bookmarks": null}),
+        json!({"section_id": "section-1", "page_size": 50, "bookmarks": null}),
         page(
             json!([
                 {
@@ -470,7 +470,7 @@ async fn failed_board_sections_do_not_discard_main_or_other_section_pins() {
         "BoardSectionPins",
         json!({
             "section_id": "section-1",
-            "page_size": 250,
+            "page_size": 50,
             "bookmarks": null
         }),
         page(
@@ -488,7 +488,7 @@ async fn failed_board_sections_do_not_discard_main_or_other_section_pins() {
             "data",
             request_data(json!({
                 "section_id": "section-2",
-                "page_size": 250,
+                "page_size": 50,
                 "bookmarks": null
             })),
         ))
