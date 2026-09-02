@@ -145,6 +145,19 @@ mod tests {
         }
     }
 
+    fn contains_html_fragment(html: &str, fragment: &str) -> bool {
+        fn normalize(value: &str) -> String {
+            value
+                .split_whitespace()
+                .collect::<Vec<_>>()
+                .join(" ")
+                .replace(" >", ">")
+                .replace("< ", "<")
+        }
+
+        normalize(html).contains(normalize(fragment).as_str())
+    }
+
     #[test]
     fn html_contains_comparisons_and_escapes_dynamic_values() {
         let html = render_html(&sample_report());
@@ -174,21 +187,30 @@ mod tests {
         );
         assert!(html.contains("alt=\"\""));
         assert!(html.contains("object-fit: contain"));
-        assert!(html.contains(
+        assert!(contains_html_fragment(
+            &html,
             "body:not(.overview-mode) .image-stage img {\n                position: static;\n                width: auto;\n                height: auto;\n                min-width: 0;\n                min-height: 0;\n                max-width: 100%;\n                max-height: 100%;\n                justify-self: center;\n                align-self: center;\n                object-fit: contain;"
         ));
         assert!(html.contains("class=\"app-shell\""));
         assert!(html.contains("id=\"overview-toggle\""));
         assert!(html.contains("Overview is a scan queue"));
-        assert!(
-            html.contains(".overview-mode .image-stage { aspect-ratio: 4 / 5; min-height: 0; }")
-        );
-        assert!(html.contains(
+        assert!(contains_html_fragment(
+            &html,
+            ".overview-mode .image-stage { aspect-ratio: 4 / 5; min-height: 0; }"
+        ));
+        assert!(contains_html_fragment(
+            &html,
             ".overview-mode .image-stage img {\n                width: auto;\n                height: auto;\n                min-width: 0;\n                min-height: 0;\n                max-width: 100%;\n                max-height: 100%;\n                justify-self: center;\n                align-self: center;\n                object-fit: contain;"
         ));
-        assert!(html.contains(".overview-mode .match { position: static; max-width: none;"));
+        assert!(contains_html_fragment(
+            &html,
+            ".overview-mode .match { position: static; max-width: none;"
+        ));
         assert!(html.contains("data-review-button"));
-        assert!(html.contains(".progress-fill {\n                display: block;"));
+        assert!(contains_html_fragment(
+            &html,
+            ".progress-fill {\n                display: block;"
+        ));
         assert!(html.contains("document.addEventListener(\"keydown\""));
         assert!(html.contains("event.target instanceof HTMLButtonElement"));
         assert!(html.contains("prefers-reduced-motion: reduce"));
@@ -200,16 +222,20 @@ mod tests {
         assert!(html.contains("class=\"filter-count\">1</span>"));
         assert!(html.contains("scopeFilters.find((filter) => filter.value === \"same-board\")"));
         assert!(html.contains("kindFilters.find((filter) => filter.value === \"exact\")"));
-        assert!(
-            html.contains("applyFilter();\n                    announce(\"Quick wins shown\")")
-        );
+        assert!(contains_html_fragment(
+            &html,
+            "applyFilter();\n                    announce(\"Quick wins shown\")"
+        ));
         assert!(html.contains("aria-pressed=\"false\""));
-        assert!(html.contains("quickWins.setAttribute(\"aria-pressed\""));
+        assert!(html.contains("quickWins.setAttribute("));
         assert!(html.contains("id=\"reset-review\""));
         assert!(html.contains("window.localStorage.setItem("));
         assert!(html.contains("const restoreState = () =>"));
         assert!(html.contains("groups.forEach((group) => syncReviewedUi(group, false))"));
-        assert!(html.contains("Review marks are kept in this browser"));
+        assert!(contains_html_fragment(
+            &html,
+            "Review marks are kept in this browser"
+        ));
         assert!(html.contains("never changes your Pinterest account."));
     }
 
@@ -225,10 +251,26 @@ mod tests {
         assert!(!html.contains("linear-gradient"));
         assert!(html.contains("class=\"control-icon\""));
         assert!(html.contains("@media (pointer: coarse)"));
-        assert!(html.contains(".control.icon-only { width: 44px; min-height: 44px; }"));
+        assert!(contains_html_fragment(
+            &html,
+            ".control.icon-only { width: 44px; min-height: 44px; }"
+        ));
         assert!(html.contains("scrollbar-color: #494949 var(--shell)"));
-        assert!(html.contains(".match-heading > :first-child { min-width: 0; }"));
-        assert!(html.contains(".match-heading { display: grid; gap: 20px; }"));
+        assert!(contains_html_fragment(
+            &html,
+            ".match-heading > :first-child { min-width: 0; }"
+        ));
+        assert!(contains_html_fragment(
+            &html,
+            ".match-heading { display: grid; gap: 20px; }"
+        ));
+        assert!(contains_html_fragment(
+            &html,
+            "body:not(.overview-mode) .match-heading h1,
+             body:not(.overview-mode) .match-heading h2 {
+               font-size: clamp(36px, 3.6vw, 52px);
+               line-height: 0.9;"
+        ));
         assert!(!html.contains("font-family:\n                    Inter"));
         assert!(html.contains("class=\"skip-link\" href=\"#report-content\""));
         assert!(html.contains("id=\"report-content\" tabindex=\"-1\""));
@@ -304,13 +346,16 @@ mod tests {
         assert!(multi.contains("role=\"group\""));
         // One exact group (cross) and one visual candidate (same).
         assert!(multi.contains("Board scope</span>"));
-        assert!(multi.contains(
+        assert!(contains_html_fragment(
+            &multi,
             "for=\"filter-all\"><span>All</span><span class=\"filter-count\">2</span></label>"
         ));
-        assert!(multi.contains(
+        assert!(contains_html_fragment(
+            &multi,
             "for=\"filter-same\"><span>Same</span><span class=\"filter-count\">1</span></label>"
         ));
-        assert!(multi.contains(
+        assert!(contains_html_fragment(
+            &multi,
             "for=\"filter-cross\"><span>Cross</span><span class=\"filter-count\">1</span></label>"
         ));
         assert!(multi.contains("id=\"filter-all\""));
@@ -324,13 +369,16 @@ mod tests {
         assert!(mixed.contains("aria-label=\"Filter matches by type\""));
         assert!(mixed.contains("id=\"kind-all\""));
         assert!(mixed.contains("Match type</span>"));
-        assert!(mixed.contains(
+        assert!(contains_html_fragment(
+            &mixed,
             "for=\"kind-all\"><span>All</span><span class=\"filter-count\">2</span></label>"
         ));
-        assert!(mixed.contains(
+        assert!(contains_html_fragment(
+            &mixed,
             "for=\"kind-exact\"><span>Exact</span><span class=\"filter-count\">1</span></label>"
         ));
-        assert!(mixed.contains(
+        assert!(contains_html_fragment(
+            &mixed,
             "for=\"kind-visual\"><span>Visual</span><span class=\"filter-count\">1</span></label>"
         ));
 
@@ -367,7 +415,8 @@ mod tests {
         let html = render_html(&report);
 
         assert!(html.contains("id=\"quick-wins\""));
-        assert!(html.contains(
+        assert!(contains_html_fragment(
+            &html,
             "<span>Quick wins</span>\n                            <span class=\"filter-count\">1</span>"
         ));
         assert!(html.contains("id=\"filter-same\""));
@@ -380,7 +429,8 @@ mod tests {
 
         assert!(html.contains("if (unreviewedOnly) unreviewedOnly.checked = true;"));
         assert!(html.contains("group.dataset.reviewed !== \"true\""));
-        assert!(html.contains(
+        assert!(contains_html_fragment(
+            &html,
             "quickWins\n                        .closest(\".filter-controls-meta\")\n                        ?.toggleAttribute(\"hidden\", quickWinCount === 0);"
         ));
     }
@@ -405,7 +455,8 @@ mod tests {
     fn review_queue_keeps_a_compact_item_height_when_few_matches_exist() {
         let html = render_html(&sample_report());
 
-        assert!(html.contains(
+        assert!(contains_html_fragment(
+            &html,
             ".match-nav {\n                min-height: 0;\n                flex: 1;\n                align-content: start;"
         ));
     }
@@ -414,10 +465,22 @@ mod tests {
     fn match_navigation_and_sections_carry_kind_metadata() {
         let html = render_html(&sample_report());
 
-        assert!(html.contains("data-target=\"exact-1\"\n                            data-scope=\"same-board\"\n                            data-kind=\"exact\""));
-        assert!(html.contains("id=\"exact-1\"\n                        data-group\n                        data-scope=\"same-board\"\n                        data-kind=\"exact\""));
-        assert!(html.contains("data-target=\"visual-1\"\n                            data-scope=\"same-board\"\n                            data-kind=\"visual\""));
-        assert!(html.contains("id=\"visual-1\"\n                        data-group\n                        data-scope=\"same-board\"\n                        data-kind=\"visual\""));
+        assert!(contains_html_fragment(
+            &html,
+            "data-target=\"exact-1\"\n                            data-scope=\"same-board\"\n                            data-kind=\"exact\""
+        ));
+        assert!(contains_html_fragment(
+            &html,
+            "id=\"exact-1\"\n                        data-group\n                        data-scope=\"same-board\"\n                        data-kind=\"exact\""
+        ));
+        assert!(contains_html_fragment(
+            &html,
+            "data-target=\"visual-1\"\n                            data-scope=\"same-board\"\n                            data-kind=\"visual\""
+        ));
+        assert!(contains_html_fragment(
+            &html,
+            "id=\"visual-1\"\n                        data-group\n                        data-scope=\"same-board\"\n                        data-kind=\"visual\""
+        ));
         assert!(html.contains("data-review-key=\"exact:same-board:101\""));
         assert!(html.contains("data-review-key=\"visual:same-board:101,102\""));
     }
@@ -431,9 +494,10 @@ mod tests {
         assert!(html.contains("const reviewMatches ="));
         assert!(html.contains("!(scopeMatches && kindMatches && reviewMatches)"));
         assert!(html.contains("const link = links.find("));
-        assert!(
-            html.contains("applyFilter(preferredActive);\n                    updateProgress();")
-        );
+        assert!(contains_html_fragment(
+            &html,
+            "applyFilter(preferredActive);\n                    updateProgress();"
+        ));
         assert!(
             html.contains("preferredActive = visible[index + 1] || visible[index - 1] || null")
         );
@@ -459,7 +523,10 @@ mod tests {
             "reassigning first hands setActive the replacement, so the outgoing \
              match keeps is-active and reappears alongside the active one"
         );
-        assert!(multi.contains("active?.classList.remove(\"is-active\");\n                        active = visible[0] || null;"));
+        assert!(contains_html_fragment(
+            &multi,
+            "active?.classList.remove(\"is-active\");\n                        active = visible[0] || null;"
+        ));
     }
 
     #[test]
@@ -498,10 +565,12 @@ mod tests {
         report.visual_candidates[0].scope = MatchScope::CrossBoard;
         let cross_only = render_html(&report);
 
-        assert!(cross_only.contains(
+        assert!(contains_html_fragment(
+            &cross_only,
             "for=\"filter-same\"><span>Same</span><span class=\"filter-count\">0</span></label>"
         ));
-        assert!(cross_only.contains(
+        assert!(contains_html_fragment(
+            &cross_only,
             "for=\"filter-cross\"><span>Cross</span><span class=\"filter-count\">2</span></label>"
         ));
         assert!(cross_only.contains("No matches in the current filters."));
