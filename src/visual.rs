@@ -218,6 +218,8 @@ mod tests {
         let html = render_html(&sample_report());
 
         assert!(html.contains("font-family: Geist, \"Helvetica Neue\", Arial, sans-serif"));
+        assert!(html.contains("--display: Geist, \"Helvetica Neue\", Arial, sans-serif;"));
+        assert!(!html.contains("Iowan Old Style"));
         assert!(html.contains("min-height: 100dvh"));
         assert!(!html.contains("radial-gradient"));
         assert!(!html.contains("linear-gradient"));
