@@ -3097,9 +3097,23 @@
                     if (!quickWins) return;
                     const scope = scopeFilters.find((filter) => filter.checked)?.value;
                     const kind = kindFilters.find((filter) => filter.checked)?.value;
+                    const quickWinCount = groups.filter(
+                        (group) =>
+                            group.dataset.scope === "same-board" &&
+                            group.dataset.kind === "exact" &&
+                            group.dataset.reviewed !== "true",
+                    ).length;
+                    const quickWinCountLabel = quickWins.querySelector(".filter-count");
+                    if (quickWinCountLabel) {
+                        quickWinCountLabel.textContent = quickWinCount;
+                    }
+                    quickWins
+                        .closest(".filter-controls-meta")
+                        ?.toggleAttribute("hidden", quickWinCount === 0);
                     const isQuickWins =
                         (!scopeFilters.length || scope === "same-board") &&
-                        (!kindFilters.length || kind === "exact");
+                        (!kindFilters.length || kind === "exact") &&
+                        (!unreviewedOnly || unreviewedOnly.checked);
                     quickWins.setAttribute("aria-pressed", isQuickWins ? "true" : "false");
                 };
 
@@ -3299,6 +3313,7 @@
                     filter.addEventListener("change", () => applyFilter()),
                 );
                 quickWins?.addEventListener("click", () => {
+                    if (unreviewedOnly) unreviewedOnly.checked = true;
                     scopeFilters.find((filter) => filter.value === "same-board")?.click();
                     kindFilters.find((filter) => filter.value === "exact")?.click();
                     applyFilter();

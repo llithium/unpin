@@ -373,6 +373,17 @@ mod tests {
     }
 
     #[test]
+    fn quick_wins_is_an_unreviewed_review_queue() {
+        let html = render_html(&sample_report());
+
+        assert!(html.contains("if (unreviewedOnly) unreviewedOnly.checked = true;"));
+        assert!(html.contains("group.dataset.reviewed !== \"true\""));
+        assert!(html.contains(
+            "quickWins\n                        .closest(\".filter-controls-meta\")\n                        ?.toggleAttribute(\"hidden\", quickWinCount === 0);"
+        ));
+    }
+
+    #[test]
     fn unreviewed_filter_and_visible_count_follow_queue_presence() {
         let populated = render_html(&sample_report());
         assert!(populated.contains("id=\"unreviewed-only\""));
