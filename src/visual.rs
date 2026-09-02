@@ -233,6 +233,11 @@ mod tests {
         assert!(html.contains("name=\"description\""));
         assert!(html.contains("name=\"robots\" content=\"noindex, nofollow\""));
         assert!(html.contains("rel=\"icon\""));
+        assert!(html.contains("--red-soft: rgb(215 77 65 / 12%)"));
+        assert!(html.contains("box-shadow: inset 3px 0 0 var(--red)"));
+        assert!(html.contains(".review-check::after"));
+        assert!(html.contains(".review-button[aria-pressed=\"true\"] .review-check::after"));
+        assert!(html.contains(".pin-card:focus-within"));
     }
 
     #[test]

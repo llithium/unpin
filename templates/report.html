@@ -1978,6 +1978,7 @@
             /* Compact review pass: keep the queue present, give the evidence the viewport. */
             :root {
                 --review-rail: 226px;
+                --red-soft: rgb(215 77 65 / 12%);
             }
 
             .app-shell {
@@ -1988,8 +1989,8 @@
                 position: sticky;
                 top: 0;
                 z-index: 20;
-                min-height: 50px;
-                padding: 6px clamp(14px, 2vw, 28px);
+                min-height: 56px;
+                padding: 8px clamp(14px, 2vw, 28px);
             }
 
             .brand {
@@ -1997,23 +1998,23 @@
             }
 
             .brand-mark {
-                width: 28px;
-                height: 28px;
-                border-radius: 8px;
+                width: 30px;
+                height: 30px;
+                border-radius: 50%;
             }
 
             .report-name {
-                font-size: 10px;
+                font-size: 11px;
             }
 
             .progress-block {
                 gap: 6px;
-                font-size: 9px;
+                font-size: 10px;
             }
 
             .progress-track {
-                width: 88px;
-                height: 2px;
+                width: 96px;
+                height: 3px;
             }
 
             .topbar-actions {
@@ -2021,13 +2022,13 @@
             }
 
             .control {
-                min-height: 34px;
+                min-height: 36px;
                 padding: 6px 10px;
             }
 
             .control.icon-only {
-                width: 34px;
-                min-height: 34px;
+                width: 36px;
+                min-height: 36px;
             }
 
             .workspace {
@@ -2037,7 +2038,7 @@
             .rail {
                 position: fixed;
                 z-index: 15;
-                inset: 50px auto 0 0;
+                inset: 56px auto 0 0;
                 width: var(--review-rail);
                 height: auto;
                 align-self: initial;
@@ -2131,6 +2132,19 @@
                 line-height: 14px;
             }
 
+            .match-link[aria-current="true"] {
+                box-shadow: inset 3px 0 0 var(--red);
+            }
+
+            .match-link.is-reviewed:not([aria-current="true"]) {
+                background: var(--red-soft);
+            }
+
+            .match-link.is-reviewed:not([aria-current="true"]) .match-number {
+                border-color: var(--red);
+                color: var(--red);
+            }
+
             .rail-hint {
                 gap: 4px;
                 padding: 10px 12px 12px;
@@ -2168,9 +2182,66 @@
                 line-height: 20px;
             }
 
+            .report-intro {
+                border-left: 3px solid var(--red);
+            }
+
+            .intro-description {
+                max-width: 44ch;
+            }
+
+            .intro-stats p {
+                white-space: normal;
+            }
+
             .review-button {
                 min-height: 40px;
                 padding: 9px 14px;
+            }
+
+            .review-check {
+                position: relative;
+                display: grid;
+                flex: 0 0 14px;
+                width: 14px;
+                height: 14px;
+                place-items: center;
+                border: 1px solid currentColor;
+                border-radius: 50%;
+                background: transparent;
+                transition:
+                    border-color 180ms ease,
+                    background 180ms ease;
+            }
+
+            .review-check::after {
+                width: 4px;
+                height: 7px;
+                content: "";
+                border-right: 1.5px solid var(--red);
+                border-bottom: 1.5px solid var(--red);
+                opacity: 0;
+                transform: translateY(-1px) rotate(45deg) scale(.55);
+                transition:
+                    opacity 180ms ease,
+                    transform 180ms ease;
+            }
+
+            .review-button[aria-pressed="true"] .review-check {
+                border-color: currentColor;
+                background: currentColor;
+            }
+
+            .review-button[aria-pressed="true"] .review-check::after {
+                opacity: 1;
+                transform: translateY(-1px) rotate(45deg) scale(1);
+            }
+
+            .control[disabled]:hover,
+            .control[disabled]:active {
+                border-color: var(--line-strong);
+                background: var(--surface);
+                transform: none;
             }
 
             .comparison {
@@ -2195,6 +2266,10 @@
                 transform: none;
             }
 
+            .pin-card:focus-within {
+                box-shadow: inset 0 0 0 1px var(--red);
+            }
+
             .image-stage {
                 min-height: 0;
             }
@@ -2205,7 +2280,7 @@
             }
 
             body:not(.overview-mode) .content {
-                min-height: calc(100dvh - 50px);
+                min-height: calc(100dvh - 56px);
                 padding-top: 12px;
             }
 
@@ -2247,7 +2322,7 @@
 
             @media (max-width: 880px) {
                 .topbar {
-                    min-height: 52px;
+                    min-height: 56px;
                 }
 
                 .workspace {
@@ -2331,7 +2406,7 @@
 
             @media (max-width: 620px) {
                 .topbar {
-                    min-height: 52px;
+                    min-height: 56px;
                     padding: 4px 10px;
                 }
 
