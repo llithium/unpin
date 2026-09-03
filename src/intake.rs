@@ -51,7 +51,7 @@ pub(crate) enum SourceOutcome {
         warnings: Vec<SourceWarning>,
     },
     Failed {
-        source: SourceIdentity,
+        source: String,
         error: PinterestError,
     },
 }
@@ -62,13 +62,6 @@ pub(crate) struct IntakeSource {
     pub(crate) url: String,
     pub(crate) pins_reported: Option<usize>,
     pub(crate) pins_found: usize,
-}
-
-#[derive(Debug)]
-pub(crate) struct SourceIdentity {
-    pub(crate) name: String,
-    #[allow(dead_code)]
-    pub(crate) url: String,
 }
 
 #[derive(Debug)]
@@ -106,13 +99,13 @@ pub(crate) enum IntakeError {
 
 #[derive(Debug)]
 pub(crate) struct SourceFailure {
-    pub(crate) source: SourceIdentity,
+    pub(crate) source: String,
     pub(crate) error: PinterestError,
 }
 
 impl SourceFailure {
     pub(crate) fn warning(self) -> String {
-        format!("{}: skipped, {}", self.source.name, self.error)
+        format!("{}: skipped, {}", self.source, self.error)
     }
 }
 
@@ -151,6 +144,7 @@ pub(crate) async fn collect(
         let board_completed = Arc::clone(&board_completed);
         async move {
             progress.step(ProgressStep::SourceCollection {
+                source_id: board.id.clone(),
                 name: board.name.clone(),
                 current: index + 1,
                 completed: board_completed.load(Ordering::Relaxed),
@@ -160,11 +154,16 @@ pub(crate) async fn collect(
             let fetched = client.collect_board_source(&board, progress).await;
             let completed = board_completed.fetch_add(1, Ordering::Relaxed) + 1;
             progress.step(ProgressStep::SourceCollection {
+                source_id: board.id.clone(),
                 name: board.name.clone(),
                 current: index + 1,
                 completed,
                 total: board_total,
-                lifecycle: Lifecycle::Completed,
+                lifecycle: if fetched.is_ok() {
+                    Lifecycle::Completed
+                } else {
+                    Lifecycle::Failed
+                },
             });
             (index, board, fetched)
         }
@@ -199,10 +198,7 @@ pub(crate) async fn collect(
             // results; a lone board has no fallback source.
             Err(error) if multiple => {
                 sources.push(SourceOutcome::Failed {
-                    source: SourceIdentity {
-                        name: board.name,
-                        url: board.url,
-                    },
+                    source: board.name,
                     error,
                 });
                 continue;
@@ -251,10 +247,7 @@ pub(crate) async fn collect(
             }
             Err(error) => {
                 sources.push(SourceOutcome::Failed {
-                    source: SourceIdentity {
-                        name: UNORGANIZED_NAME.into(),
-                        url: format!("https://www.pinterest.com/{}/", user.username),
-                    },
+                    source: UNORGANIZED_NAME.into(),
                     error,
                 });
             }
@@ -536,7 +529,7 @@ mod tests {
             .iter()
             .map(|outcome| match outcome {
                 SourceOutcome::Collected { source, .. } => source.name.as_str(),
-                SourceOutcome::Failed { source, .. } => source.name.as_str(),
+                SourceOutcome::Failed { source, .. } => source.as_str(),
             })
             .collect::<Vec<_>>();
         assert_eq!(names, ["Interiors", "Mood board", "Unorganized ideas"]);

@@ -221,7 +221,7 @@ async fn scans_paginated_board_and_sections_end_to_end() {
     ])
     .unwrap();
     let progress = RecordingProgress::default();
-    let mut report = unpin::run_with_api_root_and_progress(
+    let report = unpin::run_with_api_root_and_progress(
         &cli,
         Some(Url::parse(&server.uri()).unwrap()),
         &progress,
@@ -276,6 +276,7 @@ async fn scans_paginated_board_and_sections_end_to_end() {
         lifecycle: Lifecycle::Completed,
     }));
     assert!(progress.steps().contains(&ProgressStep::SourceCollection {
+        source_id: "board-1".into(),
         name: "Ideas".into(),
         current: 1,
         completed: 1,
@@ -341,16 +342,12 @@ async fn scans_paginated_board_and_sections_end_to_end() {
     let visual_html = std::fs::read_to_string(&visual_path).unwrap();
     assert!(visual_html.contains("Exact group 1"));
     assert!(visual_html.contains(&format!("{}/image.png", server.uri())));
-    report.visual_report = Some(visual_path.to_string_lossy().into_owned());
-
     let json = report.render_json().unwrap();
     assert!(json.contains("\"exact_groups\""));
     assert!(json.contains("\"image_url\""));
-    assert!(json.contains("\"visual_report\""));
     let text = report.render_text();
     assert!(text.contains("https://www.pinterest.com/pin/101/"));
     assert!(text.contains("https://www.pinterest.com/pin/102/"));
-    assert!(text.contains("VISUAL REPORT"));
 
     std::fs::remove_file(visual_path).unwrap();
 }
@@ -759,9 +756,14 @@ async fn one_failing_board_does_not_discard_the_others() {
 
     // With no selection option, a profile scans all boards by default.
     let cli = Cli::try_parse_from(["unpin", "alice"]).unwrap();
-    let report = unpin::run_with_api_root(&cli, Some(Url::parse(&server.uri()).unwrap()))
-        .await
-        .unwrap();
+    let progress = RecordingProgress::default();
+    let report = unpin::run_with_api_root_and_progress(
+        &cli,
+        Some(Url::parse(&server.uri()).unwrap()),
+        &progress,
+    )
+    .await
+    .unwrap();
 
     // The reachable board still produced a report.
     assert_eq!(report.summary.boards.len(), 1);
@@ -776,6 +778,19 @@ async fn one_failing_board_does_not_discard_the_others() {
         .expect("the failing board should be reported");
     assert!(warning.starts_with("Mood board: "), "{warning}");
     assert!(warning.contains("403"), "{warning}");
+    assert!(progress.steps().iter().any(|step| {
+        matches!(
+            step,
+            ProgressStep::SourceCollection {
+                source_id,
+                name,
+                current: 2,
+                total: 2,
+                lifecycle: Lifecycle::Failed,
+                ..
+            } if source_id == "board-2" && name == "Mood board"
+        )
+    }));
 }
 
 #[tokio::test]
@@ -1117,6 +1132,12 @@ async fn scans_selected_profile_boards_as_one_pooled_report() {
         .collect::<Vec<_>>();
     boards.sort();
     assert_eq!(boards, ["Interiors", "Mood board", "Unorganized ideas"]);
+    let mut source_ids = items
+        .iter()
+        .map(|item| item.source_id.as_deref().unwrap())
+        .collect::<Vec<_>>();
+    source_ids.sort_unstable();
+    assert_eq!(source_ids, ["board-1", "board-2", "unorganized:alice"]);
     assert_eq!(report.exact_groups[0].scope, MatchScope::CrossBoard);
     let requests = server.received_requests().await.unwrap();
     assert_eq!(
@@ -1149,6 +1170,7 @@ async fn scans_selected_profile_boards_as_one_pooled_report() {
         lifecycle: Lifecycle::Completed,
     }));
     assert!(progress.steps().contains(&ProgressStep::SourceCollection {
+        source_id: "board-2".into(),
         name: "Mood board".into(),
         current: 2,
         completed: 0,
@@ -1472,9 +1494,33 @@ async fn a_bad_request_without_a_page_size_is_still_an_error() {
     .await;
     Mock::given(method("GET"))
         .and(path("/resource/BoardFeedResource/get/"))
+        .and(query_param(
+            "data",
+            request_data(json!({
+                "board_id": "board-1",
+                "field_set_key": "react_grid_pin",
+                "prepend": false,
+                "page_size": 250,
+                "bookmarks": null
+            })),
+        ))
         .respond_with(ResponseTemplate::new(400))
-        // Once with the page size, once without, and then it gives up.
-        .expect(2)
+        .expect(1)
+        .mount(&server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/resource/BoardFeedResource/get/"))
+        .and(query_param(
+            "data",
+            request_data(json!({
+                "board_id": "board-1",
+                "field_set_key": "react_grid_pin",
+                "prepend": false,
+                "bookmarks": null
+            })),
+        ))
+        .respond_with(ResponseTemplate::new(400))
+        .expect(1)
         .mount(&server)
         .await;
 

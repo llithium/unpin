@@ -41,6 +41,10 @@ pub struct ReportItem {
     /// Board this pin lives in; shown only when several boards were scanned.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub board: Option<String>,
+    /// Stable source identity used for scope classification. This is omitted
+    /// from reports because the board label is the user-facing value.
+    #[serde(skip)]
+    pub source_id: Option<String>,
     pub image_url: String,
     pub width: u32,
     pub height: u32,
@@ -63,10 +67,13 @@ pub enum MatchScope {
 impl MatchScope {
     /// Classifies a match by the boards its pins came from.
     ///
-    /// Items without a board—every item in a single-board scan—count as being
-    /// on the same board, so the quiet case is the default.
+    /// Prefer stable source IDs; labels remain a fallback for callers that
+    /// construct items without source metadata. Unknown sources do not add a
+    /// distinct board to the match.
     pub(crate) fn of(items: &[ReportItem]) -> Self {
-        let mut boards = items.iter().filter_map(|item| item.board.as_deref());
+        let mut boards = items
+            .iter()
+            .filter_map(|item| item.source_id.as_deref().or(item.board.as_deref()));
         let Some(first) = boards.next() else {
             return Self::SameBoard;
         };
@@ -170,8 +177,6 @@ pub struct Report {
     pub visual_candidates: Vec<VisualCandidate>,
     pub skipped: Vec<SkippedPin>,
     pub warnings: Vec<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub visual_report: Option<String>,
 }
 
 impl Report {
@@ -262,10 +267,6 @@ impl Report {
         (same, cross)
     }
 
-    fn cross_board_matches(&self) -> usize {
-        self.scope_counts().1
-    }
-
     pub fn render_text(&self) -> String {
         self.render_text_with_color(false)
     }
@@ -294,7 +295,7 @@ impl Report {
             theme.success(summary.analyzed),
             theme.warning(summary.skipped)
         );
-        let cross_board = self.cross_board_matches();
+        let (_, cross_board) = self.scope_counts();
         let _ = writeln!(
             output,
             "{}  {} exact group(s)  {} visual candidate(s){}",
@@ -365,12 +366,7 @@ impl Report {
                 theme.warning("SKIPPED"),
                 theme.dim(format!("{} pin(s)", self.skipped.len()))
             );
-            let mut reasons = BTreeMap::new();
-            for skipped in &self.skipped {
-                *reasons.entry(skipped.reason.as_str()).or_insert(0_usize) += 1;
-            }
-            let mut reasons = reasons.into_iter().collect::<Vec<_>>();
-            reasons.sort_by(|left, right| right.1.cmp(&left.1).then_with(|| left.0.cmp(right.0)));
+            let reasons = grouped_skipped_reasons(&self.skipped);
             for (reason, count) in reasons {
                 let _ = writeln!(
                     output,
@@ -418,21 +414,22 @@ impl Report {
             }
         }
 
-        if let Some(path) = &self.visual_report {
-            let _ = writeln!(
-                output,
-                "\n{}  {}",
-                theme.label("VISUAL REPORT"),
-                theme.link(path)
-            );
-        }
-
         output
     }
 
     pub fn render_json(&self) -> Result<String, serde_json::Error> {
         serde_json::to_string_pretty(self)
     }
+}
+
+pub(crate) fn grouped_skipped_reasons(skipped: &[SkippedPin]) -> Vec<(&str, usize)> {
+    let mut reasons = BTreeMap::new();
+    for pin in skipped {
+        *reasons.entry(pin.reason.as_str()).or_insert(0_usize) += 1;
+    }
+    let mut reasons = reasons.into_iter().collect::<Vec<_>>();
+    reasons.sort_by(|left, right| right.1.cmp(&left.1).then_with(|| left.0.cmp(right.0)));
+    reasons
 }
 
 fn match_review_key(kind: &str, scope: MatchScope, items: &[ReportItem]) -> String {
@@ -562,6 +559,7 @@ mod tests {
             pin_id: pin_id.into(),
             pin_url: format!("https://www.pinterest.com/pin/{pin_id}/"),
             board: Some(board.into()),
+            source_id: None,
             image_url: format!("https://i.pinimg.com/originals/{pin_id}.jpg"),
             width,
             height: width,
@@ -599,6 +597,21 @@ mod tests {
     }
 
     #[test]
+    fn match_scope_uses_source_identity_when_labels_collide() {
+        let mut first = item("1", "Shared name", 1200);
+        let mut second = item("2", "Shared name", 800);
+        first.source_id = Some("board-1".into());
+        second.source_id = Some("board-2".into());
+        assert_eq!(MatchScope::of(&[first, second]), MatchScope::CrossBoard);
+
+        let mut first = item("1", "First label", 1200);
+        let mut second = item("2", "Second label", 800);
+        first.source_id = Some("board-1".into());
+        second.source_id = Some("board-1".into());
+        assert_eq!(MatchScope::of(&[first, second]), MatchScope::SameBoard);
+    }
+
+    #[test]
     fn review_storage_key_ignores_scan_source_order() {
         let mut report = Report {
             summary: Summary {
@@ -615,7 +628,6 @@ mod tests {
             visual_candidates: vec![],
             skipped: vec![],
             warnings: vec![],
-            visual_report: None,
         };
         let original = report.review_storage_key();
 
@@ -645,6 +657,7 @@ mod tests {
                     pin_id: "123".into(),
                     pin_url: "https://www.pinterest.com/pin/123/".into(),
                     board: Some("Ideas".into()),
+                    source_id: None,
                     image_url: "https://i.pinimg.com/originals/example.jpg".into(),
                     width: 1200,
                     height: 800,
@@ -655,15 +668,12 @@ mod tests {
             visual_candidates: vec![],
             skipped: vec![],
             warnings: vec![],
-            visual_report: Some("/tmp/unpin-example.html".into()),
         };
 
         let rendered = report.render_text();
         assert!(rendered.contains("EXACT 01"));
         assert!(rendered.contains("KEEP"));
         assert!(rendered.contains("https://www.pinterest.com/pin/123/"));
-        assert!(rendered.contains("VISUAL REPORT"));
-        assert!(rendered.contains("/tmp/unpin-example.html"));
         assert!(rendered.contains("2 returned / 2 reported"));
         assert!(!rendered.contains("\u{1b}["));
 
@@ -694,7 +704,6 @@ mod tests {
                 board: Some(unsafe_text.into()),
             }],
             warnings: vec![format!("warning: {unsafe_text}")],
-            visual_report: None,
         };
 
         let text = report.render_text();
@@ -730,7 +739,6 @@ mod tests {
             visual_candidates: vec![],
             skipped: vec![],
             warnings: vec![],
-            visual_report: None,
         };
         let value: serde_json::Value =
             serde_json::from_str(&report.render_json().unwrap()).unwrap();
@@ -799,7 +807,6 @@ mod tests {
             visual_candidates: vec![],
             skipped: vec![],
             warnings: vec![],
-            visual_report: None,
         };
 
         let multi = report.render_text();
@@ -855,14 +862,10 @@ mod tests {
             }],
             skipped: vec![],
             warnings: vec![],
-            visual_report: None,
         };
 
         // Two same-board (one group, one candidate) and one cross-board group.
         assert_eq!(report.scope_counts(), (2, 1));
-        // The summary line and the HTML tabs must never disagree.
-        assert_eq!(report.cross_board_matches(), report.scope_counts().1);
-
         report.exact_groups.clear();
         report.visual_candidates.clear();
         assert_eq!(report.scope_counts(), (0, 0));
@@ -888,7 +891,6 @@ mod tests {
             visual_candidates: vec![],
             skipped: vec![],
             warnings: vec![],
-            visual_report: None,
         };
 
         let value: serde_json::Value =
@@ -916,7 +918,6 @@ mod tests {
             visual_candidates: vec![],
             skipped: vec![],
             warnings: vec![],
-            visual_report: None,
         };
 
         let multi = report.render_text();
@@ -960,7 +961,6 @@ mod tests {
             visual_candidates: vec![],
             skipped,
             warnings: vec![],
-            visual_report: None,
         };
 
         let rendered = report.render_text();

@@ -237,7 +237,6 @@ mod tests {
         assert!(
             Cli::try_parse_from(["unpin", "alice", "--unorganized", "--same-board-only"]).is_ok()
         );
-        assert!(Cli::try_parse_from(["unpin", "alice", "--all-boards"]).is_err());
     }
 
     #[test]

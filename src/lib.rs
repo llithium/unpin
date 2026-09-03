@@ -12,8 +12,6 @@ mod image_fingerprint;
 mod intake;
 mod pinterest_api;
 
-use std::collections::BTreeMap;
-
 #[cfg(test)]
 mod test_support {
     use std::sync::OnceLock;
@@ -98,21 +96,18 @@ fn listed(reasons: &[String]) -> String {
 /// report could be built. Grouping avoids turning a large all-skipped scan into
 /// one error line per pin while retaining the reasons a user can act on.
 fn no_analyzable_reasons(mut warnings: Vec<String>, skipped: &[SkippedPin]) -> Vec<String> {
-    let mut counts = BTreeMap::new();
-    for pin in skipped {
-        *counts.entry(pin.reason.as_str()).or_insert(0_usize) += 1;
-    }
-
-    let mut counts = counts.into_iter().collect::<Vec<_>>();
-    counts.sort_by(|left, right| right.1.cmp(&left.1).then_with(|| left.0.cmp(right.0)));
-    warnings.extend(counts.into_iter().map(|(reason, count)| {
-        let pins = if count == 1 {
-            "1 pin".to_owned()
-        } else {
-            format!("{count} pins")
-        };
-        format!("{pins} skipped: {reason}")
-    }));
+    warnings.extend(
+        crate::report::grouped_skipped_reasons(skipped)
+            .into_iter()
+            .map(|(reason, count)| {
+                let pins = if count == 1 {
+                    "1 pin".to_owned()
+                } else {
+                    format!("{count} pins")
+                };
+                format!("{pins} skipped: {reason}")
+            }),
+    );
     warnings
 }
 
@@ -199,7 +194,7 @@ pub async fn run_with_api_root_and_progress(
                 warnings.extend(source_warnings.into_iter().map(|warning| warning.render()));
             }
             SourceOutcome::Failed { source, error } => {
-                warnings.push(format!("{}: skipped, {error}", source.name));
+                warnings.push(format!("{source}: skipped, {error}"));
             }
         }
     }
@@ -263,6 +258,5 @@ pub async fn run_with_api_root_and_progress(
         visual_candidates: analysis.visual_candidates,
         skipped,
         warnings,
-        visual_report: None,
     })
 }

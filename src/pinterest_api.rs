@@ -118,10 +118,6 @@ impl PinterestApi {
         })
     }
 
-    pub(crate) fn http_client(&self) -> reqwest::Client {
-        self.http.clone()
-    }
-
     pub(crate) fn is_authenticated(&self) -> bool {
         self.authenticated
     }
@@ -699,50 +695,602 @@ fn invalid_response(resource: &'static str, message: impl Into<String>) -> Pinte
         message: message.into(),
     }
 }
-
 #[cfg(test)]
-pub(crate) mod test_support {
+mod tests {
     use super::*;
+    use crate::progress::NoProgress;
 
-    pub(crate) fn build_request_cookie_header(
-        cookies: &[ScopedCookie],
-        request_url: &Url,
-    ) -> Result<(String, HeaderValue), PinterestError> {
-        super::build_request_cookie_header(cookies, request_url)
+    #[test]
+    fn generated_csrf_token_is_header_safe() {
+        let token = generate_csrf_token();
+        assert_eq!(token.len(), 32);
+        assert!(token.bytes().all(|byte| byte.is_ascii_alphanumeric()));
+        assert!(HeaderValue::from_str(&token).is_ok());
     }
 
-    pub(crate) fn generate_csrf_token() -> String {
-        super::generate_csrf_token()
+    #[allow(clippy::too_many_arguments)]
+    fn scoped_cookie(
+        name: &str,
+        value: &str,
+        domain: &str,
+        host_only: bool,
+        path: &str,
+        secure: bool,
+        expires: Option<u64>,
+        source_order: usize,
+    ) -> ScopedCookie {
+        ScopedCookie {
+            cookie: BrowserCookie {
+                name: name.into(),
+                value: value.into(),
+            },
+            normalized_domain: domain.into(),
+            host_only,
+            path: path.into(),
+            secure,
+            expires,
+            source_order,
+        }
     }
 
-    pub(crate) fn is_retryable_status(status: reqwest::StatusCode) -> bool {
-        super::is_retryable_status(status)
+    fn request(url: &str) -> Url {
+        Url::parse(url).unwrap()
     }
 
-    pub(crate) async fn read_api_body(
-        response: reqwest::Response,
-        resource: &'static str,
-        max_bytes: u64,
-    ) -> Result<Vec<u8>, PinterestError> {
-        super::read_api_body(response, resource, max_bytes).await
+    #[test]
+    fn imported_cookies_supply_csrf_and_are_marked_sensitive() {
+        let (csrf, header) = build_request_cookie_header(
+            &[
+                scoped_cookie(
+                    "_pinterest_sess",
+                    "session-value",
+                    "www.pinterest.com",
+                    true,
+                    "/",
+                    true,
+                    None,
+                    0,
+                ),
+                scoped_cookie(
+                    "csrftoken",
+                    "browser-csrf",
+                    "www.pinterest.com",
+                    true,
+                    "/",
+                    true,
+                    None,
+                    1,
+                ),
+            ],
+            &request("https://www.pinterest.com/resource/BoardResource/get/"),
+        )
+        .unwrap();
+
+        assert_eq!(csrf, "browser-csrf");
+        assert!(header.is_sensitive());
+        let value = header.to_str().unwrap();
+        assert!(value.contains("_pinterest_sess=session-value"));
+        assert!(value.contains("csrftoken=browser-csrf"));
     }
 
-    pub(crate) fn response_bookmark(response: &Value) -> Result<Option<String>, PinterestError> {
-        super::response_bookmark(response, "Feed")
+    #[test]
+    fn unsafe_browser_cookie_values_are_not_sent() {
+        let (_, header) = build_request_cookie_header(
+            &[scoped_cookie(
+                "bad",
+                "value\r\ninjected: true",
+                "www.pinterest.com",
+                true,
+                "/",
+                true,
+                None,
+                0,
+            )],
+            &request("https://www.pinterest.com/resource/BoardResource/get/"),
+        )
+        .unwrap();
+
+        assert!(!header.to_str().unwrap().contains("injected"));
+        assert!(header.to_str().unwrap().contains("csrftoken="));
+        assert!(!header.to_str().unwrap().contains("bad="));
     }
 
-    pub(crate) fn retry_delay(attempt: usize, retry_after: Option<&HeaderValue>) -> Duration {
-        super::retry_delay(attempt, retry_after)
+    #[test]
+    fn host_only_cookies_do_not_cross_pinterest_subdomains() {
+        let cookies = [scoped_cookie(
+            "_pinterest_sess",
+            "host-only",
+            "www.pinterest.com",
+            true,
+            "/",
+            true,
+            None,
+            0,
+        )];
+        let selected = select_applicable_cookies(
+            &cookies,
+            &request("https://api.pinterest.com/resource/BoardResource/get/"),
+        );
+
+        assert!(selected.is_empty());
     }
 
-    pub(crate) fn select_applicable_cookies<'a>(
-        cookies: &'a [ScopedCookie],
-        request_url: &Url,
-    ) -> Vec<&'a ScopedCookie> {
-        super::select_applicable_cookies(cookies, request_url)
+    #[test]
+    fn domain_cookies_cover_allowed_pinterest_subdomains() {
+        let cookies = [scoped_cookie(
+            "_pinterest_sess",
+            "domain",
+            "pinterest.com",
+            false,
+            "/",
+            true,
+            None,
+            0,
+        )];
+        let selected = select_applicable_cookies(
+            &cookies,
+            &request("https://uk.pinterest.com/resource/BoardResource/get/"),
+        );
+
+        assert_eq!(selected.len(), 1);
+        assert_eq!(selected[0].normalized_domain, "pinterest.com");
+        assert!(!selected[0].host_only);
     }
 
-    pub(crate) fn unix_time_now() -> u64 {
-        super::unix_time_now()
+    #[test]
+    fn lookalike_domains_do_not_match_cookie_scope() {
+        let cookies = [scoped_cookie(
+            "_pinterest_sess",
+            "domain",
+            "pinterest.com",
+            false,
+            "/",
+            true,
+            None,
+            0,
+        )];
+        let selected = select_applicable_cookies(
+            &cookies,
+            &request("https://notpinterest.com/resource/BoardResource/get/"),
+        );
+
+        assert!(selected.is_empty());
+    }
+
+    #[test]
+    fn path_restricted_cookies_are_excluded_when_request_path_does_not_match() {
+        let cookies = [scoped_cookie(
+            "_pinterest_sess",
+            "path",
+            "www.pinterest.com",
+            true,
+            "/pin/",
+            true,
+            None,
+            0,
+        )];
+        let selected = select_applicable_cookies(
+            &cookies,
+            &request("https://www.pinterest.com/resource/BoardResource/get/"),
+        );
+
+        assert!(selected.is_empty());
+    }
+
+    #[test]
+    fn cookie_path_matching_respects_segment_boundaries() {
+        let cookies = [scoped_cookie(
+            "_pinterest_sess",
+            "path",
+            "www.pinterest.com",
+            true,
+            "/resource/api",
+            true,
+            None,
+            0,
+        )];
+
+        let matching = select_applicable_cookies(
+            &cookies,
+            &request("https://www.pinterest.com/resource/api/get/"),
+        );
+        let near_miss = select_applicable_cookies(
+            &cookies,
+            &request("https://www.pinterest.com/resource/apis/get/"),
+        );
+
+        assert_eq!(matching.len(), 1);
+        assert!(near_miss.is_empty());
+    }
+
+    #[test]
+    fn secure_cookies_require_https_requests() {
+        let cookies = [scoped_cookie(
+            "_pinterest_sess",
+            "secure",
+            "www.pinterest.com",
+            true,
+            "/",
+            true,
+            None,
+            0,
+        )];
+
+        let http_selected = select_applicable_cookies(
+            &cookies,
+            &request("http://www.pinterest.com/resource/BoardResource/get/"),
+        );
+        let https_selected = select_applicable_cookies(
+            &cookies,
+            &request("https://www.pinterest.com/resource/BoardResource/get/"),
+        );
+
+        assert!(http_selected.is_empty());
+        assert_eq!(https_selected.len(), 1);
+    }
+
+    #[test]
+    fn expired_cookies_are_excluded() {
+        let cookies = [scoped_cookie(
+            "_pinterest_sess",
+            "expired",
+            "www.pinterest.com",
+            true,
+            "/",
+            true,
+            Some(unix_time_now().saturating_sub(1)),
+            0,
+        )];
+        let selected = select_applicable_cookies(
+            &cookies,
+            &request("https://www.pinterest.com/resource/BoardResource/get/"),
+        );
+
+        assert!(selected.is_empty());
+    }
+
+    #[test]
+    fn duplicate_cookie_names_follow_host_path_domain_specificity() {
+        let cookies = [
+            scoped_cookie(
+                "sid",
+                "domain-root",
+                "pinterest.com",
+                false,
+                "/",
+                true,
+                None,
+                0,
+            ),
+            scoped_cookie(
+                "sid",
+                "domain-www",
+                "www.pinterest.com",
+                false,
+                "/",
+                true,
+                None,
+                1,
+            ),
+            scoped_cookie(
+                "sid",
+                "host-path",
+                "www.pinterest.com",
+                true,
+                "/resource/",
+                true,
+                None,
+                2,
+            ),
+        ];
+        let selected = select_applicable_cookies(
+            &cookies,
+            &request("https://www.pinterest.com/resource/BoardResource/get/"),
+        );
+
+        assert_eq!(selected.len(), 1);
+        assert!(selected[0].host_only);
+        assert_eq!(selected[0].path, "/resource/");
+        assert_eq!(selected[0].source_order, 2);
+    }
+
+    #[test]
+    fn duplicate_cookie_names_fall_back_to_stable_source_order() {
+        let cookies = [
+            scoped_cookie(
+                "sid",
+                "first",
+                "www.pinterest.com",
+                true,
+                "/",
+                true,
+                None,
+                0,
+            ),
+            scoped_cookie(
+                "sid",
+                "second",
+                "www.pinterest.com",
+                true,
+                "/",
+                true,
+                None,
+                1,
+            ),
+        ];
+        let selected = select_applicable_cookies(
+            &cookies,
+            &request("https://www.pinterest.com/resource/BoardResource/get/"),
+        );
+
+        assert_eq!(selected.len(), 1);
+        assert_eq!(selected[0].source_order, 0);
+    }
+
+    #[test]
+    fn csrf_comes_from_the_same_applicable_cookie_set() {
+        let (csrf, header) = build_request_cookie_header(
+            &[
+                scoped_cookie(
+                    "csrftoken",
+                    "path-miss",
+                    "www.pinterest.com",
+                    true,
+                    "/pin/",
+                    true,
+                    None,
+                    0,
+                ),
+                scoped_cookie(
+                    "csrftoken",
+                    "applicable",
+                    "www.pinterest.com",
+                    true,
+                    "/resource/",
+                    true,
+                    None,
+                    1,
+                ),
+            ],
+            &request("https://www.pinterest.com/resource/BoardResource/get/"),
+        )
+        .unwrap();
+
+        assert_eq!(csrf, "applicable");
+        assert!(header.to_str().unwrap().contains("csrftoken=applicable"));
+    }
+    #[test]
+    fn retries_only_throttling_and_transient_server_errors() {
+        assert!(is_retryable_status(reqwest::StatusCode::TOO_MANY_REQUESTS));
+        assert!(is_retryable_status(
+            reqwest::StatusCode::INTERNAL_SERVER_ERROR
+        ));
+        assert!(is_retryable_status(
+            reqwest::StatusCode::SERVICE_UNAVAILABLE
+        ));
+        assert!(!is_retryable_status(reqwest::StatusCode::BAD_REQUEST));
+        assert!(!is_retryable_status(reqwest::StatusCode::FORBIDDEN));
+    }
+
+    #[test]
+    fn retry_after_seconds_override_bounded_exponential_backoff() {
+        let retry_after = HeaderValue::from_static("7");
+        assert_eq!(retry_delay(0, Some(&retry_after)), Duration::from_secs(7));
+        assert_eq!(retry_delay(0, None), Duration::from_millis(250));
+        assert_eq!(retry_delay(1, None), Duration::from_millis(500));
+
+        let excessive = HeaderValue::from_static("3600");
+        assert_eq!(
+            retry_delay(0, Some(&excessive)),
+            MAX_RETRY_DELAY,
+            "a hostile Retry-After header must not stall the CLI indefinitely"
+        );
+    }
+    #[test]
+    fn recognizes_terminal_bookmarks() {
+        assert_eq!(
+            response_bookmark(
+                &json!({"resource": {"options": {
+                    "bookmarks": ["abc"]
+                }}}),
+                "Feed"
+            )
+            .unwrap(),
+            Some("abc".into())
+        );
+        assert_eq!(
+            response_bookmark(
+                &json!({"resource": {"options": {
+                    "bookmarks": null
+                }}}),
+                "Feed"
+            )
+            .unwrap(),
+            None
+        );
+    }
+
+    #[tokio::test]
+    async fn missing_pagination_metadata_is_not_treated_as_end_of_feed() {
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/resource/FeedResource/get/"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "resource_response": { "data": [] },
+                "resource": { "options": {} }
+            })))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let client = PinterestApi::new(
+            Url::parse("https://www.pinterest.com/").unwrap(),
+            Url::parse(&server.uri()).unwrap(),
+            Vec::new(),
+        )
+        .unwrap();
+        let error = client
+            .paginate("Feed", json!({}), &NoProgress)
+            .await
+            .unwrap_err();
+
+        assert!(matches!(
+            error,
+            PinterestError::InvalidResponse {
+                resource: "Feed",
+                message
+            } if message.contains("bookmark metadata is missing")
+        ));
+    }
+
+    #[tokio::test]
+    async fn oversized_api_response_bodies_are_rejected_before_json_deserialization() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        use tokio::net::TcpListener;
+
+        let listener = TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.unwrap();
+            let mut request = Vec::new();
+            let mut buffer = [0_u8; 1024];
+            while !request.windows(4).any(|window| window == b"\r\n\r\n") {
+                let bytes = stream.read(&mut buffer).await.unwrap();
+                if bytes == 0 {
+                    return;
+                }
+                request.extend_from_slice(&buffer[..bytes]);
+            }
+
+            let response = concat!(
+                "HTTP/1.1 200 OK\r\n",
+                "Content-Type: application/json\r\n",
+                "Transfer-Encoding: chunked\r\n",
+                "Connection: close\r\n\r\n",
+                "5\r\nhello\r\n",
+                "5\r\nworld\r\n",
+                "0\r\n\r\n"
+            );
+            let _ = stream.write_all(response.as_bytes()).await;
+        });
+
+        let response = reqwest::Client::new()
+            .get(format!("http://{address}/"))
+            .send()
+            .await
+            .unwrap();
+        let error = read_api_body(response, "Feed", 4).await.unwrap_err();
+
+        assert!(matches!(
+            error,
+            PinterestError::InvalidResponse {
+                resource: "Feed",
+                message
+            } if message.contains("safety limit")
+        ));
+        let _ = server.await;
+    }
+
+    #[tokio::test]
+    async fn retries_transient_api_response_body_failures() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        use tokio::net::TcpListener;
+        use tokio::time::timeout;
+
+        let listener = TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            let mut accepted = 0;
+            for _ in 0..4 {
+                let Ok(Ok((mut stream, _))) =
+                    timeout(Duration::from_secs(5), listener.accept()).await
+                else {
+                    break;
+                };
+                accepted += 1;
+                let mut request = Vec::new();
+                let mut buffer = [0_u8; 1024];
+                while !request.windows(4).any(|window| window == b"\r\n\r\n") {
+                    let bytes = stream.read(&mut buffer).await.unwrap();
+                    if bytes == 0 {
+                        break;
+                    }
+                    request.extend_from_slice(&buffer[..bytes]);
+                }
+
+                // The declared length is intentionally larger than the body;
+                // the peer closing the connection makes this a body transport
+                // failure rather than malformed JSON.
+                let _ = stream
+                    .write_all(
+                        b"HTTP/1.1 200 OK\r\nContent-Length: 20\r\nConnection: close\r\n\r\ntruncated",
+                    )
+                    .await;
+            }
+            accepted
+        });
+
+        let client = PinterestApi::new(
+            Url::parse("https://www.pinterest.com/").unwrap(),
+            Url::parse(&format!("http://{address}/")).unwrap(),
+            Vec::new(),
+        )
+        .unwrap();
+        let error = client
+            .call("Feed", json!({}), &NoProgress)
+            .await
+            .unwrap_err();
+
+        assert!(matches!(
+            error,
+            PinterestError::Request {
+                resource: "Feed",
+                ..
+            }
+        ));
+        assert!(!error.to_string().contains("truncated"));
+        assert_eq!(server.await.unwrap(), 4);
+    }
+
+    #[tokio::test]
+    async fn feeds_exceeding_the_result_limit_return_an_invalid_response() {
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        let results = (0..=MAX_FEED_RESULTS)
+            .map(|id| json!({ "id": id }))
+            .collect::<Vec<_>>();
+        Mock::given(method("GET"))
+            .and(path("/resource/FeedResource/get/"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "resource_response": { "data": results },
+                "resource": { "options": { "bookmarks": ["-end-"] } }
+            })))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let client = PinterestApi::new(
+            Url::parse("https://www.pinterest.com/").unwrap(),
+            Url::parse(&server.uri()).unwrap(),
+            Vec::new(),
+        )
+        .unwrap();
+        let error = client
+            .paginate("Feed", json!({}), &NoProgress)
+            .await
+            .unwrap_err();
+
+        assert!(matches!(
+            error,
+            PinterestError::InvalidResponse {
+                resource: "Feed",
+                message
+            } if message.contains("retention safety limit")
+        ));
     }
 }

@@ -70,13 +70,7 @@ pub enum AuthError {
     InvalidCookieFile { path: PathBuf, line: usize },
 }
 
-/// Loads Pinterest cookies from the Netscape/Mozilla cookies.txt format.
-pub fn load_pinterest_cookies_file(path: &Path) -> Result<Vec<BrowserCookie>, AuthError> {
-    Ok(compatibility_public_cookies(
-        load_pinterest_scoped_cookies_file(path)?,
-    ))
-}
-
+/// Loads Pinterest cookies while retaining their original request scope.
 pub(crate) fn load_pinterest_scoped_cookies_file(
     path: &Path,
 ) -> Result<Vec<ScopedCookie>, AuthError> {
@@ -133,14 +127,6 @@ pub(crate) fn load_pinterest_scoped_cookies_file(
         });
     }
     Ok(cookies)
-}
-
-pub async fn load_pinterest_cookies(
-    browser: CookieBrowser,
-) -> Result<Vec<BrowserCookie>, AuthError> {
-    Ok(compatibility_public_cookies(
-        load_pinterest_scoped_cookies(browser).await?,
-    ))
 }
 
 pub(crate) async fn load_pinterest_scoped_cookies(
@@ -255,27 +241,25 @@ fn is_live_pinterest_session_cookie(cookie: &rookie::enums::Cookie, now: u64) ->
 
 #[cfg(unix)]
 fn load_chrome_profile_cookies(domains: Option<Vec<String>>) -> Option<Vec<rookie::enums::Cookie>> {
-    let now = unix_time_now();
-    let mut candidates = Vec::new();
+    load_chrome_profiles(chrome_profile_bases(), unix_time_now(), |database| {
+        rookie::any_browser(database.to_str()?, domains.clone(), None).ok()
+    })
+}
 
-    for base in chrome_profile_bases() {
-        for profile in ordered_profile_directories(&base) {
-            for relative_db in ["Network/Cookies", "Cookies"] {
-                let database = profile.join(relative_db);
-                if !database.is_file() {
-                    continue;
-                }
-                let Some(database) = database.to_str() else {
-                    continue;
-                };
-                let Ok(cookies) = rookie::any_browser(database, domains.clone(), None) else {
-                    continue;
-                };
-                candidates.push(cookies);
-            }
-        }
-    }
-
+#[cfg(unix)]
+fn load_chrome_profiles(
+    bases: impl IntoIterator<Item = PathBuf>,
+    now: u64,
+    mut load_database: impl FnMut(&Path) -> Option<Vec<rookie::enums::Cookie>>,
+) -> Option<Vec<rookie::enums::Cookie>> {
+    // Keep reads lazy: a signed-in preferred profile ends the search before
+    // opening cookie databases in other profiles or Chrome channels.
+    let candidates = bases
+        .into_iter()
+        .flat_map(|base| ordered_profile_directories(&base))
+        .flat_map(|profile| [profile.join("Network/Cookies"), profile.join("Cookies")])
+        .filter(|database| database.is_file())
+        .filter_map(|database| load_database(&database));
     select_chrome_profile_cookies(candidates, now)
 }
 
@@ -366,16 +350,6 @@ fn normalize_path(path: &str) -> String {
     }
 }
 
-fn compatibility_public_cookies(mut cookies: Vec<ScopedCookie>) -> Vec<BrowserCookie> {
-    cookies.sort_by(|left, right| {
-        left.cookie
-            .name
-            .cmp(&right.cookie.name)
-            .then(left.source_order.cmp(&right.source_order))
-    });
-    cookies.into_iter().map(|cookie| cookie.cookie).collect()
-}
-
 fn unix_time_now() -> u64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -423,24 +397,6 @@ mod tests {
         assert!(cookies[1].secure);
         assert_eq!(cookies[1].expires, None);
         assert_eq!(cookies[1].source_order, 3);
-    }
-
-    #[test]
-    fn public_cookie_file_loader_keeps_name_value_shape() {
-        let file = tempfile::NamedTempFile::new().unwrap();
-        std::fs::write(
-            file.path(),
-            ".pinterest.com\tTRUE\t/\tFALSE\t0\t_pinterest_sess\tsecret\n",
-        )
-        .unwrap();
-
-        assert_eq!(
-            load_pinterest_cookies_file(file.path()).unwrap(),
-            [BrowserCookie {
-                name: "_pinterest_sess".into(),
-                value: "secret".into()
-            }]
-        );
     }
 
     #[test]
@@ -537,18 +493,27 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
-    fn chrome_profile_selector_keeps_first_live_profile() {
+    fn chrome_profile_loading_stops_at_first_live_profile() {
         let now = 1_700_000_000;
-        let selected = select_chrome_profile_cookies(
-            vec![
-                profile_with_session("profile_one", "live", Some(now + 60)),
-                profile_with_session("profile_two", "also_live", Some(now + 120)),
-            ],
-            now,
+        let base = tempfile::tempdir().unwrap();
+        for profile in ["Default", "Profile 1", "Profile 2"] {
+            std::fs::create_dir(base.path().join(profile)).unwrap();
+            std::fs::write(base.path().join(profile).join("Cookies"), "").unwrap();
+        }
+        std::fs::write(
+            base.path().join("Local State"),
+            r#"{"profile":{"last_used":"Profile 1"}}"#,
         )
         .unwrap();
+        let mut loaded = Vec::new();
+        let selected = load_chrome_profiles([base.path().to_owned()], now, |database| {
+            loaded.push(database.to_owned());
+            Some(profile_with_session("preferred", "live", Some(now + 60)))
+        })
+        .unwrap();
 
-        assert_eq!(selected_profile_id(&selected), Some("profile_one"));
+        assert_eq!(selected_profile_id(&selected), Some("preferred"));
+        assert_eq!(loaded, [base.path().join("Profile 1/Cookies")]);
     }
 
     #[cfg(unix)]

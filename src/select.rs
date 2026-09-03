@@ -1,5 +1,6 @@
 //! Choosing which of a profile's boards to scan.
 
+use console::{Alignment, measure_text_width, pad_str, truncate_str};
 use inquire::MultiSelect;
 use thiserror::Error;
 
@@ -93,11 +94,14 @@ fn picker_labels(boards: &[BoardRef], terminal_width: usize) -> Vec<String> {
         )
     }));
 
-    let width = |value: &str| value.chars().count();
-    let widest_name = rows.iter().map(|(name, _)| width(name)).max().unwrap_or(0);
+    let widest_name = rows
+        .iter()
+        .map(|(name, _)| measure_text_width(name))
+        .max()
+        .unwrap_or(0);
     let widest_count = rows
         .iter()
-        .map(|(_, count)| width(count))
+        .map(|(_, count)| measure_text_width(count))
         .max()
         .unwrap_or(0);
     let budget = terminal_width
@@ -107,23 +111,13 @@ fn picker_labels(boards: &[BoardRef], terminal_width: usize) -> Vec<String> {
 
     rows.iter()
         .map(|(name, count)| {
+            let name = truncate_str(name, name_width, "…");
             format!(
-                "{:<name_width$}{}{count}",
-                truncate(name, name_width),
+                "{}{}{count}",
+                pad_str(&name, name_width, Alignment::Left, None),
                 " ".repeat(LABEL_GAP)
             )
         })
-        .collect()
-}
-
-fn truncate(value: &str, width: usize) -> String {
-    if value.chars().count() <= width {
-        return value.to_owned();
-    }
-    value
-        .chars()
-        .take(width.saturating_sub(1))
-        .chain(std::iter::once('…'))
         .collect()
 }
 
@@ -335,11 +329,13 @@ mod tests {
     fn rows_fit_on_one_line_in_a_narrow_terminal() {
         let mut boards = boards();
         boards.push(board("A board with a very long name indeed", "long"));
+        boards.push(board(&"日本語".repeat(20), "wide"));
+        boards.push(board(&"e\u{301}".repeat(60), "combining"));
 
         // The real case: a 40-column terminal must not wrap any row.
         for width in [40, 60, 80, 120] {
             for label in picker_labels(&boards, width) {
-                let rendered = ROW_PREFIX + label.chars().count();
+                let rendered = ROW_PREFIX + measure_text_width(&label);
                 assert!(
                     rendered <= width,
                     "width {width}: {rendered} cols in {label:?}"
@@ -354,21 +350,29 @@ mod tests {
         let labels = picker_labels(&boards(), 200);
         let widest = ["All pins", "Interiors", "Mood board"]
             .iter()
-            .map(|name| name.chars().count())
+            .map(|name| measure_text_width(name))
             .max()
             .unwrap();
 
         for label in &labels {
-            assert_eq!(label.chars().count(), widest + LABEL_GAP + "10 pins".len());
+            assert_eq!(
+                measure_text_width(label),
+                widest + LABEL_GAP + "10 pins".len()
+            );
         }
         assert!(!labels[1].contains("…"));
     }
 
     #[test]
-    fn overlong_names_are_truncated_rather_than_wrapped() {
-        assert_eq!(truncate("Interiors", 9), "Interiors");
-        assert_eq!(truncate("Interiors", 5), "Inte…");
-        // Truncation counts characters, not bytes.
-        assert_eq!(truncate("Can’t stop cross-stitching", 6), "Can’t…");
+    fn unicode_names_align_counts_by_terminal_columns() {
+        let labels = picker_labels(
+            &[board("日本語", "wide"), board("Cafe\u{301}", "combining")],
+            80,
+        );
+        assert_eq!(labels[1], "日本語    10 pins");
+        assert_eq!(labels[2], "Cafe\u{301}      10 pins");
+
+        let labels = picker_labels(&[board(&"日".repeat(40), "long")], 40);
+        assert_eq!(labels[1], format!("{}…  10 pins", "日".repeat(12)));
     }
 }

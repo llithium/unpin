@@ -142,11 +142,12 @@ Run `unpin --help` for the complete interface.
   sections are fetched up to sixteen at a time. All Pinterest API requests
   share a 128-request ceiling. Pagination within any single feed remains
   sequential, since each page is addressed by the previous page's bookmark, so
-  `unpin` asks for 250 pins per page instead of Pinterest's default 25 to keep
-  that chain short. The page size is an undocumented option; if Pinterest
-  refuses it, the feed is refetched at the default page size rather than
-  failing. A board's main feed and section feeds, and a profile's unorganized
-  feed and board feeds, overlap when they are independent. Throttled or
+  `unpin` asks for 250 pins per board or profile page and 50 per section page
+  instead of Pinterest's default 25 to keep that chain short. The page size is
+  an undocumented option; if Pinterest refuses it, the feed is refetched at
+  the default page size rather than failing. A board's main feed and section
+  feeds, and a profile's unorganized feed and board feeds, overlap when they
+  are independent. Throttled or
   transient requests are retried up to three times with bounded exponential
   backoff.
 - When several boards are selected, their pins are pooled into a single
@@ -223,7 +224,22 @@ cargo test --locked --all-targets --all-features
 cargo clippy --locked --all-targets --all-features -- -D warnings
 ```
 
-Pull requests run this same verification gate in CI.
+The report UI also has browser tests. With Bun installed, prepare Chromium once
+and run them with:
+
+```console
+bun install --frozen-lockfile
+bunx playwright install chromium
+bun run test:browser
+```
+
+The browser suite renders synthetic reports through the Rust template, serves
+them locally, and supplies local image responses. It exercises filtering,
+navigation, review persistence, and responsive presentation without a Pinterest
+account. Its fixture generator is a Cargo example and is not installed with the
+CLI.
+
+Pull requests run both the Rust and browser verification gates in CI.
 
 Tests use local mock HTTP servers and do not contact Pinterest. A live smoke
 test can be added separately and should remain opt-in.

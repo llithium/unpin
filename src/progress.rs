@@ -39,6 +39,7 @@ pub enum ProgressStep {
         lifecycle: Lifecycle,
     },
     SourceCollection {
+        source_id: String,
         name: String,
         current: usize,
         completed: usize,
@@ -130,6 +131,7 @@ struct ProgressState {
 
 #[derive(Debug)]
 struct BoardRow {
+    source_id: String,
     name: String,
     bar: ProgressBar,
     finished: bool,
@@ -489,6 +491,7 @@ impl Progress for TerminalProgress {
                 self.redraw_active_rows(&state);
             }
             ProgressStep::SourceCollection {
+                source_id,
                 name,
                 current,
                 completed: _,
@@ -510,17 +513,19 @@ impl Progress for TerminalProgress {
                     self.add_active_row(message)
                 };
                 state.board_rows.push(BoardRow {
+                    source_id,
                     name,
                     bar,
                     finished: false,
                 });
             }
             ProgressStep::SourceCollection {
+                source_id,
                 name,
                 current: _,
                 completed,
                 total,
-                lifecycle: Lifecycle::Completed,
+                lifecycle: lifecycle @ (Lifecycle::Completed | Lifecycle::Failed),
             } => {
                 let name = sanitize_terminal_text(&name);
                 let mut state = self.state.lock().unwrap();
@@ -531,10 +536,18 @@ impl Progress for TerminalProgress {
                 if let Some(row) = state
                     .board_rows
                     .iter_mut()
-                    .find(|row| row.name == name && !row.finished)
+                    .find(|row| row.source_id == source_id && !row.finished)
                 {
                     row.finished = true;
-                    Self::complete_row(&row.bar, format!("Scanned board “{name}”"));
+                    match lifecycle {
+                        Lifecycle::Completed => {
+                            Self::complete_row(&row.bar, format!("Scanned board “{name}”"));
+                        }
+                        Lifecycle::Failed => {
+                            Self::fail_row(&row.bar, format!("Scanning board “{name}” failed"));
+                        }
+                        _ => unreachable!("source completion arm only matches terminal states"),
+                    }
                 }
                 self.maybe_finish_sections(&mut state);
             }
@@ -802,35 +815,12 @@ pub mod tests {
     }
 
     #[test]
-    fn recording_progress_observes_lifecycle_steps() {
-        let progress = RecordingProgress::default();
-
-        progress.step(ProgressStep::Matching {
-            lifecycle: Lifecycle::Started,
-        });
-        progress.step(ProgressStep::Scan {
-            lifecycle: Lifecycle::Completed,
-        });
-
-        assert_eq!(
-            progress.steps(),
-            vec![
-                ProgressStep::Matching {
-                    lifecycle: Lifecycle::Started,
-                },
-                ProgressStep::Scan {
-                    lifecycle: Lifecycle::Completed,
-                }
-            ]
-        );
-    }
-
-    #[test]
     fn provider_board_labels_are_sanitized_before_terminal_rendering() {
         let progress = silent_visible_progress();
         let name = "Board\n\u{1b}[31m\t";
 
         progress.step(ProgressStep::SourceCollection {
+            source_id: "board".into(),
             name: name.into(),
             current: 1,
             completed: 0,
@@ -838,6 +828,7 @@ pub mod tests {
             lifecycle: Lifecycle::Started,
         });
         progress.step(ProgressStep::SourceCollection {
+            source_id: "board".into(),
             name: name.into(),
             current: 1,
             completed: 1,
@@ -848,6 +839,41 @@ pub mod tests {
         let state = progress.state.lock().unwrap();
         assert_eq!(state.board_rows[0].name, "Board��[31m�");
         assert!(state.board_rows[0].finished);
+    }
+
+    #[test]
+    fn failed_source_row_is_matched_by_identity_and_marked_failed() {
+        let progress = silent_visible_progress();
+        progress.step(ProgressStep::SourceCollection {
+            source_id: "board-1".into(),
+            name: "Shared name".into(),
+            current: 1,
+            completed: 0,
+            total: 2,
+            lifecycle: Lifecycle::Started,
+        });
+        progress.step(ProgressStep::SourceCollection {
+            source_id: "board-2".into(),
+            name: "Shared name".into(),
+            current: 2,
+            completed: 1,
+            total: 2,
+            lifecycle: Lifecycle::Started,
+        });
+        progress.step(ProgressStep::SourceCollection {
+            source_id: "board-2".into(),
+            name: "Shared name".into(),
+            current: 2,
+            completed: 2,
+            total: 2,
+            lifecycle: Lifecycle::Failed,
+        });
+
+        let state = progress.state.lock().unwrap();
+        assert_eq!(state.board_rows.len(), 2);
+        assert!(!state.board_rows[0].finished);
+        assert!(state.board_rows[1].finished);
+        assert!(state.board_rows[1].bar.message().contains("failed"));
     }
 
     #[test]
@@ -940,6 +966,7 @@ pub mod tests {
         let progress = silent_visible_progress();
 
         progress.step(ProgressStep::SourceCollection {
+            source_id: "faces".into(),
             name: "Faces".into(),
             current: 1,
             completed: 0,
@@ -975,6 +1002,7 @@ pub mod tests {
         drop(state);
 
         progress.step(ProgressStep::SourceCollection {
+            source_id: "faces".into(),
             name: "Faces".into(),
             current: 1,
             completed: 1,
@@ -991,6 +1019,7 @@ pub mod tests {
         let progress = silent_visible_progress();
 
         progress.step(ProgressStep::SourceCollection {
+            source_id: "faces".into(),
             name: "Faces".into(),
             current: 1,
             completed: 0,

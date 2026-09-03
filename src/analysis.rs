@@ -93,6 +93,7 @@ struct AnalyzedImage {
     pin_id: String,
     pin_url: String,
     board: Option<String>,
+    source_id: Option<String>,
     image_url: String,
     fingerprint: ImageFingerprint,
 }
@@ -271,6 +272,7 @@ impl AnalyzedImage {
             pin_id: self.pin_id.clone(),
             pin_url: self.pin_url.clone(),
             board: self.board.clone(),
+            source_id: self.source_id.clone(),
             image_url: self.image_url.clone(),
             width: self.fingerprint.width,
             height: self.fingerprint.height,
@@ -518,6 +520,7 @@ fn analyzed_images(
             pin_url: pin.pin_url(),
             pin_id: pin.id,
             board: pin.board,
+            source_id: pin.source_id,
             image_url: media_url.to_owned(),
             fingerprint: fingerprint.clone(),
         })
@@ -857,22 +860,24 @@ fn build_visual_candidates_with_limit(
 
                             let pair = [other_index, index];
                             let ranked = ranked_items(images, &pair);
+                            let items: [ReportItem; 2] = ranked
+                                .try_into()
+                                .expect("visual candidate pairs always contain two items");
                             candidates.push(VisualCandidate {
                                 hash_distance: distance,
                                 similarity_percent,
-                                scope: MatchScope::of(&ranked),
-                                items: [ranked[0].clone(), ranked[1].clone()],
+                                scope: MatchScope::of(&items),
+                                items,
                             });
                         }
                     }
                 }
             }
         }
-        trees.entry(bucket).or_default().insert(
-            image.fingerprint.difference_hash,
-            &image.fingerprint.sha256,
-            group_index,
-        );
+        trees
+            .entry(bucket)
+            .or_default()
+            .insert(image.fingerprint.difference_hash, group_index);
     }
 
     candidates.sort_by(|left, right| {
@@ -954,17 +959,15 @@ struct BkTree {
 struct BkNode {
     hash: u64,
     image_indices: Vec<usize>,
-    sha_groups: HashMap<String, Vec<usize>>,
     children: BTreeMap<u8, usize>,
 }
 
 impl BkTree {
-    fn insert(&mut self, hash: u64, sha256: &str, image_index: usize) {
+    fn insert(&mut self, hash: u64, image_index: usize) {
         if self.nodes.is_empty() {
             self.nodes.push(BkNode {
                 hash,
                 image_indices: vec![image_index],
-                sha_groups: HashMap::from([(sha256.to_owned(), vec![image_index])]),
                 children: BTreeMap::new(),
             });
             return;
@@ -976,10 +979,6 @@ impl BkTree {
             if distance == 0 {
                 let node = &mut self.nodes[node_index];
                 node.image_indices.push(image_index);
-                node.sha_groups
-                    .entry(sha256.to_owned())
-                    .or_default()
-                    .push(image_index);
                 return;
             }
             if let Some(child) = self.nodes[node_index].children.get(&distance).copied() {
@@ -991,7 +990,6 @@ impl BkTree {
             self.nodes.push(BkNode {
                 hash,
                 image_indices: vec![image_index],
-                sha_groups: HashMap::from([(sha256.to_owned(), vec![image_index])]),
                 children: BTreeMap::new(),
             });
             self.nodes[node_index].children.insert(distance, new_index);
@@ -1000,15 +998,6 @@ impl BkTree {
     }
 
     fn query(&self, hash: u64, threshold: u8) -> Vec<usize> {
-        self.query_filtered(hash, threshold, None)
-    }
-
-    #[cfg(test)]
-    fn query_excluding_sha(&self, hash: u64, threshold: u8, excluded_sha: &str) -> Vec<usize> {
-        self.query_filtered(hash, threshold, Some(excluded_sha))
-    }
-
-    fn query_filtered(&self, hash: u64, threshold: u8, excluded_sha: Option<&str>) -> Vec<usize> {
         if self.nodes.is_empty() {
             return Vec::new();
         }
@@ -1019,15 +1008,7 @@ impl BkTree {
             let node = &self.nodes[node_index];
             let distance = (hash ^ node.hash).count_ones() as u8;
             if distance <= threshold {
-                match excluded_sha {
-                    Some(excluded_sha) => node
-                        .sha_groups
-                        .iter()
-                        .filter(|(sha256, _)| sha256.as_str() != excluded_sha)
-                        .flat_map(|(_, indices)| indices.iter().copied())
-                        .for_each(|index| results.push(index)),
-                    None => results.extend(node.image_indices.iter().copied()),
-                }
+                results.extend(node.image_indices.iter().copied());
             }
             let lower = distance.saturating_sub(threshold);
             let upper = distance.saturating_add(threshold);
@@ -1066,6 +1047,7 @@ mod tests {
             pin_id: id.into(),
             pin_url: format!("https://www.pinterest.com/pin/{id}/"),
             board: None,
+            source_id: None,
             image_url: format!("https://i.pinimg.com/originals/{id}.jpg"),
             fingerprint: ImageFingerprint {
                 width,
@@ -1093,23 +1075,13 @@ mod tests {
     #[test]
     fn bk_tree_finds_values_within_hamming_distance() {
         let mut tree = BkTree::default();
-        tree.insert(0, "zero", 0);
-        tree.insert(0b1111, "ones", 1);
-        tree.insert(u64::MAX, "max", 2);
+        tree.insert(0, 0);
+        tree.insert(0b1111, 1);
+        tree.insert(u64::MAX, 2);
 
         let mut matches = tree.query(0b0011, 2);
         matches.sort_unstable();
         assert_eq!(matches, vec![0, 1]);
-    }
-
-    #[test]
-    fn bk_tree_can_exclude_one_sha_group_without_dropping_other_same_hash_images() {
-        let mut tree = BkTree::default();
-        tree.insert(0, "same", 0);
-        tree.insert(0, "same", 1);
-        tree.insert(0, "different", 2);
-
-        assert_eq!(tree.query_excluding_sha(0, 0, "same"), vec![2]);
     }
 
     #[test]
@@ -1315,8 +1287,7 @@ mod tests {
         let pin = Pin {
             id: "cached-pin".into(),
             media_url: media_url.into(),
-            metadata_width: None,
-            metadata_height: None,
+            source_id: None,
             board: None,
         };
 
@@ -1350,8 +1321,7 @@ mod tests {
         let pin = Pin {
             id: "cached-fallback-pin".into(),
             media_url: original_url.into(),
-            metadata_width: None,
-            metadata_height: None,
+            source_id: None,
             board: None,
         };
 
@@ -1385,8 +1355,7 @@ mod tests {
         let pin = Pin {
             id: "oversized-pin".into(),
             media_url: format!("{}/oversized", server.uri()),
-            metadata_width: None,
-            metadata_height: None,
+            source_id: None,
             board: None,
         };
         let result = analyze_pins_with_limits(
@@ -1571,8 +1540,7 @@ mod tests {
         let pin = Pin {
             id: "too-many-pixels".into(),
             media_url: format!("{}/too-many-pixels.png", server.uri()),
-            metadata_width: None,
-            metadata_height: None,
+            source_id: None,
             board: None,
         };
         let result = analyze_pins_with_limits(
@@ -1681,8 +1649,7 @@ mod tests {
             .map(|index| Pin {
                 id: format!("pin-{index}"),
                 media_url: format!("{}/image/{index}.png", server.uri()),
-                metadata_width: None,
-                metadata_height: None,
+                source_id: None,
                 board: None,
             })
             .collect();
