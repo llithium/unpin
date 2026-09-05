@@ -141,12 +141,45 @@ pub(crate) async fn collect_with_pin_batches(
     progress: &dyn Progress,
     batches: tokio::sync::mpsc::Sender<Vec<Pin>>,
 ) -> Result<ScanIntakeResult, IntakeError> {
+    let prefetch_unorganized = matches!(
+        &request.selection,
+        SourceSelection::Default
+            | SourceSelection::Requested {
+                include_unorganized: true,
+                ..
+            }
+    );
+    let early_user = match &request.target {
+        Target::User(user) if prefetch_unorganized => Some(user.clone()),
+        _ => None,
+    };
+    let mut early_unorganized = Box::pin(async {
+        match early_user {
+            Some(user) => Some(client.collect_unorganized_source(&user, progress).await),
+            None => None,
+        }
+    });
+    let mut resolve = Box::pin(resolve_sources(
+        &request.target,
+        request.selection,
+        client,
+        progress,
+    ));
+    let (resolved, early_prefetched) = if prefetch_unorganized {
+        tokio::select! {
+            resolved = &mut resolve => (resolved?, None),
+            fetched = &mut early_unorganized => (resolve.await?, fetched),
+        }
+    } else {
+        (resolve.await?, None)
+    };
     let ResolvedSources {
         user,
         boards,
         include_unorganized,
-        prefetched_unorganized,
-    } = resolve_sources(&request.target, request.selection, client, progress).await?;
+        prefetched_unorganized: resolved_prefetched,
+    } = resolved;
+    let prefetched_unorganized = early_prefetched.or(resolved_prefetched);
     let username = user.as_ref().map(|user| user.username.clone());
     let multiple = boards.len() > 1 || user.is_some();
 
@@ -199,10 +232,13 @@ pub(crate) async fn collect_with_pin_batches(
         }
         let fetched = match prefetched_unorganized {
             Some(fetched) => fetched,
-            None => {
-                let user = user_for_unorganized.as_ref()?;
-                client.collect_unorganized_source(user, progress).await
-            }
+            None => match early_unorganized.await {
+                Some(fetched) => fetched,
+                None => {
+                    let user = user_for_unorganized.as_ref()?;
+                    client.collect_unorganized_source(user, progress).await
+                }
+            },
         };
         Some(fetched)
     };
@@ -592,6 +628,81 @@ mod tests {
             }
             SourceOutcome::Failed { .. } => panic!("the second board should be collected"),
         }
+    }
+
+    #[tokio::test]
+    async fn profile_level_pins_start_during_board_discovery() {
+        use std::time::{Duration, Instant};
+
+        use serde_json::json;
+        use url::Url;
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/resource/BoardsResource/get/"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .set_body_json(json!({
+                        "resource_response": { "data": [] },
+                        "resource": { "options": { "bookmarks": ["-end-"] } }
+                    }))
+                    .set_delay(Duration::from_millis(500)),
+            )
+            .expect(1)
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/resource/UserPinsResource/get/"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "resource_response": { "data": [] },
+                "resource": { "options": { "bookmarks": ["-end-"] } }
+            })))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let target = Target::parse("alice").unwrap();
+        let client = PinterestClient::with_api_root(
+            target.root().clone(),
+            Url::parse(&server.uri()).unwrap(),
+        )
+        .unwrap();
+        let scan = tokio::spawn(async move {
+            collect_snapshot(
+                IntakeRequest {
+                    target,
+                    selection: SourceSelection::Default,
+                },
+                &client,
+                &crate::progress::NoProgress,
+            )
+            .await
+        });
+
+        let deadline = Instant::now() + Duration::from_millis(250);
+        loop {
+            let paths = server
+                .received_requests()
+                .await
+                .unwrap()
+                .into_iter()
+                .map(|request| request.url.path().to_owned())
+                .collect::<HashSet<_>>();
+            if paths.contains("/resource/BoardsResource/get/")
+                && paths.contains("/resource/UserPinsResource/get/")
+            {
+                break;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "profile-level pins did not start during board discovery"
+            );
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+
+        assert!(scan.await.unwrap().is_ok());
     }
 
     #[tokio::test]
