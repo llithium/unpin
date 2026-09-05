@@ -162,8 +162,8 @@ mod tests {
         assert!(html.contains("Visual candidate 1"));
         assert!(html.contains("These images are 98%"));
         assert!(html.contains("These pins use the same image file."));
-        assert!(html.contains("keep/delete suggestions"));
-        assert!(html.contains("DELETE?"));
+        assert!(html.contains("Compare the details before choosing"));
+        assert!(html.contains("Smaller copy"));
         assert!(html.contains("https://www.pinterest.com/pin/102/"));
         assert!(html.contains("101.jpg?x=1&#38;y=2"));
         assert!(html.contains("Ideas &#60;script&#62;"));

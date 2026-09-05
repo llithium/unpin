@@ -33,13 +33,17 @@ test.beforeAll(async () => {
     throw new Error(`visual fixture failed:\n${result.stdout}\n${result.stderr}`);
   }
 
+  for (const scenario of ["empty", "long-content"]) {
+    const result = spawnSync("cargo", ["run", "--quiet", "--locked", "--example", "render_test_reports", "--", resolve(repoRoot, `test-results/${scenario}.html`), "--scenario", scenario], { cwd: repoRoot, encoding: "utf8" });
+    if (result.status !== 0) throw new Error(result.stderr);
+  }
   server = createServer(async (request, response) => {
-    if (request.url !== fixtureUrl) {
+    if (![fixtureUrl, "/empty.html", "/long-content.html"].includes(request.url)) {
       response.writeHead(404).end();
       return;
     }
     response.writeHead(200, { "content-type": "text/html; charset=utf-8" });
-    response.end(await readFile(fixturePath));
+    response.end(await readFile(resolve(repoRoot, `test-results${request.url}`)));
   });
   await new Promise((resolveServer) => server.listen(0, "127.0.0.1", resolveServer));
   const address = server.address();
@@ -264,6 +268,8 @@ test("images reveal after load and no-JavaScript reports remain readable", async
   await expect(noJsPage.locator("[data-group]").nth(1)).toBeVisible();
   await expect(noJsPage.locator("[data-group]").nth(2)).toBeVisible();
   await expect(noJsPage.locator("#report-content")).toBeVisible();
+  await expect(noJsPage.locator(".topbar-actions")).toBeHidden();
+  await expect(noJsPage.locator(".match-actions").first()).toBeHidden();
   await noJsContext.close();
 });
 
@@ -280,4 +286,107 @@ test("responsive and print modes keep report content within their presentation b
   await expect(page.locator(".rail")).toBeHidden();
   await expect(page.locator("footer")).toBeHidden();
   await expect(page.locator("#report-content")).toBeVisible();
+  await page.evaluate(() => window.dispatchEvent(new Event("beforeprint")));
+  for (const image of await page.locator(".image-stage img").all()) {
+    await expect(image).toHaveAttribute("loading", "eager");
+    await expect(image).toHaveCSS("opacity", "1");
+  }
+  for (const group of await page.locator("[data-group]").all()) await expect(group).toBeVisible();
+});
+
+
+test("review advance preserves keyboard focus and Undo restores the match", async ({ page }) => {
+  await openReport(page);
+  const review = page.locator("#exact-1 [data-review-button]");
+  await review.focus();
+  await page.keyboard.press("Enter");
+  await expect(page.locator("#exact-2 [data-review-button]")).toBeFocused();
+  await page.locator("#undo-review").click();
+  await expect(review).toBeFocused();
+  await expect(page.locator("#exact-1")).toHaveAttribute("data-reviewed", "false");
+  await expect(page.locator("#review-progress")).toHaveText("0 / 3");
+
+  await page.locator("#quick-wins").click();
+  await review.click();
+  await expect(page.locator("#clear-filters")).toBeFocused();
+  await page.locator("#clear-filters").click();
+  await expect(visibleGroups(page)).toHaveCount(3);
+  await expect(page.locator("#exact-1")).toHaveAttribute("data-reviewed", "true");
+  await page.locator("#reset-review").click();
+  await page.locator("#undo-review").click();
+  await expect(page.locator("#exact-1")).toHaveAttribute("data-reviewed", "true");
+  await expect(page.locator("#review-progress")).toHaveText("1 / 3");
+});
+
+test("a completed queue explains completion and can be revisited", async ({ page }) => {
+  await openReport(page);
+  await page.locator("#unreviewed-only").check();
+  for (const id of ["exact-1", "exact-2", "visual-1"]) {
+    await page.locator(`#${id} [data-review-button]`).click();
+  }
+  await expect(page.locator("#filter-empty-title")).toHaveText("All matches reviewed");
+  await expect(page.locator("#clear-filters")).toBeFocused();
+  await page.locator("#undo-review").click();
+  await expect(page.locator("#visual-1 [data-review-button]")).toBeFocused();
+  await expect(visibleGroups(page)).toHaveCount(1);
+});
+
+test("failed images explain recovery and storage failures disclose unsaved progress", async ({ page }) => {
+  await page.route("https://images.example.test/**", route => route.abort());
+  await page.addInitScript(() => {
+    Storage.prototype.setItem = () => { throw new Error("quota exceeded"); };
+  });
+  await openReport(page);
+  await expect(page.locator("#exact-1 .image-stage").first()).toHaveClass(/is-error/);
+  const errorText = await page.locator("#exact-1 .image-stage").first().evaluate(el => getComputedStyle(el, "::before").content);
+  expect(errorText).toContain("Open the pin");
+  await expect(page.locator("#exact-1 .button.primary").first()).toBeVisible();
+  await page.locator("#exact-1 [data-review-button]").click();
+  await expect(page.locator("#storage-notice")).toBeVisible();
+  await expect(page.locator("#review-progress")).toHaveText("1 / 3");
+});
+
+test("empty scans show their identity and warnings without unusable review controls", async ({ page }) => {
+  await page.goto(`${origin}/empty.html`);
+  await expect(page.locator(".report-intro")).toBeVisible();
+  await expect(page.locator(".empty")).toBeVisible();
+  await expect(page.locator(".scan-warning")).toBeVisible();
+  await expect(page.locator("#scan-warnings")).toHaveAttribute("open", "");
+  await expect(page.locator(".rail")).toBeHidden();
+  await expect(page.locator(".topbar-actions")).toBeHidden();
+});
+
+test("mobile comparisons align images and retain progress, labels, and touch targets", async ({ browser }) => {
+  const context = await browser.newContext({ viewport: { width: 390, height: 844 }, isMobile: true, hasTouch: true });
+  await mockImages(context);
+  const page = await context.newPage();
+  await page.goto(`${origin}${fixtureUrl}`);
+  await expect(page.locator("#review-progress")).toBeVisible();
+  await expect(page.locator("#overview-toggle .control-label")).toBeVisible();
+  const images = await page.locator("#exact-1 .image-stage").evaluateAll(elements => elements.map(el => ({ x: el.getBoundingClientRect().x, y: el.getBoundingClientRect().y })));
+  expect(images[0].y).toBe(images[1].y);
+  expect(images[1].x).toBeGreaterThan(images[0].x);
+  for (const selector of ["#previous-match", "#next-match", "#overview-toggle", "#exact-1 .button.primary"]) {
+    expect((await page.locator(selector).first().boundingBox()).height).toBeGreaterThanOrEqual(44);
+  }
+  await page.locator("#next-match").click();
+  const heading = await page.locator("#exact-2 .match-heading").boundingBox();
+  const header = await page.locator(".topbar").boundingBox();
+  expect(heading.y).toBeGreaterThanOrEqual(header.y + header.height);
+  expect(heading.y).toBeLessThan(200);
+  await context.close();
+});
+
+test("long content and three-pin groups fit narrow, tablet, desktop, and overview layouts", async ({ page }) => {
+  await page.goto(`${origin}/long-content.html`);
+  for (const width of [320, 390, 620, 768, 880, 1024, 1440]) {
+    await page.setViewportSize({ width, height: 900 });
+    for (const overview of [false, true]) {
+      if ((await page.locator("#overview-toggle").getAttribute("aria-pressed")) !== String(overview)) await page.locator("#overview-toggle").click();
+      const overflow = await page.evaluate(() => document.documentElement.scrollWidth > innerWidth);
+      expect(overflow, `${width}px, overview=${overview}`).toBe(false);
+      const cards = await page.locator("#exact-1 .pin-card").evaluateAll(elements => elements.map(el => ({width: el.clientWidth, content: el.scrollWidth})));
+      for (const card of cards) expect(card.content).toBeLessThanOrEqual(card.width + 1);
+    }
+  }
 });

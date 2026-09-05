@@ -3,7 +3,7 @@
 use std::fs;
 use std::path::PathBuf;
 
-use clap::Parser;
+use clap::{Parser, ValueEnum};
 use unpin::report::{
     DuplicateGroup, MatchScope, Recommendation, Report, ReportItem, ScannedBoard, Summary,
     VisualCandidate,
@@ -13,6 +13,16 @@ use unpin::visual::render_html;
 #[derive(Debug, Parser)]
 struct Args {
     output: PathBuf,
+    #[arg(long, value_enum, default_value_t = Scenario::Mixed)]
+    scenario: Scenario,
+}
+
+#[derive(Clone, Debug, Default, ValueEnum)]
+enum Scenario {
+    #[default]
+    Mixed,
+    Empty,
+    LongContent,
 }
 
 fn item(
@@ -143,6 +153,34 @@ fn fixture() -> Report {
 }
 
 fn main() {
-    let output = Args::parse().output;
-    fs::write(output, render_html(&fixture())).expect("write visual fixture");
+    let args = Args::parse();
+    let mut report = fixture();
+    match args.scenario {
+        Scenario::Mixed => {}
+        Scenario::Empty => {
+            report.exact_groups.clear();
+            report.visual_candidates.clear();
+            report.summary.exact_groups = 0;
+            report.summary.visual_candidates = 0;
+            report.warnings.push(
+                "One board could not be scanned. Results cover the available pins only.".into(),
+            );
+        }
+        Scenario::LongContent => {
+            report.summary.username = Some("a-very-long-profile-name-with-many-characters".into());
+            for group in &mut report.exact_groups {
+                for item in &mut group.items {
+                    item.board = Some(
+                        "A very long board name with art references and illustration inspiration"
+                            .into(),
+                    );
+                    item.pin_id = format!("12345678901234567{}", item.pin_id);
+                }
+            }
+            let mut extra = report.exact_groups[0].items[0].clone();
+            extra.pin_id = "12345678901234567999".into();
+            report.exact_groups[0].items.push(extra);
+        }
+    }
+    fs::write(args.output, render_html(&report)).expect("write visual fixture");
 }

@@ -25,6 +25,14 @@ impl Recommendation {
         }
     }
 
+    pub(crate) fn html_label(&self) -> &'static str {
+        match self {
+            Self::Keep => "Suggested keep",
+            Self::Tie => "Same size",
+            Self::DeleteCandidate => "Smaller copy",
+        }
+    }
+
     pub(crate) fn css_class(&self) -> &'static str {
         match self {
             Self::Keep => "keep",

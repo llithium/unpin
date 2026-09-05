@@ -181,7 +181,10 @@ Run `unpin --help` for the complete interface.
   complete set of exact groups and visual candidates is unchanged; any
   addition or removal clears the marks so a changed queue is reviewed from the
   beginning. Reused reviewed groups are hidden by default, and `Reset` or
-  `Unreviewed only` controls the current report.
+  `Unreviewed only` controls the current report. Review changes and resets can
+  be undone with `Undo`; `Show all matches` clears filters without clearing marks.
+  If browser storage is unavailable, the report displays a notice and keeps
+  progress for the current page session.
 - Identical downloaded bytes are grouped using SHA-256.
 - Other images first become candidates when their 64-bit difference hashes are
   within the selected threshold and their aspect ratios differ by no more than
