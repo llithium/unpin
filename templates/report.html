@@ -2396,8 +2396,14 @@
           .filter((key) => typeof key === "string" && key.length > 0);
         let active = groups[0] || null;
 
-        const visibleGroups = () =>
-          groups.filter((group) => !group.classList.contains("is-filtered"));
+        let visible = groups;
+        let visibleIndices = new Map(visible.map((group, index) => [group, index]));
+        const visibleGroups = () => visible;
+        const reviewedKeys = new Set();
+        let quickWinCount = groups.filter(
+          (group) =>
+            group.dataset.scope === "same-board" && group.dataset.kind === "exact",
+        ).length;
 
         const announce = (message) => {
           if (status) status.textContent = message;
@@ -2417,10 +2423,7 @@
             window.localStorage.setItem(
               storageKey,
               JSON.stringify({
-                reviewed: groups
-                  .filter((group) => group.dataset.reviewed === "true")
-                  .map((group) => group.dataset.reviewKey)
-                  .filter((key) => typeof key === "string" && key.length > 0),
+                reviewed: [...reviewedKeys],
                 groups: currentGroupKeys,
                 scope: scopeFilters.find((filter) => filter.checked)?.value,
                 kind: kindFilters.find((filter) => filter.checked)?.value,
@@ -2468,7 +2471,7 @@
 
         const warmNearbyImages = () => {
           const visible = visibleGroups();
-          const index = visible.indexOf(active);
+          const index = visibleIndices.get(active) ?? -1;
           if (index < 0) return;
           warmGroupImages(visible[index - 1]);
           warmGroupImages(visible[index]);
@@ -2476,9 +2479,7 @@
         };
 
         const updateProgress = () => {
-          const reviewed = groups.filter(
-            (group) => group.dataset.reviewed === "true",
-          ).length;
+          const reviewed = reviewedKeys.size;
           if (progress) progress.textContent = `${reviewed} / ${groups.length}`;
           if (progressFill) {
             const completion = groups.length ? reviewed / groups.length : 0;
@@ -2503,7 +2504,7 @@
 
         const updateControls = () => {
           const visible = visibleGroups();
-          const index = visible.indexOf(active);
+          const index = visibleIndices.get(active) ?? -1;
           if (previous) previous.disabled = index <= 0;
           if (next) next.disabled = index < 0 || index >= visible.length - 1;
         };
@@ -2512,12 +2513,6 @@
           if (!quickWins) return;
           const scope = scopeFilters.find((filter) => filter.checked)?.value;
           const kind = kindFilters.find((filter) => filter.checked)?.value;
-          const quickWinCount = groups.filter(
-            (group) =>
-              group.dataset.scope === "same-board" &&
-              group.dataset.kind === "exact" &&
-              group.dataset.reviewed !== "true",
-          ).length;
           const quickWinCountLabel = quickWins.querySelector(".filter-count");
           if (quickWinCountLabel) {
             quickWinCountLabel.textContent = quickWinCount;
@@ -2539,14 +2534,10 @@
           if (!group || group.classList.contains("is-filtered")) return;
           warmGroupImages(group);
           active?.classList.remove("is-active");
+          linkByTarget.get(active?.id)?.setAttribute("aria-current", "false");
           active = group;
           active.classList.add("is-active");
-          links.forEach((link) =>
-            link.setAttribute(
-              "aria-current",
-              link === linkByTarget.get(active.id) ? "true" : "false",
-            ),
-          );
+          linkByTarget.get(active.id)?.setAttribute("aria-current", "true");
           updateControls();
           warmNearbyImages();
           if (options.announce) {
@@ -2569,7 +2560,7 @@
         const move = (offset) => {
           const visible = visibleGroups();
           if (!visible.length) return;
-          const index = Math.max(0, visible.indexOf(active));
+          const index = Math.max(0, visibleIndices.get(active) ?? -1);
           const target =
             visible[Math.min(visible.length - 1, Math.max(0, index + offset))];
           setOverview(false);
@@ -2579,6 +2570,16 @@
 
         const syncReviewedUi = (group, reviewed) => {
           if (!group) return;
+          const wasReviewed = group.dataset.reviewed === "true";
+          if (
+            wasReviewed !== reviewed &&
+            group.dataset.scope === "same-board" &&
+            group.dataset.kind === "exact"
+          ) {
+            quickWinCount += reviewed ? -1 : 1;
+          }
+          if (reviewed) reviewedKeys.add(group.dataset.reviewKey);
+          else reviewedKeys.delete(group.dataset.reviewKey);
           group.dataset.reviewed = reviewed ? "true" : "false";
           const button = group.querySelector("[data-review-button]");
           button?.setAttribute("aria-pressed", reviewed ? "true" : "false");
@@ -2602,11 +2603,12 @@
           let preferredActive = null;
           if (reviewed && unreviewedOnly?.checked && group === active) {
             const visible = visibleGroups();
-            const index = visible.indexOf(group);
+            const index = visibleIndices.get(group) ?? -1;
             preferredActive = visible[index + 1] || visible[index - 1] || null;
           }
           syncReviewedUi(group, reviewed);
-          applyFilter(preferredActive);
+          if (unreviewedOnly?.checked) applyFilter(preferredActive, group);
+          else syncQuickWins();
           updateProgress();
           if (reviewed) acknowledgeReview();
           const reviewStatus = reviewed
@@ -2617,19 +2619,19 @@
 
         const advanceAfterReview = (group) => {
           const visible = visibleGroups();
-          const index = visible.indexOf(group);
+          const index = visibleIndices.get(group) ?? -1;
           if (index < 0 || index >= visible.length - 1) return;
           setOverview(false);
           setActive(visible[index + 1], { announce: true });
         };
 
-        const applyFilter = (preferredActive = null) => {
+        const applyFilter = (preferredActive = null, changedGroup = null) => {
           const scope =
             scopeFilters.find((filter) => filter.checked)?.value || "all";
           const kind =
             kindFilters.find((filter) => filter.checked)?.value || "all";
           syncQuickWins();
-          groups.forEach((group) => {
+          (changedGroup ? [changedGroup] : groups).forEach((group) => {
             const scopeMatches = !(
               scope !== "all" && group.dataset.scope !== scope
             );
@@ -2641,7 +2643,10 @@
             const link = linkByTarget.get(group.id);
             link?.classList.toggle("is-filtered", hidden);
           });
-          const visible = visibleGroups();
+          visible = groups.filter(
+            (group) => !group.classList.contains("is-filtered"),
+          );
+          visibleIndices = new Map(visible.map((group, index) => [group, index]));
           if (visibleCount) {
             visibleCount.textContent = `${visible.length} / ${groups.length} shown`;
           }
@@ -2655,6 +2660,7 @@
             // replacement, stranding "is-active" on the filtered-out
             // group so it reappears beside the real one under "All".
             active?.classList.remove("is-active");
+            linkByTarget.get(active?.id)?.setAttribute("aria-current", "false");
             active = visible[0] || null;
             if (visible.includes(preferredActive)) active = preferredActive;
           }

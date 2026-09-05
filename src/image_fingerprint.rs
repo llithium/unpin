@@ -6,6 +6,7 @@
 //! them safe and useful.
 
 use std::io::Cursor;
+use std::sync::Arc;
 
 use image::imageops::{self, FilterType};
 use image::{DynamicImage, GenericImageView, ImageReader};
@@ -27,8 +28,9 @@ pub(crate) struct ImageFingerprint {
     pub(crate) difference_hash: u64,
     /// Hex rather than a JSON number array: this is 4 KiB of bytes, and parsing
     /// it back as thousands of decimal integers dominated warm-cache runs.
+    /// Shared across pins using the same URL so each clone avoids a 4 KiB copy.
     #[serde(with = "hex_bytes")]
-    pub(crate) structural_signature: Box<[u8]>,
+    pub(crate) structural_signature: Arc<[u8]>,
     pub(crate) structural_sum: u64,
     pub(crate) structural_sum_squares: u64,
     /// Exact-only runs intentionally omit the visual signature and avoid
@@ -73,10 +75,10 @@ mod hex_bytes {
         serializer.serialize_str(&hex::encode(bytes))
     }
 
-    pub fn deserialize<'de, D: Deserializer<'de>>(deserializer: D) -> Result<Box<[u8]>, D::Error> {
+    pub fn deserialize<'de, D: Deserializer<'de>>(deserializer: D) -> Result<Arc<[u8]>, D::Error> {
         let encoded = String::deserialize(deserializer)?;
         hex::decode(&encoded)
-            .map(Vec::into_boxed_slice)
+            .map(Arc::from)
             .map_err(serde::de::Error::custom)
     }
 }
@@ -126,7 +128,7 @@ fn fingerprint_image_exact(
         byte_size: bytes.len() as u64,
         sha256: hex::encode(Sha256::digest(bytes)),
         difference_hash: 0,
-        structural_signature: Vec::new().into_boxed_slice(),
+        structural_signature: Arc::from([]),
         structural_sum: 0,
         structural_sum_squares: 0,
         visual_ready: false,
@@ -186,7 +188,7 @@ fn checked_pixel_count(width: u32, height: u32, max_decoded_pixels: u64) -> Resu
 /// comes from. The difference-hash grid is then taken off the 64×64 signature
 /// rather than the original, so the second downscale touches four thousand
 /// pixels instead of several million.
-fn fingerprint_hashes(image: &DynamicImage) -> (u64, Box<[u8]>, u64, u64) {
+fn fingerprint_hashes(image: &DynamicImage) -> (u64, Arc<[u8]>, u64, u64) {
     let luminance = image.to_luma8();
     let signature = imageops::resize(
         &luminance,
@@ -212,7 +214,7 @@ fn fingerprint_hashes(image: &DynamicImage) -> (u64, Box<[u8]>, u64, u64) {
         }
     }
 
-    let structural_signature = signature.into_raw().into_boxed_slice();
+    let structural_signature = Arc::from(signature.into_raw());
     let (structural_sum, structural_sum_squares) = structural_statistics(&structural_signature);
 
     (

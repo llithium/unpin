@@ -170,13 +170,29 @@ pub async fn run_with_api_root_and_progress(
             include_unorganized: cli.unorganized,
         }
     };
-    let intake = intake::collect(IntakeRequest { target, selection }, &client, progress)
-        .await
-        .map_err(map_intake_error)?;
+    let cache_dir = use_default_cache
+        .then(analysis::default_fingerprint_cache_dir)
+        .flatten();
+    let (sender, receiver) = tokio::sync::mpsc::channel(2);
+    let (intake, analysis) = tokio::join!(
+        intake::collect_with_pin_batches(
+            IntakeRequest { target, selection },
+            &client,
+            progress,
+            sender,
+        ),
+        analysis::analyze_pin_batches(
+            receiver,
+            cli.exact_only,
+            cli.similarity_threshold,
+            progress,
+            cache_dir,
+        ),
+    );
+    let intake = intake.map_err(map_intake_error)?;
 
     let username = intake.username;
     let mut scanned_boards = Vec::new();
-    let pins = intake.pins;
     let mut skipped = intake.skipped;
     let mut warnings = Vec::new();
     for outcome in intake.sources {
@@ -199,23 +215,7 @@ pub async fn run_with_api_root_and_progress(
         }
     }
 
-    if pins.is_empty() {
-        return Err(AppError::NoAnalyzablePins {
-            reasons: no_analyzable_reasons(warnings, &skipped),
-        });
-    }
-
-    let cache_dir = use_default_cache
-        .then(analysis::default_fingerprint_cache_dir)
-        .flatten();
-    let mut analysis = analysis::analyze_pins_with_progress_and_cache(
-        pins,
-        cli.exact_only,
-        cli.similarity_threshold,
-        progress,
-        cache_dir,
-    )
-    .await?;
+    let mut analysis = analysis?;
     skipped.append(&mut analysis.skipped);
     if analysis.analyzed == 0 {
         return Err(AppError::NoAnalyzablePins {

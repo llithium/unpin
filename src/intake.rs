@@ -1,8 +1,8 @@
 //! Resolves a scan target, collects its selected sources, and normalizes their
-//! outcomes before image analysis begins.
+//! outcomes while completed sources proceed to image analysis.
 
 use futures_util::stream::{self, StreamExt};
-use std::collections::HashSet;
+use std::collections::{BTreeMap, HashSet};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use thiserror::Error;
@@ -40,7 +40,6 @@ pub(crate) struct IntakeRequest {
 pub(crate) struct ScanIntakeResult {
     pub(crate) username: Option<String>,
     pub(crate) sources: Vec<SourceOutcome>,
-    pub(crate) pins: Vec<Pin>,
     pub(crate) skipped: Vec<SkippedPin>,
 }
 
@@ -116,10 +115,31 @@ struct ResolvedSources {
     prefetched_unorganized: Option<Result<BoardPins, PinterestError>>,
 }
 
-pub(crate) async fn collect(
+#[cfg(test)]
+async fn collect_snapshot(
     request: IntakeRequest,
     client: &PinterestClient,
     progress: &dyn Progress,
+) -> Result<(ScanIntakeResult, Vec<Pin>), IntakeError> {
+    let (sender, mut receiver) = tokio::sync::mpsc::channel(2);
+    let (result, pins) = tokio::join!(
+        collect_with_pin_batches(request, client, progress, sender),
+        async {
+            let mut pins = Vec::new();
+            while let Some(batch) = receiver.recv().await {
+                pins.extend(batch);
+            }
+            pins
+        },
+    );
+    result.map(|result| (result, pins))
+}
+
+pub(crate) async fn collect_with_pin_batches(
+    request: IntakeRequest,
+    client: &PinterestClient,
+    progress: &dyn Progress,
+    batches: tokio::sync::mpsc::Sender<Vec<Pin>>,
 ) -> Result<ScanIntakeResult, IntakeError> {
     let ResolvedSources {
         user,
@@ -134,7 +154,6 @@ pub(crate) async fn collect(
     // cross-source merge here, where the selected source order is known.
     let mut seen_pin_ids = HashSet::new();
     let mut sources = Vec::new();
-    let mut pins = Vec::new();
     let mut skipped = Vec::new();
 
     let board_total = boards.len();
@@ -187,38 +206,48 @@ pub(crate) async fn collect(
         };
         Some(fetched)
     };
-    let (mut board_results, fetched_unorganized) =
-        tokio::join!(board_fetches.collect::<Vec<_>>(), unorganized_fetch);
-    board_results.sort_by_key(|(index, _, _)| *index);
+    // Deliver sources in selection order to preserve cross-source ownership.
+    // The bounded channel lets image work overlap subsequent source fetches.
+    let collect_boards = async {
+        futures_util::pin_mut!(board_fetches);
+        let mut pending = BTreeMap::new();
+        let mut next_source = 0;
+        while let Some((index, board, fetched)) = board_fetches.next().await {
+            pending.insert(index, (board, fetched));
+            while let Some((board, fetched)) = pending.remove(&next_source) {
+                next_source += 1;
+                let mut fetched = match fetched {
+                    Ok(fetched) => fetched,
+                    // One unreachable board should not throw away every other board's
+                    // results; a lone board has no fallback source.
+                    Err(error) if multiple => {
+                        sources.push(SourceOutcome::Failed {
+                            source: board.name,
+                            error,
+                        });
+                        continue;
+                    }
+                    Err(error) => return Err(error.into()),
+                };
 
-    for (_, board, fetched) in board_results {
-        let mut fetched = match fetched {
-            Ok(fetched) => fetched,
-            // One unreachable board should not throw away every other board's
-            // results; a lone board has no fallback source.
-            Err(error) if multiple => {
-                sources.push(SourceOutcome::Failed {
-                    source: board.name,
-                    error,
+                let (source, source_pins, source_skipped, source_warnings) = normalize_source(
+                    &mut fetched,
+                    &mut seen_pin_ids,
+                    multiple.then_some(board.name.clone()),
+                    board.url,
+                );
+                sources.push(SourceOutcome::Collected {
+                    source,
+                    warnings: source_warnings,
                 });
-                continue;
+                let _ = batches.send(source_pins).await;
+                skipped.extend(source_skipped);
             }
-            Err(error) => return Err(error.into()),
-        };
-
-        let (source, source_pins, source_skipped, source_warnings) = normalize_source(
-            &mut fetched,
-            &mut seen_pin_ids,
-            multiple.then_some(board.name.clone()),
-            board.url,
-        );
-        sources.push(SourceOutcome::Collected {
-            source,
-            warnings: source_warnings,
-        });
-        pins.extend(source_pins);
-        skipped.extend(source_skipped);
-    }
+        }
+        Ok::<_, IntakeError>(())
+    };
+    let (board_result, fetched_unorganized) = tokio::join!(collect_boards, unorganized_fetch);
+    board_result?;
 
     // Pins saved straight to a profile are displayed by Pinterest as
     // "Unorganized ideas", not as a board. Include them in every profile scan
@@ -242,7 +271,7 @@ pub(crate) async fn collect(
                     source,
                     warnings: source_warnings,
                 });
-                pins.extend(source_pins);
+                let _ = batches.send(source_pins).await;
                 skipped.extend(source_skipped);
             }
             Err(error) => {
@@ -271,7 +300,6 @@ pub(crate) async fn collect(
     Ok(ScanIntakeResult {
         username,
         sources,
-        pins,
         skipped,
     })
 }
@@ -481,17 +509,37 @@ mod tests {
             .await;
         Mock::given(method("GET"))
             .and(path("/resource/BoardFeedResource/get/"))
-            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
-                "resource_response": { "data": [{
-                    "id": "shared-pin",
-                    "images": { "orig": {
-                        "url": "https://example.com/shared.png",
-                        "width": 20,
-                        "height": 20
-                    }}
-                }]},
-                "resource": { "options": { "bookmarks": ["-end-"] } }
-            })))
+            .respond_with(|request: &wiremock::Request| {
+                let data: serde_json::Value = serde_json::from_str(
+                    &request
+                        .url
+                        .query_pairs()
+                        .find(|(key, _)| key == "data")
+                        .unwrap()
+                        .1,
+                )
+                .unwrap();
+                // Finish the second source first; the first selected source
+                // must still own their shared pin.
+                let delay = if data["options"]["board_id"] == "board-1" {
+                    50
+                } else {
+                    0
+                };
+                ResponseTemplate::new(200)
+                    .set_delay(std::time::Duration::from_millis(delay))
+                    .set_body_json(json!({
+                        "resource_response": { "data": [{
+                            "id": "shared-pin",
+                            "images": { "orig": {
+                                "url": "https://example.com/shared.png",
+                                "width": 20,
+                                "height": 20
+                            }}
+                        }]},
+                        "resource": { "options": { "bookmarks": ["-end-"] } }
+                    }))
+            })
             .mount(&server)
             .await;
         Mock::given(method("GET"))
@@ -509,7 +557,7 @@ mod tests {
             Url::parse(&server.uri()).unwrap(),
         )
         .unwrap();
-        let result = collect(
+        let (result, pins) = collect_snapshot(
             IntakeRequest {
                 target,
                 selection: SourceSelection::Default,
@@ -521,8 +569,8 @@ mod tests {
         .unwrap();
 
         assert_eq!(result.username.as_deref(), Some("alice"));
-        assert_eq!(result.pins.len(), 1);
-        assert_eq!(result.pins[0].board.as_deref(), Some("Interiors"));
+        assert_eq!(pins.len(), 1);
+        assert_eq!(pins[0].board.as_deref(), Some("Interiors"));
         assert_eq!(result.sources.len(), 3);
         let names = result
             .sources
@@ -600,7 +648,7 @@ mod tests {
         )
         .unwrap();
         let scan = tokio::spawn(async move {
-            collect(
+            collect_snapshot(
                 IntakeRequest {
                     target,
                     selection: SourceSelection::Default,

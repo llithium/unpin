@@ -4,7 +4,8 @@ use std::ffi::OsString;
 use std::fs;
 use std::io::Write;
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, SystemTime};
 
 use futures_util::stream::{self, StreamExt, TryStreamExt};
@@ -334,6 +335,50 @@ async fn analyze_pins_with_limits(
     cache_directory: Option<PathBuf>,
     limits: ImageAnalysisLimits,
 ) -> Result<AnalysisResult, AnalysisError> {
+    analyze_batches_with_limits(
+        stream::iter([pins]),
+        exact_only,
+        similarity_threshold,
+        progress,
+        cache_directory,
+        limits,
+    )
+    .await
+}
+
+pub(crate) async fn analyze_pin_batches(
+    receiver: tokio::sync::mpsc::Receiver<Vec<Pin>>,
+    exact_only: bool,
+    similarity_threshold: u8,
+    progress: &dyn Progress,
+    cache_directory: Option<PathBuf>,
+) -> Result<AnalysisResult, AnalysisError> {
+    let batches = stream::unfold(receiver, |mut receiver| async {
+        receiver.recv().await.map(|pins| (pins, receiver))
+    });
+    analyze_batches_with_limits(
+        batches,
+        exact_only,
+        similarity_threshold,
+        progress,
+        cache_directory,
+        ImageAnalysisLimits {
+            max_image_bytes: MAX_IMAGE_BYTES,
+            max_decoded_pixels: MAX_DECODED_PIXELS,
+            image_buffer_budget: Arc::new(Semaphore::new(MAX_IN_FLIGHT_IMAGE_BYTES as usize)),
+        },
+    )
+    .await
+}
+
+async fn analyze_batches_with_limits(
+    batches: impl futures_util::Stream<Item = Vec<Pin>> + Send,
+    exact_only: bool,
+    similarity_threshold: u8,
+    progress: &dyn Progress,
+    cache_directory: Option<PathBuf>,
+    limits: ImageAnalysisLimits,
+) -> Result<AnalysisResult, AnalysisError> {
     let ImageAnalysisLimits {
         max_image_bytes,
         max_decoded_pixels,
@@ -346,97 +391,137 @@ async fn analyze_pins_with_limits(
         .map_err(AnalysisError::Client)?;
     let cache = cache_directory.map(FingerprintCache::new);
 
-    let mut pins_by_media_url: BTreeMap<String, Vec<Pin>> = BTreeMap::new();
-    for pin in pins {
-        pins_by_media_url
-            .entry(pin.media_url.clone())
-            .or_default()
-            .push(pin);
-    }
-    let entries = pins_by_media_url.into_iter().collect::<Vec<_>>();
-    let download_total = entries.len();
-    progress.step(ProgressStep::ImageAnalysis {
-        completed: 0,
-        total: download_total,
-        lifecycle: Lifecycle::Started,
-    });
-
-    let mut images = Vec::new();
-    let mut skipped = Vec::new();
-    let mut completed = 0;
-
-    // Cache hits are resolved up front in one blocking batch. Doing them inside
-    // the download stream put thousands of small synchronous reads on the async
-    // runtime and made a fully cached run wait behind the network limit.
-    let hits = cached_fingerprints(cache.as_ref(), &entries, !exact_only).await;
-    let mut misses = Vec::new();
-    for ((media_url, pins), hit) in entries.into_iter().zip(hits) {
-        match hit {
-            Some((cached_media_url, fingerprint)) => {
-                images.extend(analyzed_images(&cached_media_url, pins, &fingerprint));
-                completed += 1;
+    // Keep pin ownership in intake order, but fingerprint each URL only once,
+    // including when the same image appears in a later source batch.
+    let pins_by_media_url = Mutex::new(BTreeMap::<String, Vec<Pin>>::new());
+    let download_total = AtomicUsize::new(0);
+    let mut started = false;
+    let completed = AtomicUsize::new(0);
+    let advance = || {
+        let completed = completed.fetch_add(1, Ordering::Relaxed) + 1;
+        progress.step(ProgressStep::ImageAnalysis {
+            completed,
+            total: download_total.load(Ordering::Relaxed),
+            lifecycle: Lifecycle::Advanced,
+        });
+    };
+    let results;
+    {
+        let urls = batches.flat_map(|pins| {
+            let mut grouped = pins_by_media_url.lock().unwrap();
+            let mut urls = Vec::new();
+            for pin in pins {
+                let group = grouped.entry(pin.media_url.clone()).or_default();
+                if group.is_empty() {
+                    urls.push(pin.media_url.clone());
+                }
+                group.push(pin);
+            }
+            let total = download_total.fetch_add(urls.len(), Ordering::Relaxed) + urls.len();
+            if !started && total > 0 {
+                started = true;
                 progress.step(ProgressStep::ImageAnalysis {
-                    completed,
-                    total: download_total,
-                    lifecycle: if completed >= download_total {
-                        Lifecycle::Completed
-                    } else {
-                        Lifecycle::Advanced
-                    },
+                    completed: 0,
+                    total,
+                    lifecycle: Lifecycle::Started,
                 });
             }
-            None => misses.push((media_url, pins)),
-        }
-    }
-
-    // Two stages so that the network limit and the CPU limit are independent:
-    // decoding an image no longer occupies a slot that could be pulling bytes.
-    let fingerprints = stream::iter(misses.into_iter().map(|(media_url, pins)| {
-        let http = http.clone();
-        let image_buffer_budget = Arc::clone(&image_buffer_budget);
-        async move {
-            let download =
-                download_image(&http, &media_url, &image_buffer_budget, max_image_bytes).await;
-            (media_url, pins, download)
-        }
-    }))
-    .buffer_unordered(DOWNLOAD_CONCURRENCY)
-    .map(|(media_url, pins, download)| {
-        let cache = cache.clone();
-        async move {
-            let (media_url, fingerprint) = match download {
-                Ok(DownloadedImage {
-                    media_url,
-                    bytes,
-                    buffer_permit,
-                }) => {
-                    let cached_url = media_url.clone();
-                    let fingerprint = tokio::task::spawn_blocking(move || {
-                        // Keep the compressed-buffer reservation until the
-                        // decoded image and its derived hashes are finished.
-                        let _buffer_permit = buffer_permit;
-                        let fingerprint =
-                            ImageFingerprint::from_bytes(&bytes, exact_only, max_decoded_pixels)?;
-                        if let Some(cache) = &cache {
-                            cache.put(&cached_url, &fingerprint);
-                        }
-                        Ok(fingerprint)
-                    })
-                    .await
-                    .unwrap_or_else(|_| Err("image analysis did not finish".to_owned()));
-                    (media_url, fingerprint)
+            stream::iter(urls)
+        });
+        // Cache hits bypass the download queue. Otherwise a full queue of
+        // misses would prevent cached images from being read during downloads.
+        let (sender, receiver) = tokio::sync::mpsc::channel(DOWNLOAD_CONCURRENCY);
+        let read_cache = async {
+            let chunks = urls.ready_chunks(128);
+            futures_util::pin_mut!(chunks);
+            let mut hits = Vec::new();
+            while let Some(urls) = chunks.next().await {
+                let cached = cached_fingerprints(cache.as_ref(), &urls, !exact_only).await;
+                for (url, hit) in urls.into_iter().zip(cached) {
+                    if let Some(hit) = hit {
+                        hits.push((url, Ok(hit)));
+                        advance();
+                    } else if sender.send(url).await.is_err() {
+                        return hits;
+                    }
                 }
-                Err(reason) => (media_url, Err(reason)),
-            };
-            (media_url, pins, fingerprint)
-        }
-    })
-    .buffer_unordered(cpu_concurrency());
-    futures_util::pin_mut!(fingerprints);
-
-    while let Some((media_url, pins, fingerprint)) = fingerprints.next().await {
-        match fingerprint {
-            Ok(fingerprint) => images.extend(analyzed_images(&media_url, pins, &fingerprint)),
+            }
+            drop(sender);
+            hits
+        };
+        let downloads = stream::unfold(receiver, |mut receiver| async {
+            receiver.recv().await.map(|url| (url, receiver))
+        })
+        .map(|original_url| {
+            let http = &http;
+            let image_buffer_budget = &image_buffer_budget;
+            async move {
+                let downloaded =
+                    download_image(http, &original_url, image_buffer_budget, max_image_bytes).await;
+                (original_url, downloaded)
+            }
+        })
+        .buffer_unordered(DOWNLOAD_CONCURRENCY);
+        let fingerprints = downloads
+            .map(|(original_url, downloaded)| {
+                let cache = cache.clone();
+                async move {
+                    let result = match downloaded {
+                        Ok(DownloadedImage {
+                            media_url,
+                            bytes,
+                            buffer_permit,
+                        }) => tokio::task::spawn_blocking(move || {
+                            let _buffer_permit = buffer_permit;
+                            let fingerprint = ImageFingerprint::from_bytes(
+                                &bytes,
+                                exact_only,
+                                max_decoded_pixels,
+                            )?;
+                            if let Some(cache) = cache {
+                                cache.put(&media_url, &fingerprint);
+                            }
+                            Ok((media_url, fingerprint))
+                        })
+                        .await
+                        .unwrap_or_else(|_| Err("image analysis did not finish".to_owned())),
+                        Err(reason) => Err(reason),
+                    };
+                    (original_url, result)
+                }
+            })
+            .buffer_unordered(cpu_concurrency());
+        let analyze_downloads = async {
+            futures_util::pin_mut!(fingerprints);
+            let mut results = Vec::new();
+            while let Some(result) = fingerprints.next().await {
+                results.push(result);
+                advance();
+            }
+            results
+        };
+        let (mut hits, downloaded) = tokio::join!(read_cache, analyze_downloads);
+        hits.extend(downloaded);
+        results = hits;
+    }
+    let completed = completed.load(Ordering::Relaxed);
+    let total = download_total.load(Ordering::Relaxed);
+    progress.step(ProgressStep::ImageAnalysis {
+        completed,
+        total,
+        lifecycle: Lifecycle::Completed,
+    });
+    let mut pins_by_media_url = pins_by_media_url.into_inner().unwrap();
+    let mut images = Vec::new();
+    let mut skipped = Vec::new();
+    for (original_url, result) in results {
+        let pins = pins_by_media_url
+            .remove(&original_url)
+            .expect("every URL has pins");
+        match result {
+            Ok((media_url, fingerprint)) => {
+                images.extend(analyzed_images(&media_url, pins, &fingerprint))
+            }
             Err(reason) => skipped.extend(pins.into_iter().map(|pin| SkippedPin {
                 pin_url: Some(pin.pin_url()),
                 pin_id: Some(pin.id),
@@ -444,16 +529,6 @@ async fn analyze_pins_with_limits(
                 board: pin.board,
             })),
         }
-        completed += 1;
-        progress.step(ProgressStep::ImageAnalysis {
-            completed,
-            total: download_total,
-            lifecycle: if completed >= download_total {
-                Lifecycle::Completed
-            } else {
-                Lifecycle::Advanced
-            },
-        });
     }
     images.sort_by(|left, right| left.pin_id.cmp(&right.pin_id));
 
@@ -478,20 +553,17 @@ async fn analyze_pins_with_limits(
     })
 }
 
-/// Reads every entry's cached fingerprint in one blocking batch, returning one
+/// Reads a bounded batch of cached fingerprints, returning one
 /// slot per entry. A cache that cannot be read at all is treated as all misses.
 async fn cached_fingerprints(
     cache: Option<&FingerprintCache>,
-    entries: &[(String, Vec<Pin>)],
+    urls: &[String],
     require_visual: bool,
 ) -> Vec<Option<(String, ImageFingerprint)>> {
     let Some(cache) = cache.cloned() else {
-        return vec![None; entries.len()];
+        return vec![None; urls.len()];
     };
-    let urls = entries
-        .iter()
-        .map(|(media_url, _)| media_url.clone())
-        .collect::<Vec<_>>();
+    let urls = urls.to_vec();
     let total = urls.len();
     tokio::task::spawn_blocking(move || {
         urls.iter()
@@ -1023,7 +1095,7 @@ mod tests {
     use super::*;
 
     fn fingerprint() -> ImageFingerprint {
-        let structural_signature = vec![0, 64, 128, 255].into_boxed_slice();
+        let structural_signature: Arc<[u8]> = vec![0, 64, 128, 255].into();
         let (structural_sum, structural_sum_squares) =
             test_structural_statistics(&structural_signature);
         ImageFingerprint {
@@ -1040,7 +1112,7 @@ mod tests {
     }
 
     fn analyzed(id: &str, width: u32, height: u32, bytes: u64, hash: u64) -> AnalyzedImage {
-        let structural_signature = vec![0, 10, 50, 100, 180, 255].into_boxed_slice();
+        let structural_signature: Arc<[u8]> = vec![0, 10, 50, 100, 180, 255].into();
         let (structural_sum, structural_sum_squares) =
             test_structural_statistics(&structural_signature);
         AnalyzedImage {
@@ -1070,6 +1142,53 @@ mod tests {
                 let value = u64::from(value);
                 (sum + value, squares + value * value)
             })
+    }
+
+    #[tokio::test]
+    async fn streamed_sources_start_images_early_and_share_urls_across_batches() {
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+        let server = MockServer::start().await;
+        let mut png = Cursor::new(Vec::new());
+        DynamicImage::new_rgb8(2, 2)
+            .write_to(&mut png, image::ImageFormat::Png)
+            .unwrap();
+        Mock::given(wiremock::matchers::method("GET"))
+            .respond_with(ResponseTemplate::new(200).set_body_bytes(png.into_inner()))
+            .expect(1)
+            .mount(&server)
+            .await;
+        let pin = |id: &str| Pin {
+            id: id.into(),
+            media_url: format!("{}/image.png", server.uri()),
+            board: Some(id.into()),
+            source_id: Some(id.into()),
+        };
+        let (sender, receiver) = tokio::sync::mpsc::channel(2);
+        let feed = async {
+            sender.send(vec![pin("first")]).await.unwrap();
+            // The second source stays unavailable until its predecessor's
+            // image has been requested. A collect-all implementation deadlocks.
+            tokio::time::timeout(Duration::from_secs(3), async {
+                while server.received_requests().await.unwrap().is_empty() {
+                    tokio::time::sleep(Duration::from_millis(5)).await;
+                }
+            })
+            .await
+            .expect("image analysis must start before intake ends");
+            sender.send(vec![pin("second")]).await.unwrap();
+            drop(sender);
+        };
+        let (_, result) = tokio::join!(
+            feed,
+            analyze_pin_batches(receiver, false, 5, &NoProgress, None)
+        );
+        let result = result.unwrap();
+        assert_eq!(result.analyzed, 2);
+        assert_eq!(result.exact_groups.len(), 1);
+        assert_eq!(result.exact_groups[0].scope, MatchScope::CrossBoard);
+        assert_eq!(result.exact_groups[0].items[0].pin_id, "first");
+        assert_eq!(result.exact_groups[0].items[1].pin_id, "second");
+        assert!(result.skipped.is_empty());
     }
 
     #[test]
@@ -1134,7 +1253,7 @@ mod tests {
                 image.fingerprint.structural_signature = (0..4096)
                     .map(|value| (value % 256) as u8)
                     .collect::<Vec<_>>()
-                    .into_boxed_slice();
+                    .into();
                 let (sum, squares) =
                     test_structural_statistics(&image.fingerprint.structural_signature);
                 image.fingerprint.structural_sum = sum;
@@ -1154,7 +1273,7 @@ mod tests {
         // roughly four thousand integer parses per cached image, which is the
         // whole cost of a warm run; keep the compact encoding pinned.
         let mut fingerprint = fingerprint();
-        fingerprint.structural_signature = vec![0, 15, 16, 255].into_boxed_slice();
+        fingerprint.structural_signature = vec![0, 15, 16, 255].into();
         let encoded = serde_json::to_string(&CachedFingerprint {
             version: CACHE_FORMAT_VERSION,
             fingerprint: fingerprint.clone(),
@@ -1202,7 +1321,7 @@ mod tests {
             byte_size: 42_000,
             sha256: "abc123".into(),
             difference_hash: 0,
-            structural_signature: Vec::new().into_boxed_slice(),
+            structural_signature: Vec::new().into(),
             structural_sum: 0,
             structural_sum_squares: 0,
             visual_ready: false,
@@ -1312,8 +1431,7 @@ mod tests {
         let fallback_url = "http://i.pinimg.com/736x/cached.jpg";
         let cache = FingerprintCache::new(directory.path().to_path_buf());
         cache.put(fallback_url, &fingerprint());
-        let hit =
-            cached_fingerprints(Some(&cache), &[(original_url.to_owned(), Vec::new())], true).await;
+        let hit = cached_fingerprints(Some(&cache), &[original_url.to_owned()], true).await;
         assert_eq!(
             hit[0].as_ref().map(|(url, _)| url.as_str()),
             Some(fallback_url)
@@ -1816,11 +1934,11 @@ mod tests {
     fn visual_candidates_reject_structural_false_positives() {
         let mut left = analyzed("1", 1000, 1000, 500, 0);
         let mut right = analyzed("2", 500, 500, 400, 0b1);
-        left.fingerprint.structural_signature = vec![255; 64 * 64].into_boxed_slice();
-        right.fingerprint.structural_signature = vec![255; 64 * 64].into_boxed_slice();
+        left.fingerprint.structural_signature = vec![255; 64 * 64].into();
+        right.fingerprint.structural_signature = vec![255; 64 * 64].into();
         for y in 8..56 {
-            left.fingerprint.structural_signature[y * 64 + 16] = 0;
-            right.fingerprint.structural_signature[y * 64 + 48] = 0;
+            Arc::make_mut(&mut left.fingerprint.structural_signature)[y * 64 + 16] = 0;
+            Arc::make_mut(&mut right.fingerprint.structural_signature)[y * 64 + 48] = 0;
         }
         (
             left.fingerprint.structural_sum,
@@ -1852,3 +1970,7 @@ mod tests {
         );
     }
 }
+
+#[cfg(test)]
+#[path = "analysis_benchmarks.rs"]
+mod benchmarks;

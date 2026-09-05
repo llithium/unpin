@@ -163,6 +163,8 @@ Run `unpin --help` for the complete interface.
 - When Pinterest's reported total is larger than the number returned by its web
   API, text, JSON, and HTML output show both counts and include an incomplete
   scan warning.
+- Image analysis starts as selected sources finish, while later sources are
+  still loading. Its progress total can grow as more images are discovered.
 - Static image previews are downloaded with a forty-eight-request concurrency
   limit and a 100 MiB per-image safety limit. Decoding and hashing run on a
   separate pool sized to the machine's processors, so previews keep downloading

@@ -654,8 +654,6 @@ impl Progress for TerminalProgress {
             } => {
                 let mut state = self.state.lock().unwrap();
                 self.add_group(&mut state, ProgressGroup::Analysis);
-                self.finish_page(&mut state, "Pinterest data fetched");
-                self.finish_sections(&mut state);
                 let message = format!("Analyzing images (0/{total} complete)");
                 let bar = self.ensure_active_slot(&mut state.images, message);
                 bar.set_length(total as u64);
@@ -667,15 +665,15 @@ impl Progress for TerminalProgress {
             ProgressStep::ImageAnalysis {
                 completed,
                 total,
-                lifecycle: Lifecycle::Advanced | Lifecycle::Completed,
-            } => {
+                lifecycle,
+            } if matches!(lifecycle, Lifecycle::Advanced | Lifecycle::Completed) => {
                 let mut state = self.state.lock().unwrap();
                 if let Some(bar) = state.images.as_ref() {
                     bar.set_length(total as u64);
                     bar.set_position(completed as u64);
                     bar.set_message(format!("Analyzing images ({completed}/{total} complete)"));
                 }
-                if completed >= total {
+                if lifecycle == Lifecycle::Completed {
                     Self::finish_slot(
                         &mut state.images,
                         format!("Analyzed images ({completed}/{total})"),
@@ -687,6 +685,8 @@ impl Progress for TerminalProgress {
             } => {
                 let mut state = self.state.lock().unwrap();
                 self.add_group(&mut state, ProgressGroup::Analysis);
+                self.finish_page(&mut state, "Pinterest data fetched");
+                self.finish_sections(&mut state);
                 Self::finish_slot(&mut state.images, "Images analyzed".into());
                 state.matching = Some(self.add_active_row("Comparing image fingerprints".into()));
             }
@@ -951,10 +951,20 @@ pub mod tests {
 
         progress.step(ProgressStep::ImageAnalysis {
             completed: 0,
-            total: 0,
+            total: 1,
             lifecycle: Lifecycle::Started,
         });
 
+        progress.step(ProgressStep::ImageAnalysis {
+            completed: 1,
+            total: 1,
+            lifecycle: Lifecycle::Advanced,
+        });
+        assert!(progress.state.lock().unwrap().images.is_some());
+        assert!(progress.state.lock().unwrap().page.is_some());
+        progress.step(ProgressStep::Matching {
+            lifecycle: Lifecycle::Started,
+        });
         let state = progress.state.lock().unwrap();
         assert!(state.page.is_none());
         assert_eq!(state.pages_fetched, 0);

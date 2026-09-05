@@ -155,8 +155,19 @@ test("focus navigation, overview, keyboard shortcuts, and active state stay cohe
   await expect(page.locator('[data-group].is-active')).toHaveCount(1);
   await expect(page.locator('[data-group].is-active')).toHaveAttribute("id", "exact-1");
 
-  await page.evaluate(() => (window.__storageWrites = []));
+  await page.evaluate(() => {
+    window.__storageWrites = [];
+    window.__activeLinkChanges = [];
+    window.__activeLinkObserver = new MutationObserver((records) => {
+      window.__activeLinkChanges.push(...records.map((record) => record.target.dataset.target));
+    });
+    window.__activeLinkObserver.observe(document.body, {
+      subtree: true, attributes: true, attributeFilter: ["aria-current"],
+    });
+  });
   await page.locator("#next-match").click();
+  await expect.poll(() => page.evaluate(() => window.__activeLinkChanges)).toEqual(["exact-1", "exact-2"]);
+  await page.evaluate(() => window.__activeLinkObserver.disconnect());
   await expect
     .poll(() => page.evaluate(() => window.__storageWrites.length))
     .toBe(1);
