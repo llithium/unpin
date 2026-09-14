@@ -1,13 +1,26 @@
-use clap::{Parser, ValueEnum};
+use clap::{Parser, Subcommand, ValueEnum};
 use std::path::PathBuf;
 
 /// Find duplicate visual pins in a Pinterest board or profile.
 #[derive(Debug, Clone, Parser)]
-#[command(name = "unpin", version, about)]
+#[command(
+    name = "unpin",
+    version,
+    about,
+    subcommand_negates_reqs = true,
+    args_conflicts_with_subcommands = true
+)]
 pub struct Cli {
     /// Board URL, USER/BOARD, profile URL, or username to inspect.
-    #[arg(value_name = "TARGET")]
-    pub target: String,
+    #[arg(value_name = "TARGET", required = true)]
+    pub target: Option<String>,
+
+    #[command(subcommand)]
+    pub command: Option<Command>,
+
+    /// Write the report to this path instead of stdout or a temporary HTML file.
+    #[arg(long, value_name = "FILE")]
+    pub output: Option<PathBuf>,
 
     /// Boards to scan for a profile target, by slug or name (repeatable, comma-separated).
     #[arg(
@@ -76,6 +89,18 @@ pub struct Cli {
     pub cookies: Option<PathBuf>,
 }
 
+#[derive(Debug, Clone, Subcommand)]
+pub enum Command {
+    /// Create an HTML report from saved JSON without contacting Pinterest.
+    Render {
+        input: PathBuf,
+        #[arg(long, value_name = "FILE")]
+        output: Option<PathBuf>,
+        #[arg(long)]
+        no_open: bool,
+    },
+}
+
 #[derive(Debug, Clone, Copy, Default, Eq, PartialEq, ValueEnum)]
 pub enum OutputFormat {
     #[default]
@@ -134,7 +159,10 @@ mod tests {
         ])
         .unwrap();
 
-        assert_eq!(cli.target, "https://www.pinterest.com/alice/interiors/");
+        assert_eq!(
+            cli.target.as_deref().unwrap(),
+            "https://www.pinterest.com/alice/interiors/"
+        );
         assert_eq!(cli.format, OutputFormat::Json);
         assert!(cli.exact_only);
         assert_eq!(cli.similarity_threshold, 8);
@@ -189,7 +217,7 @@ mod tests {
     fn parses_username_targets_and_board_selection() {
         let cli =
             Cli::try_parse_from(["unpin", "alice", "--boards", "interiors,mood board"]).unwrap();
-        assert_eq!(cli.target, "alice");
+        assert_eq!(cli.target.as_deref().unwrap(), "alice");
         assert_eq!(cli.boards, ["interiors", "mood board"]);
 
         // `--boards` is repeatable as well as comma-separated.

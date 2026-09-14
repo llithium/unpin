@@ -1,0 +1,132 @@
+{
+  "dataset": "synthetic-scenes-v1",
+  "threshold": 5,
+  "structural_threshold": 0.97,
+  "label_policy": "Resizing and recompression preserve content; substantial crops, captions, and changed objects require separate review and are labeled non-interchangeable.",
+  "true_positives": 6,
+  "false_positives": 0,
+  "true_negatives": 9,
+  "false_negatives": 0,
+  "pairs": [
+    {
+      "scene": 0,
+      "variant": "resized",
+      "expected_match": true,
+      "actual_match": true,
+      "hash_distance": 0,
+      "structural_similarity": 0.9999700085088996
+    },
+    {
+      "scene": 0,
+      "variant": "recompressed",
+      "expected_match": true,
+      "actual_match": true,
+      "hash_distance": 0,
+      "structural_similarity": 0.9993592197311464
+    },
+    {
+      "scene": 0,
+      "variant": "crop",
+      "expected_match": false,
+      "actual_match": false,
+      "hash_distance": 0,
+      "structural_similarity": 0.8214442593720622
+    },
+    {
+      "scene": 0,
+      "variant": "caption_overlay",
+      "expected_match": false,
+      "actual_match": false,
+      "hash_distance": 5,
+      "structural_similarity": 0.4372111225892501
+    },
+    {
+      "scene": 0,
+      "variant": "similar_layout_different_content",
+      "expected_match": false,
+      "actual_match": false,
+      "hash_distance": 4,
+      "structural_similarity": 0.9546065459865517
+    },
+    {
+      "scene": 1,
+      "variant": "resized",
+      "expected_match": true,
+      "actual_match": true,
+      "hash_distance": 0,
+      "structural_similarity": 0.9999720947662843
+    },
+    {
+      "scene": 1,
+      "variant": "recompressed",
+      "expected_match": true,
+      "actual_match": true,
+      "hash_distance": 0,
+      "structural_similarity": 0.9993774021931512
+    },
+    {
+      "scene": 1,
+      "variant": "crop",
+      "expected_match": false,
+      "actual_match": false,
+      "hash_distance": 1,
+      "structural_similarity": 0.8486282207842292
+    },
+    {
+      "scene": 1,
+      "variant": "caption_overlay",
+      "expected_match": false,
+      "actual_match": false,
+      "hash_distance": 5,
+      "structural_similarity": 0.4474523205903393
+    },
+    {
+      "scene": 1,
+      "variant": "similar_layout_different_content",
+      "expected_match": false,
+      "actual_match": false,
+      "hash_distance": 3,
+      "structural_similarity": 0.9348588852483616
+    },
+    {
+      "scene": 2,
+      "variant": "resized",
+      "expected_match": true,
+      "actual_match": true,
+      "hash_distance": 0,
+      "structural_similarity": 0.9999738567964712
+    },
+    {
+      "scene": 2,
+      "variant": "recompressed",
+      "expected_match": true,
+      "actual_match": true,
+      "hash_distance": 0,
+      "structural_similarity": 0.9993853631206061
+    },
+    {
+      "scene": 2,
+      "variant": "crop",
+      "expected_match": false,
+      "actual_match": false,
+      "hash_distance": 0,
+      "structural_similarity": 0.8568765172016539
+    },
+    {
+      "scene": 2,
+      "variant": "caption_overlay",
+      "expected_match": false,
+      "actual_match": false,
+      "hash_distance": 4,
+      "structural_similarity": 0.45430206019549657
+    },
+    {
+      "scene": 2,
+      "variant": "similar_layout_different_content",
+      "expected_match": false,
+      "actual_match": false,
+      "hash_distance": 6,
+      "structural_similarity": 0.8941326779407189
+    }
+  ]
+}

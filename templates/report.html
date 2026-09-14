@@ -842,6 +842,9 @@
         background 180ms ease;
       }
 
+      .variant { min-width: 0; }
+      .variant details { overflow-wrap: anywhere; }
+
       .comparison {
         display: grid;
         grid-template-columns: repeat(auto-fit, minmax(min(100%, 320px), 1fr));
@@ -2305,6 +2308,9 @@
         </aside>
 
         <main class="content" id="report-content" tabindex="-1">
+          {% if report.visual_matching_incomplete %}
+          <p class="scan-warning" role="status">Visual matching incomplete: only comparisons found before the safety limit are shown. Exact matching is complete for analyzed images.</p>
+          {% endif %}
           {% if !report.warnings.is_empty() %}
           <p class="scan-warning">This scan has {{ report.warnings.len() }} warning(s). <a href="#scan-warnings">View scan warnings</a></p>
           {% endif %}
@@ -2332,8 +2338,8 @@
           <div class="empty">
             <strong>No duplicate visual pins found</strong>
             <p class="empty-copy">
-              The scan completed without producing comparison candidates. You
-              can close this report or scan a different set of boards.
+              {% if report.visual_matching_incomplete %}Visual matching stopped early. Narrow the scan and try again.{% else %}The scan completed without producing comparison candidates. You
+              can close this report or scan a different set of boards.{% endif %}
             </p>
           </div>
           {% endif %}
@@ -2423,8 +2429,17 @@
               </div>
             </div>
             <div class="comparison">
-              {% for item in candidate.items %}{% include "item.html" %}{%
-              endfor %}
+              {% for item in candidate.items %}
+              <div class="variant">
+                {% include "item.html" %}
+                {% let copies = candidate.copies[loop.index0] %}
+                {% if !copies.is_empty() %}
+                <details class="card-body"><summary>{{ copies.len() }} additional saves of this image</summary>
+                  <ul>{% for copy in copies %}<li><a href="{{ copy.pin_url }}" target="_blank" rel="noopener noreferrer">Pin {{ copy.pin_id }}</a>{% match copy.board %}{% when Some with (board) %} · {{ board }}{% when None %}{% endmatch %}</li>{% endfor %}</ul>
+                </details>
+                {% endif %}
+              </div>
+              {% endfor %}
             </div>
           </section>
           {% endfor %}
@@ -2863,14 +2878,17 @@
             current.size === previous.size &&
             [...current].every((key) => previous.has(key));
           const reviewed = new Set(
-            groupsUnchanged && Array.isArray(stored.reviewed)
-              ? stored.reviewed.filter((key) => current.has(key))
+            storedGroupsAreValid && Array.isArray(stored.reviewed)
+              ? stored.reviewed.filter((key) => current.has(key) && previous.has(key))
               : [],
           );
           groups.forEach((group) =>
             syncReviewedUi(group, reviewed.has(group.dataset.reviewKey)),
           );
-          if (!groupsUnchanged) return;
+          if (!groupsUnchanged) {
+            if (unreviewedOnly) unreviewedOnly.checked = reviewed.size > 0;
+            return;
+          }
           const storedScope = scopeFilters.find(
             (filter) => filter.value === stored.scope,
           );

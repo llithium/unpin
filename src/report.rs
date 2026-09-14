@@ -44,6 +44,8 @@ impl Recommendation {
 
 #[derive(Debug, Clone, Serialize, Deserialize, Eq, PartialEq)]
 pub struct ReportItem {
+    #[serde(default)]
+    pub image_sha256: String,
     pub pin_id: String,
     pub pin_url: String,
     /// Board this pin lives in; shown only when several boards were scanned.
@@ -133,7 +135,7 @@ impl DuplicateGroup {
     /// Stable identity for review state. Item order is deliberately ignored so
     /// a ranking change cannot make an otherwise unchanged group look new.
     pub(crate) fn review_key(&self) -> String {
-        match_review_key("exact", self.scope, &self.items)
+        match_review_key("exact", self.scope, self.items.iter())
     }
 }
 
@@ -143,13 +145,20 @@ pub struct VisualCandidate {
     pub similarity_percent: u8,
     pub scope: MatchScope,
     pub items: [ReportItem; 2],
+    /// Additional byte-identical saves for each representative, on the same source.
+    #[serde(default)]
+    pub copies: [Vec<ReportItem>; 2],
 }
 
 impl VisualCandidate {
     /// Stable identity for review state. A candidate is the same review item
-    /// when its two pin members and board scope are unchanged.
+    /// when its saved pins, image content, and board scope are unchanged.
     pub(crate) fn review_key(&self) -> String {
-        match_review_key("visual", self.scope, &self.items)
+        match_review_key(
+            "visual",
+            self.scope,
+            self.items.iter().chain(self.copies.iter().flatten()),
+        )
     }
 }
 
@@ -185,6 +194,8 @@ pub struct Report {
     pub visual_candidates: Vec<VisualCandidate>,
     pub skipped: Vec<SkippedPin>,
     pub warnings: Vec<String>,
+    #[serde(default)]
+    pub visual_matching_incomplete: bool,
 }
 
 impl Report {
@@ -218,7 +229,7 @@ impl Report {
             .collect::<Vec<_>>();
         sources.sort_unstable();
 
-        let mut canonical = String::from("unpin-review-v2\0");
+        let mut canonical = String::from("unpin-review-v3\0");
         if let Some(username) = &self.summary.username {
             canonical.push_str(username);
         }
@@ -290,6 +301,9 @@ impl Report {
             theme.strong(self.title())
         );
         let _ = writeln!(output, "{}", theme.dim("Pinterest duplicate review"));
+        if self.visual_matching_incomplete {
+            let _ = writeln!(output, "{}", theme.warning("Visual matching incomplete: only the comparisons found before the safety limit are shown. Exact matching is complete for analyzed images."));
+        }
         let _ = writeln!(output);
         let _ = writeln!(
             output,
@@ -365,6 +379,9 @@ impl Report {
                 &theme,
                 self.shows_board_labels(),
             );
+            for copies in &candidate.copies {
+                render_items(&mut output, copies, &theme, self.shows_board_labels());
+            }
         }
 
         if !self.skipped.is_empty() {
@@ -426,7 +443,7 @@ impl Report {
     }
 
     pub fn render_json(&self) -> Result<String, serde_json::Error> {
-        serde_json::to_string_pretty(self)
+        crate::saved_report::serialize(self)
     }
 }
 
@@ -440,13 +457,29 @@ pub(crate) fn grouped_skipped_reasons(skipped: &[SkippedPin]) -> Vec<(&str, usiz
     reasons
 }
 
-fn match_review_key(kind: &str, scope: MatchScope, items: &[ReportItem]) -> String {
+fn match_review_key<'a>(
+    kind: &str,
+    scope: MatchScope,
+    items: impl Iterator<Item = &'a ReportItem>,
+) -> String {
     let mut pin_ids = items
-        .iter()
-        .map(|item| item.pin_id.as_str())
+        .map(|item| {
+            (
+                &item.pin_id,
+                &item.image_sha256,
+                &item.image_url,
+                &item.board,
+            )
+        })
         .collect::<Vec<_>>();
     pin_ids.sort_unstable();
-    format!("{kind}:{}:{}", scope.css_class(), pin_ids.join(","))
+    format!(
+        "{kind}:{}:{}",
+        scope.css_class(),
+        hex::encode(Sha256::digest(
+            serde_json::to_vec(&pin_ids).expect("review identity is serializable")
+        ))
+    )
 }
 
 fn render_items(output: &mut String, items: &[ReportItem], theme: &TextTheme, show_boards: bool) {
@@ -564,6 +597,7 @@ mod tests {
 
     fn item(pin_id: &str, board: &str, width: u32) -> ReportItem {
         ReportItem {
+            image_sha256: String::new(),
             pin_id: pin_id.into(),
             pin_url: format!("https://www.pinterest.com/pin/{pin_id}/"),
             board: Some(board.into()),
@@ -589,6 +623,7 @@ mod tests {
             items: vec![second.clone(), first.clone()],
         };
         let visual = VisualCandidate {
+            copies: Default::default(),
             hash_distance: 1,
             similarity_percent: 99,
             scope: MatchScope::SameBoard,
@@ -602,6 +637,12 @@ mod tests {
         assert_eq!(exact.review_key(), reversed.review_key());
         assert_ne!(exact.review_key(), visual.review_key());
         assert_ne!(exact.review_key(), cross_board.review_key());
+        let mut changed = exact.clone();
+        changed.items[0].image_sha256 = "changed-content".into();
+        assert_ne!(exact.review_key(), changed.review_key());
+        let mut saved_elsewhere = visual.clone();
+        saved_elsewhere.copies[0].push(item("new-save", "Interiors", 1200));
+        assert_ne!(visual.review_key(), saved_elsewhere.review_key());
     }
 
     #[test]
@@ -622,6 +663,7 @@ mod tests {
     #[test]
     fn review_storage_key_ignores_scan_source_order() {
         let mut report = Report {
+            visual_matching_incomplete: false,
             summary: Summary {
                 username: Some("alice".into()),
                 boards: vec![scanned("Interiors", 1), scanned("Mood board", 1)],
@@ -649,6 +691,7 @@ mod tests {
     #[test]
     fn text_report_contains_links_and_recommendations() {
         let report = Report {
+            visual_matching_incomplete: false,
             summary: Summary {
                 username: None,
                 boards: vec![scanned("Ideas", 2)],
@@ -662,6 +705,7 @@ mod tests {
             exact_groups: vec![DuplicateGroup {
                 scope: MatchScope::SameBoard,
                 items: vec![ReportItem {
+                    image_sha256: String::new(),
                     pin_id: "123".into(),
                     pin_url: "https://www.pinterest.com/pin/123/".into(),
                     board: Some("Ideas".into()),
@@ -693,6 +737,7 @@ mod tests {
     fn text_output_sanitizes_dynamic_values_without_changing_json_values() {
         let unsafe_text = "Board\n\u{1b}[31m\t";
         let report = Report {
+            visual_matching_incomplete: false,
             summary: Summary {
                 username: Some("alice".into()),
                 boards: vec![scanned(unsafe_text, 1), scanned("Other", 1)],
@@ -733,6 +778,7 @@ mod tests {
     #[test]
     fn json_report_has_required_top_level_keys() {
         let report = Report {
+            visual_matching_incomplete: false,
             summary: Summary {
                 username: None,
                 boards: vec![scanned("Empty", 0)],
@@ -792,6 +838,7 @@ mod tests {
     #[test]
     fn scope_tags_appear_only_for_multi_board_scans() {
         let mut report = Report {
+            visual_matching_incomplete: false,
             summary: Summary {
                 username: Some("alice".into()),
                 boards: vec![scanned("Interiors", 3), scanned("Mood board", 1)],
@@ -842,6 +889,7 @@ mod tests {
     #[test]
     fn scope_counts_span_groups_and_candidates() {
         let mut report = Report {
+            visual_matching_incomplete: false,
             summary: Summary {
                 username: Some("alice".into()),
                 boards: vec![scanned("Interiors", 2), scanned("Mood board", 2)],
@@ -863,6 +911,7 @@ mod tests {
                 },
             ],
             visual_candidates: vec![VisualCandidate {
+                copies: Default::default(),
                 hash_distance: 1,
                 similarity_percent: 98,
                 scope: MatchScope::SameBoard,
@@ -882,6 +931,7 @@ mod tests {
     #[test]
     fn json_reports_the_match_scope() {
         let report = Report {
+            visual_matching_incomplete: false,
             summary: Summary {
                 username: Some("alice".into()),
                 boards: vec![scanned("Interiors", 1), scanned("Mood board", 1)],
@@ -909,6 +959,7 @@ mod tests {
     #[test]
     fn board_labels_appear_only_for_multi_board_scans() {
         let mut report = Report {
+            visual_matching_incomplete: false,
             summary: Summary {
                 username: Some("alice".into()),
                 boards: vec![scanned("Interiors", 1), scanned("Mood board", 1)],
@@ -955,6 +1006,7 @@ mod tests {
             })
             .collect();
         let report = Report {
+            visual_matching_incomplete: false,
             summary: Summary {
                 username: None,
                 boards: vec![scanned("Videos", 13)],

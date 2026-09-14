@@ -129,6 +129,20 @@ unpin username --same-board-only
 unpin username --cross-board-only
 ```
 
+Save a permanent HTML report, or save JSON and render it later without fetching
+Pinterest again:
+
+```console
+unpin username --output review.html --no-open
+unpin username --no-visual --format json --output scan.json
+unpin render scan.json --output review.html --no-open
+```
+
+Output files are written atomically and existing files are never overwritten.
+The JSON format carries `schema_version: 1`; the render command rejects
+unversioned or unsupported versions. Rendering needs no Pinterest session,
+although viewing the remote preview images still needs network access.
+
 Run `unpin --help` for the complete interface.
 
 ## How matching works
@@ -177,10 +191,11 @@ Run `unpin --help` for the complete interface.
   The entry format is versioned; upgrading `unpin` past a format change means
   one full re-download before the cache is warm again.
 - The visual report keeps reviewed-group marks in this browser's local storage.
-  A later run for the same scan sources reuses those marks only when the
-  complete set of exact groups and visual candidates is unchanged; any
-  addition or removal clears the marks so a changed queue is reviewed from the
-  beginning. Reused reviewed groups are hidden by default, and `Reset` or
+  A later run for the same scan sources keeps marks for unchanged matches.
+  New matches and matches with changed pin membership or image content remain
+  unreviewed; removed matches are discarded. Upgrading from older reports
+  resets review marks once because their identities did not include image content.
+  Reused reviewed groups are hidden by default, and `Reset` or
   `Unreviewed only` controls the current report. Review changes and resets can
   be undone with `Undo`; `Show all matches` clears filters without clearing marks.
   If browser storage is unavailable, the report displays a notice and keeps
@@ -191,9 +206,15 @@ Run `unpin --help` for the complete interface.
   one percent. A second 64×64 contrast-normalized structural comparison must
   then score at least 97%, which rejects unrelated images with similar broad
   light/dark layouts.
-- Visual matching stops with an actionable safety error before an excessively
-  large candidate queue can exhaust memory; rerun with `--exact-only` or a
-  lower `--similarity-threshold` to narrow the review.
+- Visual matching stops adding comparisons at its safety limit. The report
+  retains exact matches and visual comparisons found so far, prominently marks
+  visual matching incomplete, and sets `visual_matching_incomplete` in JSON.
+  Rerun with `--exact-only` or a lower `--similarity-threshold` to narrow the review.
+- Byte-identical saves of each visual variant share one comparison per board
+  pair. Each side shows one preview and expandable links to its additional
+  saves. JSON retains representatives in `items` and additional saves in the
+  corresponding `copies` arrays. Each comparison is directly verified; similar
+  images are never merged through transitive matches.
 - Rankings use decoded pixel area, longest edge, and file size—in that order.
 
 Story/idea pins are analyzed through their static original cover when one is
@@ -217,8 +238,8 @@ by reason; JSON and the HTML report retain every individual skipped-pin record.
   remote originals and pin links, so network access is still required when
   viewing images or opening those links.
 - Temporary reports remain after `unpin` exits so the browser can load them
-  safely. The operating system eventually cleans them up; copy the printed file
-  if you want to retain one.
+  safely. The operating system eventually cleans them up; use `--output` to
+  retain a report in a location you choose.
 - `unpin` only reports links. Pin deletion is always manual.
 
 ## Development
@@ -248,3 +269,7 @@ Pull requests run both the Rust and browser verification gates in CI.
 
 Tests use local mock HTTP servers and do not contact Pinterest. A live smoke
 test can be added separately and should remain opt-in.
+
+The deterministic [matching-quality baseline](docs/benchmarks/matching-quality.md)
+covers resizing, recompression, crops, caption overlays, and changed objects
+with similar layouts. Run it with `cargo test labeled_matching_quality_baseline`.

@@ -92,6 +92,7 @@ mod tests {
         visual_item.width = 1190;
         visual_item.byte_size = 2000;
         Report {
+            visual_matching_incomplete: false,
             summary: Summary {
                 username: None,
                 boards: vec![ScannedBoard {
@@ -112,6 +113,7 @@ mod tests {
                 items: vec![item("101", Recommendation::Tie), exact_item],
             }],
             visual_candidates: vec![VisualCandidate {
+                copies: Default::default(),
                 hash_distance: 2,
                 similarity_percent: 98,
                 scope: MatchScope::SameBoard,
@@ -129,6 +131,7 @@ mod tests {
 
     fn item(id: &str, recommendation: Recommendation) -> ReportItem {
         ReportItem {
+            image_sha256: String::new(),
             pin_id: id.into(),
             pin_url: format!("https://www.pinterest.com/pin/{id}/"),
             board: Some("Ideas".into()),
@@ -304,8 +307,14 @@ mod tests {
         ));
         assert!(multi.contains("data-target=\"visual-1\""));
         assert!(multi.contains("data-kind=\"visual\""));
-        assert!(multi.contains("data-review-key=\"exact:cross-board:101,102\""));
-        assert!(multi.contains("data-review-key=\"visual:same-board:103,104\""));
+        assert!(multi.contains(&format!(
+            "data-review-key=\"{}\"",
+            multi_board_report().exact_groups[0].review_key()
+        )));
+        assert!(multi.contains(&format!(
+            "data-review-key=\"{}\"",
+            multi_board_report().visual_candidates[0].review_key()
+        )));
         assert!(multi.contains("id=\"filter-all\""));
         assert!(multi.find("id=\"filter-all\"").unwrap() < multi.find("id=\"exact-1\"").unwrap());
     }

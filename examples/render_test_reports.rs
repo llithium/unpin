@@ -35,6 +35,7 @@ fn item(
     recommendation: Recommendation,
 ) -> ReportItem {
     ReportItem {
+        image_sha256: String::new(),
         pin_id: id.into(),
         pin_url: format!("https://www.pinterest.com/pin/{id}/"),
         board: Some(board.into()),
@@ -59,6 +60,7 @@ fn fixture() -> Report {
     );
     exact_second.image_url = "https://images.example.test/101.jpg".into();
     Report {
+        visual_matching_incomplete: false,
         summary: Summary {
             username: Some("alice".into()),
             boards: vec![
@@ -123,6 +125,18 @@ fn fixture() -> Report {
             },
         ],
         visual_candidates: vec![VisualCandidate {
+            copies: [
+                vec![item(
+                    "303",
+                    "Mood board",
+                    "board-b",
+                    800,
+                    800,
+                    4096,
+                    Recommendation::Keep,
+                )],
+                vec![],
+            ],
             hash_distance: 4,
             similarity_percent: 98,
             scope: MatchScope::SameBoard,

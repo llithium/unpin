@@ -47,7 +47,7 @@ const PINTEREST_RENDITION_FALLBACKS: [&str; 4] = ["736x", "564x", "474x", "236x"
 const MIN_STRUCTURAL_SIMILARITY: f64 = 0.97;
 /// A report larger than this is not a useful interactive review queue and can
 /// otherwise grow quadratically when a permissive similarity threshold is
-/// selected. Stop with an actionable error instead of exhausting memory.
+/// selected. Retain a bounded partial review queue instead of exhausting memory.
 const MAX_VISUAL_CANDIDATES: usize = 100_000;
 /// Aspect-ratio buckets are expressed in log space so the same relative
 /// tolerance works for portrait, landscape, and square images. A ±3 lookup
@@ -76,17 +76,13 @@ pub struct AnalysisResult {
     pub exact_groups: Vec<DuplicateGroup>,
     pub visual_candidates: Vec<VisualCandidate>,
     pub skipped: Vec<SkippedPin>,
+    pub visual_matching_incomplete: bool,
 }
 
 #[derive(Debug, Error)]
 pub enum AnalysisError {
     #[error("failed to build the image HTTP client")]
     Client(#[source] reqwest::Error),
-
-    #[error(
-        "visual matching exceeded the {limit}-candidate safety limit; rerun with --exact-only or a lower --similarity-threshold"
-    )]
-    VisualCandidateLimit { limit: usize },
 }
 
 #[derive(Debug, Clone)]
@@ -270,6 +266,7 @@ pub(crate) fn default_fingerprint_cache_dir() -> Option<PathBuf> {
 impl AnalyzedImage {
     fn report_item(&self, recommendation: Recommendation) -> ReportItem {
         ReportItem {
+            image_sha256: self.fingerprint.sha256.clone(),
             pin_id: self.pin_id.clone(),
             pin_url: self.pin_url.clone(),
             board: self.board.clone(),
@@ -536,16 +533,23 @@ async fn analyze_batches_with_limits(
         lifecycle: Lifecycle::Started,
     });
     let exact_groups = build_exact_groups(&images);
+    let mut visual_matching_incomplete = false;
     let visual_candidates = if exact_only {
         Vec::new()
     } else {
-        build_visual_candidates(&images, similarity_threshold)?
+        build_visual_candidates_bounded(
+            &images,
+            similarity_threshold,
+            MAX_VISUAL_CANDIDATES,
+            &mut visual_matching_incomplete,
+        )
     };
     progress.step(ProgressStep::Matching {
         lifecycle: Lifecycle::Completed,
     });
 
     Ok(AnalysisResult {
+        visual_matching_incomplete,
         analyzed: images.len(),
         exact_groups,
         visual_candidates,
@@ -866,40 +870,53 @@ fn build_exact_groups(images: &[AnalyzedImage]) -> Vec<DuplicateGroup> {
     groups
 }
 
-fn build_visual_candidates(
-    images: &[AnalyzedImage],
-    threshold: u8,
-) -> Result<Vec<VisualCandidate>, AnalysisError> {
-    build_visual_candidates_with_limit(images, threshold, MAX_VISUAL_CANDIDATES)
+#[cfg(test)]
+fn build_visual_candidates(images: &[AnalyzedImage], threshold: u8) -> Vec<VisualCandidate> {
+    build_visual_candidates_bounded(images, threshold, MAX_VISUAL_CANDIDATES, &mut false)
 }
 
-fn build_visual_candidates_with_limit(
+fn build_visual_candidates_bounded(
     images: &[AnalyzedImage],
     threshold: u8,
     max_candidates: usize,
-) -> Result<Vec<VisualCandidate>, AnalysisError> {
-    // Every pin with the same SHA-256 has the same visual fingerprint. Compare
-    // each pair of exact-image groups once, then expand a passing comparison
-    // back to the per-pin candidates expected by the report.
-    let mut group_by_sha = HashMap::<&str, usize>::new();
+    incomplete: &mut bool,
+) -> Vec<VisualCandidate> {
+    // Compare each unique fingerprint once, then split its saves by source
+    // for unambiguous board scopes. Never infer transitive visual similarity.
+    let mut group_by_sha = HashMap::new();
     let mut fingerprint_groups = Vec::<Vec<usize>>::new();
     for (index, image) in images.iter().enumerate() {
-        let group_index = match group_by_sha.get(image.fingerprint.sha256.as_str()) {
-            Some(&group_index) => group_index,
-            None => {
-                let group_index = fingerprint_groups.len();
-                group_by_sha.insert(&image.fingerprint.sha256, group_index);
+        let group_index = *group_by_sha
+            .entry(image.fingerprint.sha256.as_str())
+            .or_insert_with(|| {
                 fingerprint_groups.push(Vec::new());
-                group_index
-            }
-        };
+                fingerprint_groups.len() - 1
+            });
         fingerprint_groups[group_index].push(index);
     }
+    let source_groups: Vec<Vec<Vec<usize>>> = fingerprint_groups
+        .iter()
+        .map(|members| {
+            let mut source_indices = HashMap::new();
+            let mut groups = Vec::<Vec<usize>>::new();
+            for &index in members {
+                let image = &images[index];
+                let source = image.source_id.as_deref().or(image.board.as_deref());
+                let group = *source_indices.entry(source).or_insert_with(|| {
+                    groups.push(Vec::new());
+                    groups.len() - 1
+                });
+                groups[group].push(index);
+            }
+            groups
+        })
+        .collect();
 
     let mut trees = HashMap::<i64, BkTree>::new();
     let mut candidates = Vec::new();
+    let mut candidate_items = 0usize;
 
-    for (group_index, members) in fingerprint_groups.iter().enumerate() {
+    'matching: for (group_index, members) in fingerprint_groups.iter().enumerate() {
         let index = members[0];
         let image = &images[index];
         let bucket = aspect_ratio_bucket(image);
@@ -922,24 +939,47 @@ fn build_visual_candidates_with_limit(
                         ^ other.fingerprint.difference_hash)
                         .count_ones() as u8;
                     let similarity_percent = (structural_similarity * 100.0).floor() as u8;
-                    for &other_index in other_members {
-                        for &index in members {
-                            if candidates.len() >= max_candidates {
-                                return Err(AnalysisError::VisualCandidateLimit {
-                                    limit: max_candidates,
-                                });
+                    for members in &source_groups[group_index] {
+                        for other_members in &source_groups[other_group_index] {
+                            let index = members[0];
+                            let other_index = other_members[0];
+                            // Grouped saves must also respect the old per-pin memory
+                            // budget; a small card count can still contain many links.
+                            let item_count = members.len().saturating_add(other_members.len());
+                            if candidates.len() >= max_candidates
+                                || item_count
+                                    > max_candidates
+                                        .saturating_mul(2)
+                                        .saturating_sub(candidate_items)
+                            {
+                                *incomplete = true;
+                                break 'matching;
                             }
-
-                            let pair = [other_index, index];
-                            let ranked = ranked_items(images, &pair);
-                            let items: [ReportItem; 2] = ranked
-                                .try_into()
-                                .expect("visual candidate pairs always contain two items");
+                            candidate_items += item_count;
+                            let ranked = ranked_items(images, &[other_index, index]);
+                            let items: [ReportItem; 2] =
+                                ranked.try_into().expect("two representatives");
+                            let member_sets = if items[0].pin_id == images[other_index].pin_id {
+                                [other_members, members]
+                            } else {
+                                [members, other_members]
+                            };
+                            let copies = std::array::from_fn(|side| {
+                                member_sets[side]
+                                    .iter()
+                                    .filter(|&&member| images[member].pin_id != items[side].pin_id)
+                                    .map(|&member| {
+                                        images[member]
+                                            .report_item(items[side].recommendation.clone())
+                                    })
+                                    .collect()
+                            });
                             candidates.push(VisualCandidate {
                                 hash_distance: distance,
                                 similarity_percent,
                                 scope: MatchScope::of(&items),
                                 items,
+                                copies,
                             });
                         }
                     }
@@ -960,7 +1000,7 @@ fn build_visual_candidates_with_limit(
             .then_with(|| left.items[0].pin_id.cmp(&right.items[0].pin_id))
             .then_with(|| left.items[1].pin_id.cmp(&right.items[1].pin_id))
     });
-    Ok(candidates)
+    candidates
 }
 
 fn aspect_ratio_bucket(image: &AnalyzedImage) -> i64 {
@@ -1204,7 +1244,7 @@ mod tests {
     }
 
     #[test]
-    fn visual_matching_expands_unique_fingerprint_pairs_to_pin_pairs() {
+    fn visual_matching_groups_identical_saves_and_retains_partial_results() {
         let mut images = vec![
             analyzed("left-a", 1200, 800, 42_000, 0),
             analyzed("right-a", 1200, 800, 42_000, 1),
@@ -1215,30 +1255,44 @@ mod tests {
         images[2].fingerprint.sha256 = "left".into();
         images[1].fingerprint.sha256 = "right".into();
         images[3].fingerprint.sha256 = "right".into();
-
-        let candidates = build_visual_candidates_with_limit(&images, 5, 4).unwrap();
-        let pairs = candidates
+        let candidates = build_visual_candidates(&images, 5);
+        assert_eq!(candidates.len(), 1);
+        assert_eq!(candidates[0].copies.each_ref().map(Vec::len), [1, 1]);
+        let mut ids = candidates[0]
+            .items
             .iter()
-            .map(|candidate| {
-                let mut ids = candidate
-                    .items
-                    .iter()
-                    .map(|item| item.pin_id.as_str())
-                    .collect::<Vec<_>>();
-                ids.sort_unstable();
-                ids
-            })
+            .chain(candidates[0].copies.iter().flatten())
+            .map(|item| item.pin_id.as_str())
             .collect::<Vec<_>>();
+        ids.sort_unstable();
+        assert_eq!(ids, ["left-a", "left-b", "right-a", "right-b"]);
 
+        // A second board still has its own within-board comparison and two
+        // explicit cross-board comparisons; grouping never changes scope.
+        images[2].source_id = Some("another-board".into());
+        images[3].source_id = Some("another-board".into());
+        images[0].source_id = Some("first-board".into());
+        images[1].source_id = Some("first-board".into());
+        let candidates = build_visual_candidates(&images, 5);
         assert_eq!(candidates.len(), 4);
-        assert!(pairs.contains(&vec!["left-a", "right-a"]));
-        assert!(pairs.contains(&vec!["left-a", "right-b"]));
-        assert!(pairs.contains(&vec!["left-b", "right-a"]));
-        assert!(pairs.contains(&vec!["left-b", "right-b"]));
-        assert!(matches!(
-            build_visual_candidates_with_limit(&images, 5, 3),
-            Err(AnalysisError::VisualCandidateLimit { limit: 3 })
-        ));
+        assert_eq!(
+            candidates
+                .iter()
+                .filter(|c| c.scope == MatchScope::SameBoard)
+                .count(),
+            2
+        );
+        let mut incomplete = false;
+        let partial = build_visual_candidates_bounded(&images, 5, 1, &mut incomplete);
+        assert!(incomplete);
+        assert_eq!(partial.len(), 1);
+        assert_eq!(build_exact_groups(&images).len(), 2);
+        incomplete = false;
+        assert_eq!(
+            build_visual_candidates_bounded(&images, 5, 4, &mut incomplete).len(),
+            4
+        );
+        assert!(!incomplete);
     }
 
     #[test]
@@ -1263,7 +1317,7 @@ mod tests {
         }
 
         let started = std::time::Instant::now();
-        let candidates = build_visual_candidates(&images, 5).unwrap();
+        let candidates = build_visual_candidates(&images, 5);
         eprintln!("{} candidates in {:?}", candidates.len(), started.elapsed());
     }
 
@@ -1838,7 +1892,7 @@ mod tests {
         let mut right = analyzed("2", 500, 500, 400, 0b11);
         left.board = Some("Interiors".into());
         right.board = Some("Mood board".into());
-        let candidates = build_visual_candidates(&[left, right], 2).unwrap();
+        let candidates = build_visual_candidates(&[left, right], 2);
         assert_eq!(candidates[0].scope, MatchScope::CrossBoard);
     }
 
@@ -1882,8 +1936,7 @@ mod tests {
                 same_visual_second,
             ],
             1,
-        )
-        .unwrap();
+        );
         assert_eq!(candidates.len(), 2);
         assert_eq!(candidates[0].scope, MatchScope::SameBoard);
         assert_eq!(candidates[1].scope, MatchScope::CrossBoard);
@@ -1910,7 +1963,7 @@ mod tests {
             analyzed("2", 500, 500, 400, 0b11),
             analyzed("3", 500, 250, 300, 0b1),
         ];
-        let candidates = build_visual_candidates(&images, 2).unwrap();
+        let candidates = build_visual_candidates(&images, 2);
         assert_eq!(candidates.len(), 1);
         assert_eq!(candidates[0].hash_distance, 2);
     }
@@ -1927,7 +1980,7 @@ mod tests {
             (aspect_ratio_bucket(&images[0]) - aspect_ratio_bucket(&images[1])).abs()
                 <= ASPECT_RATIO_BUCKET_RADIUS
         );
-        assert_eq!(build_visual_candidates(&images, 2).unwrap().len(), 1);
+        assert_eq!(build_visual_candidates(&images, 2).len(), 1);
     }
 
     #[test]
@@ -1949,11 +2002,7 @@ mod tests {
             right.fingerprint.structural_sum_squares,
         ) = test_structural_statistics(&right.fingerprint.structural_signature);
 
-        assert!(
-            build_visual_candidates(&[left, right], 5)
-                .unwrap()
-                .is_empty()
-        );
+        assert!(build_visual_candidates(&[left, right], 5).is_empty());
     }
 
     #[test]
@@ -1963,14 +2012,17 @@ mod tests {
             analyzed("2", 1000, 1000, 400, 0),
         ];
 
-        let error = build_visual_candidates_with_limit(&images, 0, 0).unwrap_err();
-        assert_eq!(
-            error.to_string(),
-            "visual matching exceeded the 0-candidate safety limit; rerun with --exact-only or a lower --similarity-threshold"
-        );
+        let mut incomplete = false;
+        let candidates = build_visual_candidates_bounded(&images, 0, 0, &mut incomplete);
+        assert!(incomplete);
+        assert!(candidates.is_empty());
     }
 }
 
 #[cfg(test)]
 #[path = "analysis_benchmarks.rs"]
 mod benchmarks;
+
+#[cfg(test)]
+#[path = "matching_quality.rs"]
+mod matching_quality;

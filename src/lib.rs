@@ -4,6 +4,7 @@ pub mod cli;
 pub mod pinterest;
 pub mod progress;
 pub mod report;
+pub mod saved_report;
 pub mod select;
 pub mod terminal_text;
 pub mod visual;
@@ -127,7 +128,7 @@ pub async fn run_with_api_root_and_progress(
     api_root: Option<Url>,
     progress: &dyn Progress,
 ) -> Result<Report, AppError> {
-    let target = Target::parse(&cli.target)?;
+    let target = Target::parse(cli.target.as_deref().unwrap_or_default())?;
     let cookies = if let Some(path) = &cli.cookies {
         auth::load_pinterest_scoped_cookies_file(path)?
     } else if let Some(browser) = cli.cookies_from_browser {
@@ -217,6 +218,9 @@ pub async fn run_with_api_root_and_progress(
 
     let mut analysis = analysis?;
     skipped.append(&mut analysis.skipped);
+    if analysis.visual_matching_incomplete {
+        warnings.push("Visual matching incomplete: the candidate safety limit was reached. Exact matches and the visual comparisons found so far are retained. Rerun with --exact-only or a lower --similarity-threshold.".into());
+    }
     if analysis.analyzed == 0 {
         return Err(AppError::NoAnalyzablePins {
             reasons: no_analyzable_reasons(warnings, &skipped),
@@ -253,6 +257,7 @@ pub async fn run_with_api_root_and_progress(
     };
 
     Ok(Report {
+        visual_matching_incomplete: analysis.visual_matching_incomplete,
         summary,
         exact_groups: analysis.exact_groups,
         visual_candidates: analysis.visual_candidates,

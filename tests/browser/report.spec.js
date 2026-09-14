@@ -201,7 +201,7 @@ test("focus navigation, overview, keyboard shortcuts, and active state stay cohe
   await expect(page.locator("#review-progress")).toHaveText("1 / 3");
 });
 
-test("review state persists, invalidates when groups change, and resets", async ({ page }) => {
+test("review state persists, rejects inconsistent state, and resets", async ({ page }) => {
   await openReport(page);
   const storageKey = await page.locator("html").getAttribute("data-review-storage-key");
   const key = `unpin:review:v2:${storageKey}`;
@@ -238,6 +238,25 @@ test("review state persists, invalidates when groups change, and resets", async 
     .toBe(1);
   await expect(page.locator("#exact-1")).toHaveAttribute("data-reviewed", "false");
   await expect(page.locator("#review-progress")).toHaveText("0 / 3");
+});
+
+test("unchanged review marks survive additions and removals", async ({ page }) => {
+  await openReport(page);
+  const storageKey = await page.locator("html").getAttribute("data-review-storage-key");
+  const key = `unpin:review:v2:${storageKey}`;
+  await page.locator("#exact-1 [data-review-button]").click();
+  await page.evaluate((key) => {
+    const state = JSON.parse(localStorage.getItem(key));
+    state.groups.push("removed-match");
+    state.reviewed.push("removed-match");
+    state.groups = state.groups.filter((group) => group !== document.querySelector("#visual-1").dataset.reviewKey);
+    localStorage.setItem(key, JSON.stringify(state));
+  }, key);
+  await page.reload();
+  await expect(page.locator("#exact-1")).toHaveAttribute("data-reviewed", "true");
+  await expect(page.locator("#visual-1")).toHaveAttribute("data-reviewed", "false");
+  await expect(page.locator("#unreviewed-only")).toBeChecked();
+  await expect(page.locator("#review-progress")).toHaveText("1 / 3");
 });
 
 test("unavailable local storage does not disable the report", async ({ page }) => {
@@ -389,4 +408,15 @@ test("long content and three-pin groups fit narrow, tablet, desktop, and overvie
       for (const card of cards) expect(card.content).toBeLessThanOrEqual(card.width + 1);
     }
   }
+});
+
+test("grouped visual variants retain every save with two previews", async ({ page }) => {
+  await page.setViewportSize({ width: 390, height: 844 });
+  await openReport(page);
+  await page.locator('[data-target="visual-1"]').click();
+  await expect(page.locator("#visual-1 .image-stage")).toHaveCount(2);
+  await page.locator("#visual-1 summary").click();
+  await expect(page.locator('#visual-1 a[href="https://www.pinterest.com/pin/303/"]')).toBeVisible();
+  const widths = await page.evaluate(() => [document.documentElement.scrollWidth, window.innerWidth]);
+  expect(widths[0]).toBeLessThanOrEqual(widths[1] + 1);
 });
