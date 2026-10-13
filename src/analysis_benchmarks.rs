@@ -22,6 +22,7 @@ fn benchmark_shared_signatures() {
     for _ in 0..7 {
         let pins = (0..20_000)
             .map(|id| Pin {
+                media_kind: crate::pinterest::MediaKind::Image,
                 id: id.to_string(),
                 media_url: "http://fixture/image.png".into(),
                 board: None,
@@ -68,6 +69,7 @@ async fn benchmark_cache_pipeline() {
                         cache.put(&url, &fingerprint);
                     }
                     Pin {
+                        media_kind: crate::pinterest::MediaKind::Image,
                         id: id.to_string(),
                         media_url: url,
                         board: None,

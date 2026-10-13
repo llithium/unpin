@@ -12,6 +12,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use futures_util::stream::TryStreamExt;
 use rand::Rng;
 use reqwest::header::{HeaderMap, HeaderName, HeaderValue};
+use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use thiserror::Error;
 use url::Url;
@@ -78,6 +79,41 @@ pub enum PinterestError {
     },
 }
 
+/// A feed stopped after successful pages. Retained results remain usable,
+/// while this outcome makes their incompleteness explicit in saved reports.
+#[derive(Debug, Clone, Serialize, Deserialize, Eq, PartialEq)]
+pub struct CollectionIssue {
+    pub resource: String,
+    pub pages_collected: usize,
+    pub reason: String,
+}
+
+pub(crate) struct FeedCollection {
+    pub results: Vec<Value>,
+    pub issue: Option<CollectionIssue>,
+}
+
+fn collection_failure(
+    resource: &'static str,
+    results: Vec<Value>,
+    pages_collected: usize,
+    error: PinterestError,
+    retain_partial: bool,
+) -> Result<FeedCollection, PinterestError> {
+    if retain_partial && pages_collected > 0 {
+        Ok(FeedCollection {
+            results,
+            issue: Some(CollectionIssue {
+                resource: resource.into(),
+                pages_collected,
+                reason: error.to_string(),
+            }),
+        })
+    } else {
+        Err(error)
+    }
+}
+
 #[derive(Clone)]
 pub(crate) struct PinterestApi {
     http: reqwest::Client,
@@ -132,12 +168,46 @@ impl PinterestApi {
     pub(crate) async fn paginate(
         &self,
         resource: &'static str,
-        mut options: Value,
+        options: Value,
         progress: &dyn Progress,
     ) -> Result<Vec<Value>, PinterestError> {
+        Ok(self
+            .paginate_collect(resource, options, progress, false)
+            .await?
+            .results)
+    }
+
+    pub(crate) async fn paginate_partial(
+        &self,
+        resource: &'static str,
+        options: Value,
+        progress: &dyn Progress,
+    ) -> Result<FeedCollection, PinterestError> {
+        self.paginate_collect(resource, options, progress, true)
+            .await
+    }
+
+    async fn paginate_collect(
+        &self,
+        resource: &'static str,
+        mut options: Value,
+        progress: &dyn Progress,
+        retain_partial: bool,
+    ) -> Result<FeedCollection, PinterestError> {
         let mut all_results = Vec::new();
         let mut seen_bookmarks = HashSet::new();
-
+        let mut pages_collected = 0;
+        macro_rules! fail {
+            ($error:expr) => {
+                return collection_failure(
+                    resource,
+                    all_results,
+                    pages_collected,
+                    $error,
+                    retain_partial,
+                )
+            };
+        }
         for page_index in 0..MAX_PAGES {
             progress.step(ProgressStep::PageCollection {
                 resource,
@@ -146,65 +216,83 @@ impl PinterestApi {
                 lifecycle: Lifecycle::Started,
             });
             let response = match self.call(resource, options.clone(), progress).await {
+                Ok(response) => Ok(response),
+                Err(error) if is_bad_request(&error) && remove_page_size(&mut options) => {
+                    self.call(resource, options.clone(), progress).await
+                }
+                Err(error) => Err(error),
+            };
+            let response = match response {
                 Ok(response) => response,
-                // An oversized `page_size` is refused outright, and the value
-                // that is acceptable today is not promised for tomorrow. Drop
-                // the option and take Pinterest's default page rather than
-                // losing the scan; `remove_page_size` reporting false on the
-                // second pass stops this from looping.
                 Err(error) => {
-                    if !is_bad_request(&error) || !remove_page_size(&mut options) {
-                        return Err(error);
-                    }
-                    self.call(resource, options.clone(), progress).await?
+                    fail!(error);
                 }
             };
-            // Read the bookmark before the results are moved out of the response.
-            let bookmark = response_bookmark(&response, resource)?;
-            let page_results = response_results(response, resource)?;
-            let retained_results = all_results
-                .len()
-                .checked_add(page_results.len())
-                .ok_or_else(|| {
-                    invalid_response(resource, "feed result count overflowed its safety check")
-                })?;
-            if retained_results > MAX_FEED_RESULTS {
-                return Err(invalid_response(
+            let bookmark = match response_bookmark(&response, resource) {
+                Ok(bookmark) => bookmark,
+                Err(error) => {
+                    fail!(error);
+                }
+            };
+            let page_results = match response_results(response, resource) {
+                Ok(results) => results,
+                Err(error) => {
+                    fail!(error);
+                }
+            };
+            let Some(retained_results) = all_results.len().checked_add(page_results.len()) else {
+                fail!(invalid_response(
                     resource,
-                    format!("feed exceeded the {MAX_FEED_RESULTS}-result retention safety limit"),
+                    "feed result count overflowed its safety check"
+                ));
+            };
+            if retained_results > MAX_FEED_RESULTS {
+                fail!(invalid_response(
+                    resource,
+                    format!("feed exceeded the {MAX_FEED_RESULTS}-result retention safety limit")
                 ));
             }
             all_results.extend(page_results);
+            pages_collected += 1;
             progress.step(ProgressStep::PageCollection {
                 resource,
                 page: page_index + 1,
                 items: all_results.len(),
                 lifecycle: Lifecycle::Completed,
             });
-
             let Some(bookmark) = bookmark else {
-                return Ok(all_results);
+                return Ok(FeedCollection {
+                    results: all_results,
+                    issue: None,
+                });
             };
             if bookmark == "-end-" || bookmark.starts_with("Y2JOb25lO") {
-                return Ok(all_results);
+                return Ok(FeedCollection {
+                    results: all_results,
+                    issue: None,
+                });
             }
             if !seen_bookmarks.insert(bookmark.clone()) {
-                return Err(invalid_response(
+                fail!(invalid_response(
                     resource,
-                    "Pinterest returned the same pagination bookmark twice",
+                    "Pinterest returned the same pagination bookmark twice"
                 ));
             }
-
-            let object = options.as_object_mut().ok_or_else(|| {
-                invalid_response(resource, "pagination options were not an object")
-            })?;
+            let Some(object) = options.as_object_mut() else {
+                fail!(invalid_response(
+                    resource,
+                    "pagination options were not an object"
+                ));
+            };
             object.insert("bookmarks".into(), json!([bookmark]));
         }
-
-        Err(invalid_response(
+        collection_failure(
             resource,
-            "pagination exceeded the safety limit",
-        ))
+            all_results,
+            pages_collected,
+            invalid_response(resource, "pagination exceeded the safety limit"),
+            retain_partial,
+        )
     }
 
     /// Performs one bounded, retried provider request. The permit remains held
@@ -1292,5 +1380,65 @@ mod tests {
                 message
             } if message.contains("retention safety limit")
         ));
+    }
+    #[tokio::test]
+    async fn partial_pagination_retains_only_valid_pages_and_first_page_errors_still_fail() {
+        use wiremock::matchers::{path, query_param};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+        for failure in ["http", "invalid", "loop"] {
+            let server = MockServer::start().await;
+            let first = json!({"resource_response":{"data":[{"id":"1"}]}, "resource":{"options":{"bookmarks":["next"]}}});
+            Mock::given(path("/resource/FeedResource/get/"))
+                .and(query_param(
+                    "data",
+                    json!({"options":{"bookmarks":null}}).to_string(),
+                ))
+                .respond_with(ResponseTemplate::new(200).set_body_json(first.clone()))
+                .expect(1)
+                .mount(&server)
+                .await;
+            let response = match failure {
+                "http" => ResponseTemplate::new(403),
+                "invalid" => ResponseTemplate::new(200)
+                    .set_body_json(json!({"resource_response":{"data":[{"id":"discard"}]}})),
+                _ => ResponseTemplate::new(200).set_body_json(first),
+            };
+            Mock::given(path("/resource/FeedResource/get/"))
+                .and(query_param(
+                    "data",
+                    json!({"options":{"bookmarks":["next"]}}).to_string(),
+                ))
+                .respond_with(response)
+                .expect(1)
+                .mount(&server)
+                .await;
+            Mock::given(path("/resource/EmptyResource/get/"))
+                .respond_with(ResponseTemplate::new(403))
+                .expect(1)
+                .mount(&server)
+                .await;
+            let client = PinterestApi::new(
+                Url::parse("https://www.pinterest.com/").unwrap(),
+                Url::parse(&server.uri()).unwrap(),
+                Vec::new(),
+            )
+            .unwrap();
+            let collected = client
+                .paginate_partial("Feed", json!({"bookmarks":null}), &NoProgress)
+                .await
+                .unwrap();
+            let issue = collected.issue.unwrap();
+            assert_eq!(issue.resource, "Feed");
+            let expected_pages = if failure == "loop" { 2 } else { 1 };
+            assert_eq!(issue.pages_collected, expected_pages);
+            assert_eq!(collected.results.len(), expected_pages);
+            assert!(collected.results.iter().all(|item| item["id"] == "1"));
+            assert!(
+                client
+                    .paginate_partial("Empty", json!({}), &NoProgress)
+                    .await
+                    .is_err()
+            );
+        }
     }
 }

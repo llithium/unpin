@@ -203,6 +203,7 @@ pub async fn run_with_api_root_and_progress(
                 warnings: source_warnings,
             } => {
                 scanned_boards.push(ScannedBoard {
+                    collection_issues: source.collection_issues,
                     name: source.name,
                     url: source.url,
                     pins_reported: source.pins_reported,
@@ -219,7 +220,7 @@ pub async fn run_with_api_root_and_progress(
     let mut analysis = analysis?;
     skipped.append(&mut analysis.skipped);
     if analysis.visual_matching_incomplete {
-        warnings.push("Visual matching incomplete: the candidate safety limit was reached. Exact matches and the visual comparisons found so far are retained. Rerun with --exact-only or a lower --similarity-threshold.".into());
+        warnings.push(format!("Visual matching incomplete: the {} was reached after {} candidate pair comparisons and {} hash search visits. Exact matches and visual comparisons found so far are retained. Narrow the selected boards, use --exact-only, or lower --similarity-threshold.", analysis.matching.stop_reason.map(|reason| reason.label()).unwrap_or("safety limit"), analysis.matching.comparisons, analysis.matching.hash_visits));
     }
     if analysis.analyzed == 0 {
         return Err(AppError::NoAnalyzablePins {
@@ -257,6 +258,7 @@ pub async fn run_with_api_root_and_progress(
     };
 
     Ok(Report {
+        matching: analysis.matching,
         visual_matching_incomplete: analysis.visual_matching_incomplete,
         summary,
         exact_groups: analysis.exact_groups,

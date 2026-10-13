@@ -61,7 +61,7 @@ pub fn render_html(report: &Report) -> String {
     let quick_wins = report
         .exact_groups
         .iter()
-        .filter(|group| group.scope == MatchScope::SameBoard)
+        .filter(|group| group.scope == MatchScope::SameBoard && !group.preview_only())
         .count();
     ReportTemplate {
         report,
@@ -92,10 +92,12 @@ mod tests {
         visual_item.width = 1190;
         visual_item.byte_size = 2000;
         Report {
+            matching: Default::default(),
             visual_matching_incomplete: false,
             summary: Summary {
                 username: None,
                 boards: vec![ScannedBoard {
+                    collection_issues: Vec::new(),
                     name: "Ideas <script>alert('x')</script>".into(),
                     url: "https://www.pinterest.com/alice/ideas/".into(),
                     pins_reported: Some(5),
@@ -131,6 +133,7 @@ mod tests {
 
     fn item(id: &str, recommendation: Recommendation) -> ReportItem {
         ReportItem {
+            media_kind: crate::pinterest::MediaKind::Image,
             image_sha256: String::new(),
             pin_id: id.into(),
             pin_url: format!("https://www.pinterest.com/pin/{id}/"),
@@ -161,11 +164,11 @@ mod tests {
     fn html_contains_report_data_and_escapes_dynamic_values() {
         let html = render_html(&sample_report());
 
-        assert!(html.contains("Exact group 1"));
-        assert!(html.contains("Visual candidate 1"));
-        assert!(html.contains("These images are 98%"));
-        assert!(html.contains("These pins use the same image file."));
-        assert!(html.contains("Compare the details before choosing"));
+        assert!(html.contains("Identical images"));
+        assert!(html.contains("Similar images"));
+        assert!(html.contains("98% structural similarity"));
+        assert!(html.contains("The same image file, saved more than once."));
+        assert!(html.contains("Check the details before removing a copy"));
         assert!(html.contains("Smaller copy"));
         assert!(html.contains("https://www.pinterest.com/pin/102/"));
         assert!(html.contains("101.jpg?x=1&#38;y=2"));
@@ -198,6 +201,7 @@ mod tests {
         assert!(!single.contains("Across boards"));
 
         report.summary.boards.push(ScannedBoard {
+            collection_issues: Vec::new(),
             name: "Mood board".into(),
             url: "https://www.pinterest.com/alice/mood-board/".into(),
             pins_reported: Some(1),
@@ -214,6 +218,7 @@ mod tests {
     fn multi_board_report() -> Report {
         let mut report = sample_report();
         report.summary.boards.push(ScannedBoard {
+            collection_issues: Vec::new(),
             name: "Mood board".into(),
             url: "https://www.pinterest.com/alice/mood-board/".into(),
             pins_reported: Some(1),
@@ -270,6 +275,7 @@ mod tests {
 
         let mut multi_report = sample_report();
         multi_report.summary.boards.push(ScannedBoard {
+            collection_issues: Vec::new(),
             name: "Mood board".into(),
             url: "https://www.pinterest.com/alice/mood-board/".into(),
             pins_reported: Some(1),
@@ -303,7 +309,7 @@ mod tests {
         ));
         assert!(contains_html_fragment(
             &multi,
-            "id=\"exact-1\" data-group data-scope=\"cross-board\" data-kind=\"exact\""
+            "id=\"exact-1\" data-preview-only=\"false\" data-group data-scope=\"cross-board\" data-kind=\"exact\""
         ));
         assert!(multi.contains("data-target=\"visual-1\""));
         assert!(multi.contains("data-kind=\"visual\""));

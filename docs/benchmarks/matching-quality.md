@@ -34,3 +34,56 @@ To reproduce the recorded results:
 ```console
 UNPIN_QUALITY_RESULTS=docs/benchmarks/matching-quality.json cargo test --locked labeled_matching_quality_baseline -- --nocapture
 ```
+
+## Real-image and screenshot baseline
+
+`real-images-v1` adds 27 labeled pairs from three photographs, a scanned text
+sample, and two screenshots of the actual report. Together with the 15 synthetic
+pairs above, the repository now evaluates 42 pairs. The screenshot negative keeps
+the interface identical while replacing the photograph, exercising a similar
+layout with different meaningful content.
+
+At the unchanged thresholds, the real-image set produces:
+
+| Outcome | Pairs |
+| --- | ---: |
+| Correct matches | 10 |
+| Correct rejections | 17 |
+| False positives | 0 |
+| Missed matches | 0 |
+
+These remain small, curated transformation examples. They do not estimate
+accuracy on a Pinterest library or establish that a matching cover means its
+underlying video/carousel is interchangeable. Substantial crops and captions
+remain non-interchangeable under the conservative labeling policy.
+
+The assets, explicit pair labels, reasons, source provenance, and SHA-256 hashes
+are in `tests/fixtures/matching/corpus.json`. The evaluator checks every asset's
+hash before decoding it. See the adjacent README for rights and capture details.
+[Raw results](real-matching-quality.json) include individual hash distances and
+structural scores. The regression gate separately checks false positives and
+missed duplicates against the manifest's reviewed baseline; production matching
+thresholds were not changed.
+
+Reproduce offline:
+
+```console
+UNPIN_REAL_QUALITY_RESULTS=docs/benchmarks/real-matching-quality.json cargo test --locked labeled_real_image_matching_baseline -- --nocapture
+```
+
+To evaluate local examples of actual mistakes, copy the manifest and add assets
+and labeled pairs. An asset records its local `file`, SHA-256, author, license,
+category, and source. A pair supplies an ID, left/right asset IDs with a transform,
+`expected_match`, and a labeling reason. `original` on both sides compares two
+independently supplied images; other supported transforms are `resized`,
+`recompressed`, `crop`, and `caption_overlay`.
+
+```console
+UNPIN_QUALITY_CORPUS=/absolute/path/corpus.json cargo test --locked labeled_real_image_matching_baseline -- --nocapture
+```
+
+Exported report decisions include `not_duplicate` outcomes, image URLs, and image
+hashes to help locate examples. They are review evidence, not automatically
+trusted quality labels: inspect the actual content, store the selected images
+locally with permission/provenance, and add explicit labels to a corpus manifest.
+Evaluation never downloads exported URLs.

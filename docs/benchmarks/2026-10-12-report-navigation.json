@@ -1,0 +1,40 @@
+{
+  "baseline_revision": "7d3fe51",
+  "fixture": "Same current rendered DOM expanded to 2000 groups with content-shaped review keys; no preseeded decisions.",
+  "before": {
+    "matches": 2000,
+    "navigations": 100,
+    "elapsed_ms": [
+      90.39999997615814,
+      84,
+      80.70000004768372,
+      87.10000002384186,
+      85.79999995231628
+    ],
+    "aria_current_writes": [
+      200,
+      200,
+      200,
+      200,
+      200
+    ]
+  },
+  "after": {
+    "matches": 2000,
+    "navigations": 100,
+    "elapsed_ms": [
+      58.60000002384186,
+      60.39999997615814,
+      62.700000047683716,
+      62.300000071525574,
+      59.300000071525574
+    ],
+    "aria_current_writes": [
+      200,
+      200,
+      200,
+      200,
+      200
+    ]
+  }
+}

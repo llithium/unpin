@@ -68,6 +68,10 @@ pub enum ProgressStep {
         total: usize,
         lifecycle: Lifecycle,
     },
+    MatchingProgress {
+        comparisons: usize,
+        hash_visits: usize,
+    },
     Matching {
         lifecycle: Lifecycle,
     },
@@ -689,6 +693,15 @@ impl Progress for TerminalProgress {
                 self.finish_sections(&mut state);
                 Self::finish_slot(&mut state.images, "Images analyzed".into());
                 state.matching = Some(self.add_active_row("Comparing image fingerprints".into()));
+            }
+            ProgressStep::MatchingProgress {
+                comparisons,
+                hash_visits,
+            } => {
+                let state = self.state.lock().unwrap();
+                if let Some(bar) = &state.matching {
+                    bar.set_message(format!("Comparing images ({comparisons} candidate pairs, {hash_visits} hash visits)"));
+                }
             }
             ProgressStep::Matching {
                 lifecycle: Lifecycle::Completed,

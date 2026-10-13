@@ -139,8 +139,12 @@ unpin render scan.json --output review.html --no-open
 ```
 
 Output files are written atomically and existing files are never overwritten.
-The JSON format carries `schema_version: 1`; the render command rejects
-unversioned or unsupported versions. Rendering needs no Pinterest session,
+New JSON reports carry `schema_version: 2`, including media types, stable source
+identities, matching-work counters, and structured `collection_issues` on affected
+boards. The render command accepts versions 1 and 2 and rejects unversioned or
+unsupported versions. Version 1 items without media metadata are labeled unknown
+and require content inspection instead of receiving deletion recommendations.
+Rendering needs no Pinterest session,
 although viewing the remote preview images still needs network access.
 
 Run `unpin --help` for the complete interface.
@@ -190,26 +194,42 @@ Run `unpin --help` for the complete interface.
   it. Fingerprint entries live in an unpin-owned subdirectory beneath that root.
   The entry format is versioned; upgrading `unpin` past a format change means
   one full re-download before the cache is warm again.
-- The visual report keeps reviewed-group marks in this browser's local storage.
-  A later run for the same scan sources keeps marks for unchanged matches.
-  New matches and matches with changed pin membership or image content remain
-  unreviewed; removed matches are discarded. Upgrading from older reports
-  resets review marks once because their identities did not include image content.
-  Reused reviewed groups are hidden by default, and `Reset` or
-  `Unreviewed only` controls the current report. Review changes and resets can
-  be undone with `Undo`; `Show all matches` clears filters without clearing marks.
-  If browser storage is unavailable, the report displays a notice and keeps
-  progress for the current page session.
+- The visual report stores decisions for unchanged matches across board selections
+  and board renames in this browser. Decisions include reviewed, keep all saves,
+  decide later, not a duplicate, and selected copies flagged for removal. Removal
+  flags stay editable until you choose `Save decision`; `Done` marks a comparison
+  reviewed, and `Keep all` records that choice directly. `More` contains
+  decide-later, not-duplicate, and clear-decision actions. Decide-later matches
+  stay in the unreviewed queue. Changed image content, media types, or saved-pin
+  membership produce a new review item.
+  Pin IDs and media types are under each pin's `Details`; backup and scan details
+  are under `Report tools`. `Export decisions` backs up the browser's decision history as JSON, including
+  pin/image links, image fingerprints, and media types. `Import decisions`
+  validates the whole file, merges matching decisions, and retains decisions for
+  matches outside the current report. Imports, resets, and decision changes can
+  be undone while the confirmation is visible. Confirmations dismiss after five
+  seconds, pause while hovered or keyboard-focused, and can be closed with × or
+  Escape. Reset clears only decisions in the current report; other open
+  reports merge changes instead of overwriting unrelated decisions.
+  Review storage from older versions resets once because the identities and
+  decision format changed. Browser handling of local-file storage varies; use
+  export/import when moving browsers, machines, or isolated local-file storage.
+  If storage is unavailable, a notice explains that progress lasts only for the
+  current session. Export still works.
 - Identical downloaded bytes are grouped using SHA-256.
 - Other images first become candidates when their 64-bit difference hashes are
   within the selected threshold and their aspect ratios differ by no more than
   one percent. A second 64×64 contrast-normalized structural comparison must
   then score at least 97%, which rejects unrelated images with similar broad
   light/dark layouts.
-- Visual matching stops adding comparisons at its safety limit. The report
+- Visual matching stops at 250,000 candidate-pair checks, 2,000,000 hash-tree
+  node visits, or the report-size limit of 100,000 candidates / 200,000 saved-pin
+  references. Rejected pairs also consume the work budget, and hash queries
+  stream results rather than allocating entire candidate lists. The report
   retains exact matches and visual comparisons found so far, prominently marks
-  visual matching incomplete, and sets `visual_matching_incomplete` in JSON.
-  Rerun with `--exact-only` or a lower `--similarity-threshold` to narrow the review.
+  visual matching incomplete, and records its counters and stop reason in JSON.
+  Narrow selected boards, use `--exact-only`, or lower `--similarity-threshold`
+  to reduce matching work.
 - Byte-identical saves of each visual variant share one comparison per board
   pair. Each side shows one preview and expandable links to its additional
   saves. JSON retains representatives in `items` and additional saves in the
@@ -217,12 +237,23 @@ Run `unpin --help` for the complete interface.
   images are never merged through transitive matches.
 - Rankings use decoded pixel area, longest edge, and file size—in that order.
 
+If pagination fails after successful pages, board, section, and profile pin
+feeds retain the collected results and report the failed resource, number of
+successful pages, and reason. Successful sections also survive a failed main
+board feed. Incomplete collection is called out in text, HTML, and JSON; a
+failure before any usable results still fails that source. Scans do not resume
+bookmarks across runs.
+
 Story/idea pins are analyzed through their static original cover when one is
 available. Video pins use their static preview or poster, and carousel pins use
 the first valid carousel slide as their representative preview. Pins without a
 usable preview and failed downloads appear in the skipped list rather than
-aborting an otherwise useful scan. Interactive text groups large skipped sets
-by reason; JSON and the HTML report retain every individual skipped-pin record.
+aborting an otherwise useful scan. Media type is retained through saved reports.
+Any match containing a video poster, story cover, carousel cover, or unknown
+media type is labeled as matching covers and uses `INSPECT` instead of keep/delete
+recommendations. Such matches are excluded from Quick wins. The structural
+similarity percentage is a comparison score, not a probability that deletion is
+safe. Interactive text groups large skipped sets by reason; JSON and the HTML report retain every individual skipped-pin record.
 
 ## Limitations
 
@@ -270,6 +301,10 @@ Pull requests run both the Rust and browser verification gates in CI.
 Tests use local mock HTTP servers and do not contact Pinterest. A live smoke
 test can be added separately and should remain opt-in.
 
-The deterministic [matching-quality baseline](docs/benchmarks/matching-quality.md)
-covers resizing, recompression, crops, caption overlays, and changed objects
-with similar layouts. Run it with `cargo test labeled_matching_quality_baseline`.
+The [matching-quality baselines](docs/benchmarks/matching-quality.md) cover 15
+synthetic pairs and 27 pairs based on real photographs, scanned text, and report
+screenshots. They exercise resizing, recompression, crops, captions, and changed
+content in similar layouts. Run both with `cargo test --locked labeled_`.
+Fixtures are checked in with provenance and SHA-256 hashes; evaluation is offline.
+A local `UNPIN_QUALITY_CORPUS` manifest can add labeled examples of actual review
+mistakes without changing production thresholds.

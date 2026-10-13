@@ -13,7 +13,7 @@ use crate::image_fingerprint::MAX_DECODED_PIXELS;
 use crate::pinterest_api::PinterestApi;
 use crate::progress::{Lifecycle, NoProgress, Progress, ProgressStep, SetupTask};
 
-pub use crate::pinterest_api::PinterestError;
+pub use crate::pinterest_api::{CollectionIssue, PinterestError};
 
 const DEFAULT_ROOT: &str = "https://www.pinterest.com/";
 /// Profile board listings are independent items, so use the largest page size
@@ -291,8 +291,50 @@ fn reject_url_userinfo(url: &Url) -> Result<(), PinterestError> {
     Ok(())
 }
 
+/// The content represented by the analyzed image. Covers never prove that the
+/// underlying video, story, or carousel is interchangeable.
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, Eq, PartialEq, Ord, PartialOrd)]
+#[serde(rename_all = "snake_case")]
+pub enum MediaKind {
+    Image,
+    Video,
+    Carousel,
+    Story,
+    /// Older saved reports did not retain media type.
+    #[default]
+    Unknown,
+}
+
+impl MediaKind {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Image => "image",
+            Self::Video => "video",
+            Self::Carousel => "carousel",
+            Self::Story => "story",
+            Self::Unknown => "unknown",
+        }
+    }
+
+    pub fn requires_inspection(self) -> bool {
+        self != Self::Image
+    }
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Image => "Image",
+            Self::Video => "Video poster",
+            Self::Carousel => "Carousel cover",
+            Self::Story => "Story cover",
+            Self::Unknown => "Media type unknown",
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, Eq, PartialEq)]
 pub struct Pin {
+    #[serde(default)]
+    pub media_kind: MediaKind,
     pub id: String,
     pub media_url: String,
     /// Stable provider identity for the source this pin came from. It is kept
@@ -336,12 +378,25 @@ pub struct BoardRef {
 
 #[derive(Debug, Clone)]
 pub struct BoardPins {
+    pub collection_issues: Vec<CollectionIssue>,
     pub board_name: String,
     pub pins_reported: Option<usize>,
     pub pins_found: usize,
     pub pins: Vec<Pin>,
     pub skipped: Vec<SkippedPin>,
     pub warnings: Vec<String>,
+}
+
+impl BoardPins {
+    fn add_collection_issues(&mut self, issues: Vec<CollectionIssue>) {
+        self.warnings.extend(issues.iter().map(|issue| {
+            format!(
+                "Incomplete {} collection after {} page(s): {}. Collected pins are retained.",
+                issue.resource, issue.pages_collected, issue.reason,
+            )
+        }));
+        self.collection_issues.extend(issues);
+    }
 }
 
 #[derive(Clone)]
@@ -577,9 +632,9 @@ impl PinterestClient {
         seen_pin_ids: &mut HashSet<String>,
         progress: &dyn Progress,
     ) -> Result<BoardPins, PinterestError> {
-        let raw_pins = self
+        let collected = self
             .api
-            .paginate(
+            .paginate_partial(
                 "UserPins",
                 json!({
                     "username": target.username,
@@ -594,19 +649,22 @@ impl PinterestClient {
         // UserPins is the account-wide saved-pin feed. Pinterest identifies
         // pins shown under "Unorganized ideas" by assigning them to its hidden
         // Quick Saves board, so discard ordinary board pins here.
-        let raw_pins = raw_pins
+        let raw_pins = collected
+            .results
             .into_iter()
             .filter(is_unorganized_pin)
             .collect::<Vec<_>>();
-        let pins_reported = Some(raw_pins.len());
+        let pins_reported = collected.issue.is_none().then_some(raw_pins.len());
         let source_id = format!("unorganized:{}", target.username);
-        self.parse_pins(
+        let mut parsed = self.parse_pins(
             raw_pins,
             "Unorganized ideas",
             &source_id,
             pins_reported,
             seen_pin_ids,
-        )
+        )?;
+        parsed.add_collection_issues(collected.issue.into_iter().collect());
+        Ok(parsed)
     }
 
     /// Fetches every pin in a board, including its sections.
@@ -619,7 +677,7 @@ impl PinterestClient {
         seen_pin_ids: &mut HashSet<String>,
         progress: &dyn Progress,
     ) -> Result<BoardPins, PinterestError> {
-        let board_feed = self.api.paginate(
+        let board_feed = self.api.paginate_partial(
             "BoardFeed",
             json!({
                 "board_id": board.id,
@@ -635,32 +693,50 @@ impl PinterestClient {
         // the whole section pipeline in its own future so section pin pages can
         // start as soon as discovery completes, even while BoardFeed is still
         // walking its bookmark chain.
-        let (raw_pins, warnings) = if board.section_count > 0 {
-            // Sections are supplementary to the main board feed. Keep a
-            // failure in that optional pipeline as a warning so an otherwise
-            // usable board still contributes its main-feed pins.
-            let section_pins = async {
-                match self
-                    .api
-                    .paginate("BoardSections", json!({ "board_id": board.id }), progress)
-                    .await
-                {
-                    Ok(sections) => {
-                        Ok::<_, PinterestError>(self.fetch_section_pins(sections, progress).await)
-                    }
-                    Err(error) => Ok((
-                        Vec::new(),
-                        vec![format!("board sections could not be fetched: {error}")],
-                    )),
+        let section_pins = async {
+            if board.section_count == 0 {
+                return (Vec::new(), Vec::new(), Vec::new());
+            }
+            match self
+                .api
+                .paginate_partial("BoardSections", json!({ "board_id": board.id }), progress)
+                .await
+            {
+                Ok(sections) => {
+                    let (pins, warnings, mut issues) =
+                        self.fetch_section_pins(sections.results, progress).await;
+                    issues.extend(sections.issue);
+                    (pins, warnings, issues)
                 }
-            };
-            let (raw_pins, (section_pins, warnings)) = tokio::try_join!(board_feed, section_pins)?;
-            let mut raw_pins = raw_pins;
-            raw_pins.extend(section_pins);
-            (raw_pins, warnings)
-        } else {
-            (board_feed.await?, Vec::new())
+                Err(error) => (
+                    Vec::new(),
+                    Vec::new(),
+                    vec![CollectionIssue {
+                        resource: "BoardSections".into(),
+                        pages_collected: 0,
+                        reason: format!("board sections could not be fetched: {error}"),
+                    }],
+                ),
+            }
         };
+        let (feed, (section_pins, warnings, mut issues)) = tokio::join!(board_feed, section_pins);
+        let mut raw_pins = match feed {
+            Ok(feed) => {
+                issues.extend(feed.issue);
+                feed.results
+            }
+            // Successful sections remain useful even when the main feed fails.
+            Err(error) if !section_pins.is_empty() => {
+                issues.push(CollectionIssue {
+                    resource: "BoardFeed".into(),
+                    pages_collected: 0,
+                    reason: error.to_string(),
+                });
+                Vec::new()
+            }
+            Err(error) => return Err(error),
+        };
+        raw_pins.extend(section_pins);
 
         let mut parsed = self.parse_pins(
             raw_pins,
@@ -670,6 +746,7 @@ impl PinterestClient {
             seen_pin_ids,
         )?;
         parsed.warnings.splice(0..0, warnings);
+        parsed.add_collection_issues(issues);
         Ok(parsed)
     }
 
@@ -680,7 +757,8 @@ impl PinterestClient {
         &self,
         sections: Vec<Value>,
         progress: &dyn Progress,
-    ) -> (Vec<Value>, Vec<String>) {
+    ) -> (Vec<Value>, Vec<String>, Vec<CollectionIssue>) {
+        let mut issues = Vec::new();
         let mut section_ids = Vec::new();
         let mut warnings = Vec::new();
         for section in sections {
@@ -715,7 +793,7 @@ impl PinterestClient {
                     });
                     let fetched = self
                         .api
-                        .paginate(
+                        .paginate_partial(
                             "BoardSectionPins",
                             json!({
                                 "section_id": id,
@@ -743,13 +821,23 @@ impl PinterestClient {
         let mut raw_pins = Vec::new();
         for (_, id, fetched) in fetched_sections {
             match fetched {
-                Ok(pins) => raw_pins.extend(pins),
+                Ok(pins) => {
+                    raw_pins.extend(pins.results);
+                    issues.extend(pins.issue.map(|mut issue| {
+                        issue.resource = format!("{} section {id}", issue.resource);
+                        issue
+                    }));
+                }
                 Err(error) => {
-                    warnings.push(format!("board section {id} could not be fetched: {error}"))
+                    issues.push(CollectionIssue {
+                        resource: format!("BoardSectionPins section {id}"),
+                        pages_collected: 0,
+                        reason: format!("board section {id} could not be fetched: {error}"),
+                    });
                 }
             }
         }
-        (raw_pins, warnings)
+        (raw_pins, warnings, issues)
     }
 
     fn parse_pins(
@@ -797,6 +885,7 @@ impl PinterestClient {
         }
 
         Ok(BoardPins {
+            collection_issues: Vec::new(),
             board_name: source_name.to_owned(),
             pins_reported,
             pins_found,
@@ -918,6 +1007,15 @@ fn parse_pin(raw: &Value, board_name: &str) -> Result<Pin, String> {
         .to_owned();
 
     Ok(Pin {
+        media_kind: if is_carousel {
+            MediaKind::Carousel
+        } else if is_video {
+            MediaKind::Video
+        } else if is_story {
+            MediaKind::Story
+        } else {
+            MediaKind::Image
+        },
         id,
         media_url,
         source_id: None,
@@ -1374,6 +1472,7 @@ mod tests {
         )
         .unwrap();
         assert_eq!(pin.id, "123");
+        assert_eq!(pin.media_kind, MediaKind::Image);
         assert_eq!(pin.board.as_deref(), Some("Ideas"));
 
         let video = parse_pin(
@@ -1391,6 +1490,7 @@ mod tests {
         )
         .unwrap();
         assert_eq!(video.media_url, "https://example.com/poster.jpg");
+        assert_eq!(video.media_kind, MediaKind::Video);
 
         let carousel = parse_pin(
             &json!({
@@ -1410,6 +1510,7 @@ mod tests {
         )
         .unwrap();
         assert_eq!(carousel.media_url, "https://example.com/slide-1.jpg");
+        assert_eq!(carousel.media_kind, MediaKind::Carousel);
     }
 
     #[test]

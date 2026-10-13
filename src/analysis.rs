@@ -23,7 +23,7 @@ use image::DynamicImage;
 use std::io::Cursor;
 
 use crate::image_fingerprint::{ImageFingerprint, MAX_DECODED_PIXELS};
-use crate::pinterest::{Pin, SkippedPin};
+use crate::pinterest::{MediaKind, Pin, SkippedPin};
 use crate::progress::{Lifecycle, NoProgress, Progress, ProgressStep};
 use crate::report::{
     DuplicateGroup, MatchScope, Recommendation, ReportItem, VisualCandidate, rank_tuple,
@@ -49,6 +49,53 @@ const MIN_STRUCTURAL_SIMILARITY: f64 = 0.97;
 /// otherwise grow quadratically when a permissive similarity threshold is
 /// selected. Retain a bounded partial review queue instead of exhausting memory.
 const MAX_VISUAL_CANDIDATES: usize = 100_000;
+const MAX_VISUAL_COMPARISONS: usize = 250_000;
+const MAX_HASH_VISITS: usize = 2_000_000;
+
+#[derive(Debug, Clone, Copy)]
+struct MatchingLimits {
+    candidates: usize,
+    comparisons: usize,
+    hash_visits: usize,
+}
+
+impl Default for MatchingLimits {
+    fn default() -> Self {
+        Self {
+            candidates: MAX_VISUAL_CANDIDATES,
+            comparisons: MAX_VISUAL_COMPARISONS,
+            hash_visits: MAX_HASH_VISITS,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, Eq, PartialEq)]
+#[serde(rename_all = "snake_case")]
+pub enum MatchingLimit {
+    ReportSize,
+    Comparisons,
+    HashSearch,
+}
+
+impl MatchingLimit {
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::ReportSize => "report size limit",
+            Self::Comparisons => "candidate comparison limit",
+            Self::HashSearch => "hash search limit",
+        }
+    }
+}
+
+#[derive(Debug, Default, Clone, Serialize, Deserialize, Eq, PartialEq)]
+pub struct MatchingStats {
+    pub comparisons: usize,
+    #[serde(default)]
+    pub structural_comparisons: usize,
+    pub hash_visits: usize,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub stop_reason: Option<MatchingLimit>,
+}
 /// Aspect-ratio buckets are expressed in log space so the same relative
 /// tolerance works for portrait, landscape, and square images. A ±3 lookup
 /// covers every pair allowed by the one-percent final check below.
@@ -72,6 +119,7 @@ fn cpu_concurrency() -> usize {
 
 #[derive(Debug)]
 pub struct AnalysisResult {
+    pub matching: MatchingStats,
     pub analyzed: usize,
     pub exact_groups: Vec<DuplicateGroup>,
     pub visual_candidates: Vec<VisualCandidate>,
@@ -87,6 +135,7 @@ pub enum AnalysisError {
 
 #[derive(Debug, Clone)]
 struct AnalyzedImage {
+    media_kind: MediaKind,
     pin_id: String,
     pin_url: String,
     board: Option<String>,
@@ -266,6 +315,7 @@ pub(crate) fn default_fingerprint_cache_dir() -> Option<PathBuf> {
 impl AnalyzedImage {
     fn report_item(&self, recommendation: Recommendation) -> ReportItem {
         ReportItem {
+            media_kind: self.media_kind,
             image_sha256: self.fingerprint.sha256.clone(),
             pin_id: self.pin_id.clone(),
             pin_url: self.pin_url.clone(),
@@ -533,15 +583,16 @@ async fn analyze_batches_with_limits(
         lifecycle: Lifecycle::Started,
     });
     let exact_groups = build_exact_groups(&images);
-    let mut visual_matching_incomplete = false;
+    let mut matching = MatchingStats::default();
     let visual_candidates = if exact_only {
         Vec::new()
     } else {
-        build_visual_candidates_bounded(
+        build_visual_candidates_with_limits(
             &images,
             similarity_threshold,
-            MAX_VISUAL_CANDIDATES,
-            &mut visual_matching_incomplete,
+            MatchingLimits::default(),
+            progress,
+            &mut matching,
         )
     };
     progress.step(ProgressStep::Matching {
@@ -549,7 +600,8 @@ async fn analyze_batches_with_limits(
     });
 
     Ok(AnalysisResult {
-        visual_matching_incomplete,
+        visual_matching_incomplete: matching.stop_reason.is_some(),
+        matching,
         analyzed: images.len(),
         exact_groups,
         visual_candidates,
@@ -593,6 +645,7 @@ fn analyzed_images(
 ) -> Vec<AnalyzedImage> {
     pins.into_iter()
         .map(|pin| AnalyzedImage {
+            media_kind: pin.media_kind,
             pin_url: pin.pin_url(),
             pin_id: pin.id,
             board: pin.board,
@@ -875,11 +928,34 @@ fn build_visual_candidates(images: &[AnalyzedImage], threshold: u8) -> Vec<Visua
     build_visual_candidates_bounded(images, threshold, MAX_VISUAL_CANDIDATES, &mut false)
 }
 
+#[cfg(test)]
 fn build_visual_candidates_bounded(
     images: &[AnalyzedImage],
     threshold: u8,
     max_candidates: usize,
     incomplete: &mut bool,
+) -> Vec<VisualCandidate> {
+    let mut stats = MatchingStats::default();
+    let candidates = build_visual_candidates_with_limits(
+        images,
+        threshold,
+        MatchingLimits {
+            candidates: max_candidates,
+            ..MatchingLimits::default()
+        },
+        &NoProgress,
+        &mut stats,
+    );
+    *incomplete = stats.stop_reason.is_some();
+    candidates
+}
+
+fn build_visual_candidates_with_limits(
+    images: &[AnalyzedImage],
+    threshold: u8,
+    limits: MatchingLimits,
+    progress: &dyn Progress,
+    stats: &mut MatchingStats,
 ) -> Vec<VisualCandidate> {
     // Compare each unique fingerprint once, then split its saves by source
     // for unambiguous board scopes. Never infer transitive visual similarity.
@@ -922,13 +998,42 @@ fn build_visual_candidates_bounded(
         let bucket = aspect_ratio_bucket(image);
         for offset in -ASPECT_RATIO_BUCKET_RADIUS..=ASPECT_RATIO_BUCKET_RADIUS {
             if let Some(tree) = trees.get(&(bucket + offset)) {
-                for other_group_index in tree.query(image.fingerprint.difference_hash, threshold) {
+                for step in tree.search(image.fingerprint.difference_hash, threshold) {
+                    let other_group_index = match step {
+                        SearchStep::Node => {
+                            if stats.hash_visits == limits.hash_visits {
+                                stats.stop_reason = Some(MatchingLimit::HashSearch);
+                                break 'matching;
+                            }
+                            stats.hash_visits += 1;
+                            if stats.hash_visits.is_multiple_of(10_000) {
+                                progress.step(ProgressStep::MatchingProgress {
+                                    comparisons: stats.comparisons,
+                                    hash_visits: stats.hash_visits,
+                                });
+                            }
+                            continue;
+                        }
+                        SearchStep::Match(index) => index,
+                    };
                     let other_members = &fingerprint_groups[other_group_index];
                     let other_index = other_members[0];
                     let other = &images[other_index];
+                    if stats.comparisons == limits.comparisons {
+                        stats.stop_reason = Some(MatchingLimit::Comparisons);
+                        break 'matching;
+                    }
+                    stats.comparisons += 1;
+                    if stats.comparisons == 1 || stats.comparisons.is_multiple_of(1000) {
+                        progress.step(ProgressStep::MatchingProgress {
+                            comparisons: stats.comparisons,
+                            hash_visits: stats.hash_visits,
+                        });
+                    }
                     if !aspect_ratios_match(image, other) {
                         continue;
                     }
+                    stats.structural_comparisons += 1;
                     let structural_similarity =
                         image.fingerprint.visual_similarity(&other.fingerprint);
                     if structural_similarity < MIN_STRUCTURAL_SIMILARITY {
@@ -946,17 +1051,27 @@ fn build_visual_candidates_bounded(
                             // Grouped saves must also respect the old per-pin memory
                             // budget; a small card count can still contain many links.
                             let item_count = members.len().saturating_add(other_members.len());
-                            if candidates.len() >= max_candidates
+                            if candidates.len() >= limits.candidates
                                 || item_count
-                                    > max_candidates
+                                    > limits
+                                        .candidates
                                         .saturating_mul(2)
                                         .saturating_sub(candidate_items)
                             {
-                                *incomplete = true;
+                                stats.stop_reason = Some(MatchingLimit::ReportSize);
                                 break 'matching;
                             }
                             candidate_items += item_count;
-                            let ranked = ranked_items(images, &[other_index, index]);
+                            let mut ranked = ranked_items(images, &[other_index, index]);
+                            if members
+                                .iter()
+                                .chain(other_members.iter())
+                                .any(|member| images[*member].media_kind.requires_inspection())
+                            {
+                                for item in &mut ranked {
+                                    item.recommendation = Recommendation::InspectContent;
+                                }
+                            }
                             let items: [ReportItem; 2] =
                                 ranked.try_into().expect("two representatives");
                             let member_sets = if items[0].pin_id == images[other_index].pin_id {
@@ -992,6 +1107,10 @@ fn build_visual_candidates_bounded(
             .insert(image.fingerprint.difference_hash, group_index);
     }
 
+    progress.step(ProgressStep::MatchingProgress {
+        comparisons: stats.comparisons,
+        hash_visits: stats.hash_visits,
+    });
     candidates.sort_by(|left, right| {
         left.scope
             .sort_priority()
@@ -1030,6 +1149,9 @@ fn ranked_items(images: &[AnalyzedImage], members: &[usize]) -> Vec<ReportItem> 
         .then_with(|| images[*left].pin_id.cmp(&images[*right].pin_id))
     });
 
+    let requires_inspection = members
+        .iter()
+        .any(|index| images[*index].media_kind.requires_inspection());
     let best_rank = rank_tuple(
         images[sorted[0]].fingerprint.width,
         images[sorted[0]].fingerprint.height,
@@ -1050,7 +1172,9 @@ fn ranked_items(images: &[AnalyzedImage], members: &[usize]) -> Vec<ReportItem> 
         .into_iter()
         .enumerate()
         .map(|(position, index)| {
-            let recommendation = if position < best_count && best_count > 1 {
+            let recommendation = if requires_inspection {
+                Recommendation::InspectContent
+            } else if position < best_count && best_count > 1 {
                 Recommendation::Tie
             } else if position == 0 {
                 Recommendation::Keep
@@ -1060,6 +1184,11 @@ fn ranked_items(images: &[AnalyzedImage], members: &[usize]) -> Vec<ReportItem> 
             images[index].report_item(recommendation)
         })
         .collect()
+}
+
+enum SearchStep {
+    Node,
+    Match(usize),
 }
 
 #[derive(Debug, Default)]
@@ -1109,24 +1238,37 @@ impl BkTree {
         }
     }
 
-    fn query(&self, hash: u64, threshold: u8) -> Vec<usize> {
-        if self.nodes.is_empty() {
-            return Vec::new();
-        }
-
-        let mut results = Vec::new();
-        let mut stack = vec![0];
-        while let Some(node_index) = stack.pop() {
-            let node = &self.nodes[node_index];
+    fn search(&self, hash: u64, threshold: u8) -> impl Iterator<Item = SearchStep> + '_ {
+        let mut stack = if self.nodes.is_empty() {
+            Vec::new()
+        } else {
+            vec![0]
+        };
+        let mut pending = [].iter();
+        std::iter::from_fn(move || {
+            if let Some(index) = pending.next() {
+                return Some(SearchStep::Match(*index));
+            }
+            let node = &self.nodes[stack.pop()?];
             let distance = (hash ^ node.hash).count_ones() as u8;
             if distance <= threshold {
-                results.extend(node.image_indices.iter().copied());
+                pending = node.image_indices.iter();
             }
             let lower = distance.saturating_sub(threshold);
             let upper = distance.saturating_add(threshold);
             stack.extend(node.children.range(lower..=upper).map(|(_, child)| *child));
-        }
-        results
+            Some(SearchStep::Node)
+        })
+    }
+
+    #[cfg(test)]
+    fn query(&self, hash: u64, threshold: u8) -> Vec<usize> {
+        self.search(hash, threshold)
+            .filter_map(|step| match step {
+                SearchStep::Match(index) => Some(index),
+                SearchStep::Node => None,
+            })
+            .collect()
     }
 }
 
@@ -1156,6 +1298,7 @@ mod tests {
         let (structural_sum, structural_sum_squares) =
             test_structural_statistics(&structural_signature);
         AnalyzedImage {
+            media_kind: crate::pinterest::MediaKind::Image,
             pin_id: id.into(),
             pin_url: format!("https://www.pinterest.com/pin/{id}/"),
             board: None,
@@ -1173,6 +1316,106 @@ mod tests {
                 visual_ready: true,
             },
         }
+    }
+
+    #[test]
+    fn rejected_pairs_consume_the_comparison_budget_and_hash_search_is_bounded() {
+        let images: Vec<_> = (0..20)
+            .map(|index| {
+                let mut image = analyzed(&index.to_string(), 100, 100, 1000, 0);
+                let mut signature = vec![0; 64];
+                signature[index] = 255;
+                let (sum, squares) = test_structural_statistics(&signature);
+                image.fingerprint.structural_signature = signature.into();
+                image.fingerprint.structural_sum = sum;
+                image.fingerprint.structural_sum_squares = squares;
+                image
+            })
+            .collect();
+        let mut stats = MatchingStats::default();
+        let candidates = build_visual_candidates_with_limits(
+            &images,
+            5,
+            MatchingLimits {
+                comparisons: 3,
+                ..MatchingLimits::default()
+            },
+            &NoProgress,
+            &mut stats,
+        );
+        assert!(
+            candidates.is_empty(),
+            "rejected pairs must still count as work"
+        );
+        assert_eq!(stats.comparisons, 3);
+        assert_eq!(stats.stop_reason, Some(MatchingLimit::Comparisons));
+        let mut stats = MatchingStats::default();
+        build_visual_candidates_with_limits(
+            &images,
+            64,
+            MatchingLimits {
+                hash_visits: 1,
+                ..MatchingLimits::default()
+            },
+            &NoProgress,
+            &mut stats,
+        );
+        assert_eq!(stats.hash_visits, 1);
+        assert_eq!(stats.stop_reason, Some(MatchingLimit::HashSearch));
+    }
+
+    #[test]
+    fn aspect_ratio_rejections_also_consume_the_work_budget() {
+        let images = [
+            analyzed("1", 1000, 1000, 1000, 0),
+            analyzed("2", 1014, 1000, 1000, 0),
+        ];
+        let mut stats = MatchingStats::default();
+        let candidates = build_visual_candidates_with_limits(
+            &images,
+            5,
+            MatchingLimits {
+                comparisons: 0,
+                ..MatchingLimits::default()
+            },
+            &NoProgress,
+            &mut stats,
+        );
+        assert!(candidates.is_empty());
+        assert_eq!(stats.stop_reason, Some(MatchingLimit::Comparisons));
+        assert_eq!(stats.structural_comparisons, 0);
+    }
+
+    #[test]
+    fn identical_covers_and_visual_copies_require_inspection_for_the_entire_match() {
+        let mut photo = analyzed("1", 100, 100, 2000, 0);
+        let mut poster = photo.clone();
+        poster.pin_id = "2".into();
+        poster.media_kind = MediaKind::Video;
+        let exact = build_exact_groups(&[photo.clone(), poster.clone()]);
+        assert_eq!(exact.len(), 1);
+        assert!(
+            exact[0]
+                .items
+                .iter()
+                .all(|item| item.recommendation == Recommendation::InspectContent)
+        );
+        // A cover hidden among additional byte-identical saves must also make
+        // both visual representatives inspection-only.
+        let mut variant = photo.clone();
+        variant.pin_id = "3".into();
+        variant.fingerprint.sha256 = "variant".into();
+        photo.fingerprint.sha256 = "base".into();
+        poster.fingerprint.sha256 = "base".into();
+        let visual = build_visual_candidates(&[photo, poster, variant], 5);
+        assert_eq!(visual.len(), 1);
+        assert!(
+            visual[0]
+                .items
+                .iter()
+                .chain(visual[0].copies.iter().flatten())
+                .all(|item| item.recommendation == Recommendation::InspectContent)
+        );
     }
 
     fn test_structural_statistics(signature: &[u8]) -> (u64, u64) {
@@ -1198,6 +1441,7 @@ mod tests {
             .mount(&server)
             .await;
         let pin = |id: &str| Pin {
+            media_kind: crate::pinterest::MediaKind::Image,
             id: id.into(),
             media_url: format!("{}/image.png", server.uri()),
             board: Some(id.into()),
@@ -1458,6 +1702,7 @@ mod tests {
         let media_url = "http://127.0.0.1:9/should-not-be-requested.png";
         FingerprintCache::new(directory.path().to_path_buf()).put(media_url, &fingerprint());
         let pin = Pin {
+            media_kind: crate::pinterest::MediaKind::Image,
             id: "cached-pin".into(),
             media_url: media_url.into(),
             source_id: None,
@@ -1491,6 +1736,7 @@ mod tests {
             Some(fallback_url)
         );
         let pin = Pin {
+            media_kind: crate::pinterest::MediaKind::Image,
             id: "cached-fallback-pin".into(),
             media_url: original_url.into(),
             source_id: None,
@@ -1525,6 +1771,7 @@ mod tests {
             .await;
 
         let pin = Pin {
+            media_kind: crate::pinterest::MediaKind::Image,
             id: "oversized-pin".into(),
             media_url: format!("{}/oversized", server.uri()),
             source_id: None,
@@ -1710,6 +1957,7 @@ mod tests {
             .await;
 
         let pin = Pin {
+            media_kind: crate::pinterest::MediaKind::Image,
             id: "too-many-pixels".into(),
             media_url: format!("{}/too-many-pixels.png", server.uri()),
             source_id: None,
@@ -1819,6 +2067,7 @@ mod tests {
 
         let pins = (0..total)
             .map(|index| Pin {
+                media_kind: crate::pinterest::MediaKind::Image,
                 id: format!("pin-{index}"),
                 media_url: format!("{}/image/{index}.png", server.uri()),
                 source_id: None,

@@ -340,7 +340,7 @@ async fn scans_paginated_board_and_sections_end_to_end() {
     let visual_path = unpin::visual::create_temporary_report(&report).unwrap();
     assert!(visual_path.starts_with(std::env::temp_dir()));
     let visual_html = std::fs::read_to_string(&visual_path).unwrap();
-    assert!(visual_html.contains("Exact group 1"));
+    assert!(visual_html.contains("Identical images"));
     assert!(visual_html.contains(&format!("{}/image.png", server.uri())));
     let json = report.render_json().unwrap();
     assert!(json.contains("\"exact_groups\""));
@@ -1631,4 +1631,76 @@ fn authenticated_pinterest_requests_require_same_origin_https_api_roots() {
         insecure,
         Err(PinterestError::InsecureCookieTransport)
     ));
+}
+
+#[tokio::test]
+async fn late_feed_failures_retain_pins_and_media_metadata_in_saved_reports() {
+    let server = MockServer::start().await;
+    mount_resource(&server, "Board", json!({"slug":"ideas", "username":"alice", "field_set_key":"detailed"}),
+        json!({"resource_response":{"data":{"id":"board-1", "name":"Ideas", "pin_count":4, "section_count":1}}})).await;
+    let media = format!("{}/image.png", server.uri());
+    let first_options = json!({"board_id":"board-1", "field_set_key":"react_grid_pin", "prepend":false,
+        "page_size":250, "bookmarks":null});
+    let mut next_options = first_options.clone();
+    next_options["bookmarks"] = json!(["next"]);
+    mount_resource(
+        &server,
+        "BoardFeed",
+        first_options,
+        page(
+            json!([
+                {"id":"1", "images":{"orig":{"url":media, "width":16, "height":12}}},
+                {"id":"2", "is_video":true,"images":{"orig":{"url":media, "width":16, "height":12}}}
+            ]),
+            "next",
+        ),
+    )
+    .await;
+    Mock::given(path("/resource/BoardFeedResource/get/"))
+        .and(query_param("data", request_data(next_options)))
+        .respond_with(ResponseTemplate::new(403))
+        .expect(1)
+        .mount(&server)
+        .await;
+    mount_resource(
+        &server,
+        "BoardSections",
+        json!({"board_id":"board-1"}),
+        page(json!([{"id":"section-1"}]), "-end-"),
+    )
+    .await;
+    mount_resource(&server, "BoardSectionPins", json!({"section_id":"section-1", "page_size":50, "bookmarks":null}),
+        page(json!([{"id":"3", "carousel_data":{"carousel_slots":[{"images":{"orig":{"url":media, "width":16,"height":12}}}]}}]), "-end-")).await;
+    Mock::given(path("/image.png"))
+        .respond_with(ResponseTemplate::new(200).set_body_bytes(image_bytes(16, 12)))
+        .expect(1)
+        .mount(&server)
+        .await;
+    let cli = Cli::try_parse_from(["unpin", "alice/ideas"]).unwrap();
+    let report = unpin::run_with_api_root(&cli, Some(Url::parse(&server.uri()).unwrap()))
+        .await
+        .unwrap();
+    assert_eq!(report.summary.analyzed, 3);
+    let issues = &report.summary.boards[0].collection_issues;
+    assert_eq!(issues.len(), 1);
+    assert_eq!(issues[0].resource, "BoardFeed");
+    assert_eq!(issues[0].pages_collected, 1);
+    assert!(
+        report
+            .warnings
+            .iter()
+            .any(|warning| warning.contains("Collected pins are retained"))
+    );
+    assert_eq!(report.exact_groups.len(), 1);
+    assert!(
+        report.exact_groups[0]
+            .items
+            .iter()
+            .all(|item| item.recommendation == unpin::report::Recommendation::InspectContent)
+    );
+    assert!(report.render_text().contains("matching covers"));
+    let directory = tempfile::tempdir().unwrap();
+    let saved = directory.path().join("partial.json");
+    unpin::saved_report::write(&saved, report.render_json().unwrap().as_bytes()).unwrap();
+    assert_eq!(unpin::saved_report::read(&saved).unwrap(), report);
 }

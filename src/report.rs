@@ -5,7 +5,7 @@ use console::Style;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
-use crate::pinterest::SkippedPin;
+use crate::pinterest::{MediaKind, SkippedPin};
 use crate::terminal_text::sanitize_terminal_text;
 
 #[derive(Debug, Clone, Serialize, Deserialize, Eq, PartialEq)]
@@ -14,14 +14,20 @@ pub enum Recommendation {
     Keep,
     Tie,
     DeleteCandidate,
+    InspectContent,
 }
 
 impl Recommendation {
+    pub(crate) fn is_inspection(&self) -> bool {
+        matches!(self, Self::InspectContent)
+    }
+
     pub(crate) fn label(&self) -> &'static str {
         match self {
             Self::Keep => "KEEP",
             Self::Tie => "TIE",
             Self::DeleteCandidate => "DELETE?",
+            Self::InspectContent => "INSPECT",
         }
     }
 
@@ -30,6 +36,7 @@ impl Recommendation {
             Self::Keep => "Suggested keep",
             Self::Tie => "Same size",
             Self::DeleteCandidate => "Smaller copy",
+            Self::InspectContent => "Inspect pin content",
         }
     }
 
@@ -38,6 +45,7 @@ impl Recommendation {
             Self::Keep => "keep",
             Self::Tie => "tie",
             Self::DeleteCandidate => "delete",
+            Self::InspectContent => "tie",
         }
     }
 }
@@ -45,15 +53,16 @@ impl Recommendation {
 #[derive(Debug, Clone, Serialize, Deserialize, Eq, PartialEq)]
 pub struct ReportItem {
     #[serde(default)]
+    pub media_kind: MediaKind,
+    #[serde(default)]
     pub image_sha256: String,
     pub pin_id: String,
     pub pin_url: String,
     /// Board this pin lives in; shown only when several boards were scanned.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub board: Option<String>,
-    /// Stable source identity used for scope classification. This is omitted
-    /// from reports because the board label is the user-facing value.
-    #[serde(skip)]
+    /// Stable source identity survives report rendering and board renames.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub source_id: Option<String>,
     pub image_url: String,
     pub width: u32,
@@ -132,6 +141,12 @@ pub struct DuplicateGroup {
 }
 
 impl DuplicateGroup {
+    pub(crate) fn preview_only(&self) -> bool {
+        self.items
+            .iter()
+            .any(|item| item.media_kind.requires_inspection())
+    }
+
     /// Stable identity for review state. Item order is deliberately ignored so
     /// a ranking change cannot make an otherwise unchanged group look new.
     pub(crate) fn review_key(&self) -> String {
@@ -151,6 +166,13 @@ pub struct VisualCandidate {
 }
 
 impl VisualCandidate {
+    pub(crate) fn preview_only(&self) -> bool {
+        self.items
+            .iter()
+            .chain(self.copies.iter().flatten())
+            .any(|item| item.media_kind.requires_inspection())
+    }
+
     /// Stable identity for review state. A candidate is the same review item
     /// when its saved pins, image content, and board scope are unchanged.
     pub(crate) fn review_key(&self) -> String {
@@ -165,6 +187,8 @@ impl VisualCandidate {
 /// One board that contributed pins to this report.
 #[derive(Debug, Clone, Serialize, Deserialize, Eq, PartialEq)]
 pub struct ScannedBoard {
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub collection_issues: Vec<crate::pinterest::CollectionIssue>,
     pub name: String,
     pub url: String,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -189,6 +213,8 @@ pub struct Summary {
 
 #[derive(Debug, Clone, Serialize, Deserialize, Eq, PartialEq)]
 pub struct Report {
+    #[serde(default)]
+    pub matching: crate::analysis::MatchingStats,
     pub summary: Summary,
     pub exact_groups: Vec<DuplicateGroup>,
     pub visual_candidates: Vec<VisualCandidate>,
@@ -199,6 +225,35 @@ pub struct Report {
 }
 
 impl Report {
+    pub(crate) fn collection_incomplete(&self) -> bool {
+        self.summary
+            .boards
+            .iter()
+            .any(|board| !board.collection_issues.is_empty())
+    }
+
+    /// Missing media metadata in older reports requires the same caution as a cover.
+    pub fn normalize_preview_recommendations(&mut self) {
+        for group in &mut self.exact_groups {
+            if group.preview_only() {
+                for item in &mut group.items {
+                    item.recommendation = Recommendation::InspectContent;
+                }
+            }
+        }
+        for candidate in &mut self.visual_candidates {
+            if candidate.preview_only() {
+                for item in candidate
+                    .items
+                    .iter_mut()
+                    .chain(candidate.copies.iter_mut().flatten())
+                {
+                    item.recommendation = Recommendation::InspectContent;
+                }
+            }
+        }
+    }
+
     /// Title shared by the text and HTML renderers.
     ///
     /// A single board keeps its own name; several boards are titled by the
@@ -214,34 +269,6 @@ impl Report {
                 }
             }
         }
-    }
-
-    /// Stable browser-storage namespace for this set of scan sources.
-    ///
-    /// The temporary HTML filename changes on every run, so it cannot be used
-    /// as the namespace if review marks are meant to survive a new report.
-    pub(crate) fn review_storage_key(&self) -> String {
-        let mut sources = self
-            .summary
-            .boards
-            .iter()
-            .map(|board| (board.name.as_str(), board.url.as_str()))
-            .collect::<Vec<_>>();
-        sources.sort_unstable();
-
-        let mut canonical = String::from("unpin-review-v3\0");
-        if let Some(username) = &self.summary.username {
-            canonical.push_str(username);
-        }
-        canonical.push('\0');
-        for (name, url) in sources {
-            canonical.push_str(name);
-            canonical.push('\0');
-            canonical.push_str(url);
-            canonical.push('\0');
-        }
-
-        hex::encode(Sha256::digest(canonical.as_bytes()))
     }
 
     /// Board labels and scope tags are noise when everything came from the same
@@ -301,6 +328,9 @@ impl Report {
             theme.strong(self.title())
         );
         let _ = writeln!(output, "{}", theme.dim("Pinterest duplicate review"));
+        if self.collection_incomplete() {
+            let _ = writeln!(output, "{}", theme.warning("Pin collection incomplete: collected pins are retained; see warnings for failed feeds."));
+        }
         if self.visual_matching_incomplete {
             let _ = writeln!(output, "{}", theme.warning("Visual matching incomplete: only the comparisons found before the safety limit are shown. Exact matching is complete for analyzed images."));
         }
@@ -356,7 +386,11 @@ impl Report {
                 output,
                 "\n{}  {}{}",
                 theme.section(format!("EXACT {:02}", index + 1)),
-                theme.dim("byte-identical files"),
+                theme.dim(if group.preview_only() {
+                    "matching covers; inspect pin content"
+                } else {
+                    "byte-identical files"
+                }),
                 self.scope_suffix(group.scope, &theme)
             );
             render_items(&mut output, &group.items, &theme, self.shows_board_labels());
@@ -368,11 +402,17 @@ impl Report {
                 "\n{}  {}{}",
                 theme.section(format!("VISUAL {:02}", index + 1)),
                 theme.dim(format!(
-                    "{}% similarity  •  hash distance {}/64",
+                    "{}% structural score  •  hash distance {}/64",
                     candidate.similarity_percent, candidate.hash_distance
                 )),
                 self.scope_suffix(candidate.scope, &theme)
             );
+            if candidate.preview_only() {
+                let _ = writeln!(
+                    output,
+                    "Matching covers; inspect pin content before removing a pin."
+                );
+            }
             render_items(
                 &mut output,
                 &candidate.items,
@@ -468,7 +508,8 @@ fn match_review_key<'a>(
                 &item.pin_id,
                 &item.image_sha256,
                 &item.image_url,
-                &item.board,
+                item.source_id.as_ref().or(item.board.as_ref()),
+                item.media_kind,
             )
         })
         .collect::<Vec<_>>();
@@ -489,6 +530,7 @@ fn render_items(output: &mut String, items: &[ReportItem], theme: &TextTheme, sh
             Recommendation::Keep => theme.success(status),
             Recommendation::Tie => theme.warning(status),
             Recommendation::DeleteCandidate => theme.danger(status),
+            Recommendation::InspectContent => theme.warning(status),
         };
         let board = match (show_boards, &item.board) {
             (true, Some(board)) => format!("  {}", theme.dim(format!("[{board}]"))),
@@ -588,6 +630,7 @@ mod tests {
 
     fn scanned(name: &str, pins_found: usize) -> ScannedBoard {
         ScannedBoard {
+            collection_issues: Vec::new(),
             name: name.into(),
             url: format!("https://www.pinterest.com/alice/{name}/"),
             pins_reported: Some(pins_found),
@@ -595,8 +638,27 @@ mod tests {
         }
     }
 
+    #[test]
+    fn review_identity_survives_board_renames_but_changes_with_media_content() {
+        let mut group = DuplicateGroup {
+            scope: MatchScope::SameBoard,
+            items: vec![item("1", "Ideas", 100), item("2", "Ideas", 100)],
+        };
+        for item in &mut group.items {
+            item.source_id = Some("board-1".into());
+        }
+        let key = group.review_key();
+        for item in &mut group.items {
+            item.board = Some("Renamed".into());
+        }
+        assert_eq!(key, group.review_key());
+        group.items[0].media_kind = MediaKind::Video;
+        assert_ne!(key, group.review_key());
+    }
+
     fn item(pin_id: &str, board: &str, width: u32) -> ReportItem {
         ReportItem {
+            media_kind: crate::pinterest::MediaKind::Image,
             image_sha256: String::new(),
             pin_id: pin_id.into(),
             pin_url: format!("https://www.pinterest.com/pin/{pin_id}/"),
@@ -661,36 +723,9 @@ mod tests {
     }
 
     #[test]
-    fn review_storage_key_ignores_scan_source_order() {
-        let mut report = Report {
-            visual_matching_incomplete: false,
-            summary: Summary {
-                username: Some("alice".into()),
-                boards: vec![scanned("Interiors", 1), scanned("Mood board", 1)],
-                pins_reported: Some(2),
-                pins_found: 2,
-                analyzed: 2,
-                skipped: 0,
-                exact_groups: 0,
-                visual_candidates: 0,
-            },
-            exact_groups: vec![],
-            visual_candidates: vec![],
-            skipped: vec![],
-            warnings: vec![],
-        };
-        let original = report.review_storage_key();
-
-        report.summary.boards.reverse();
-        assert_eq!(original, report.review_storage_key());
-
-        report.summary.username = Some("bob".into());
-        assert_ne!(original, report.review_storage_key());
-    }
-
-    #[test]
     fn text_report_contains_links_and_recommendations() {
         let report = Report {
+            matching: Default::default(),
             visual_matching_incomplete: false,
             summary: Summary {
                 username: None,
@@ -705,6 +740,7 @@ mod tests {
             exact_groups: vec![DuplicateGroup {
                 scope: MatchScope::SameBoard,
                 items: vec![ReportItem {
+                    media_kind: crate::pinterest::MediaKind::Image,
                     image_sha256: String::new(),
                     pin_id: "123".into(),
                     pin_url: "https://www.pinterest.com/pin/123/".into(),
@@ -737,6 +773,7 @@ mod tests {
     fn text_output_sanitizes_dynamic_values_without_changing_json_values() {
         let unsafe_text = "Board\n\u{1b}[31m\t";
         let report = Report {
+            matching: Default::default(),
             visual_matching_incomplete: false,
             summary: Summary {
                 username: Some("alice".into()),
@@ -778,6 +815,7 @@ mod tests {
     #[test]
     fn json_report_has_required_top_level_keys() {
         let report = Report {
+            matching: Default::default(),
             visual_matching_incomplete: false,
             summary: Summary {
                 username: None,
@@ -838,6 +876,7 @@ mod tests {
     #[test]
     fn scope_tags_appear_only_for_multi_board_scans() {
         let mut report = Report {
+            matching: Default::default(),
             visual_matching_incomplete: false,
             summary: Summary {
                 username: Some("alice".into()),
@@ -889,6 +928,7 @@ mod tests {
     #[test]
     fn scope_counts_span_groups_and_candidates() {
         let mut report = Report {
+            matching: Default::default(),
             visual_matching_incomplete: false,
             summary: Summary {
                 username: Some("alice".into()),
@@ -931,6 +971,7 @@ mod tests {
     #[test]
     fn json_reports_the_match_scope() {
         let report = Report {
+            matching: Default::default(),
             visual_matching_incomplete: false,
             summary: Summary {
                 username: Some("alice".into()),
@@ -959,6 +1000,7 @@ mod tests {
     #[test]
     fn board_labels_appear_only_for_multi_board_scans() {
         let mut report = Report {
+            matching: Default::default(),
             visual_matching_incomplete: false,
             summary: Summary {
                 username: Some("alice".into()),
@@ -1006,6 +1048,7 @@ mod tests {
             })
             .collect();
         let report = Report {
+            matching: Default::default(),
             visual_matching_incomplete: false,
             summary: Summary {
                 username: None,

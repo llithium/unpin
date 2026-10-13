@@ -6,7 +6,7 @@ fn report() -> Report {
     let item = |id: &str| {
         serde_json::json!({"pin_id":id, "pin_url":format!("https://www.pinterest.com/pin/{id}/"),
         "image_url":format!("https://example.test/{id}.jpg"), "image_sha256":"abc", "board":"Ideas",
-        "width":100, "height":100, "byte_size":1000, "recommendation":"tie"})
+        "width":100, "height":100, "byte_size":1000, "recommendation":"inspect_content"})
     };
     serde_json::from_value(serde_json::json!({
         "summary": {"boards":[], "pins_found":3, "analyzed":3, "skipped":0, "exact_groups":0, "visual_candidates":1},
@@ -66,4 +66,47 @@ fn unsupported_versions_and_unsafe_saved_links_are_rejected() {
         saved_report::read(&input),
         Err(saved_report::SavedReportError::UnsafeLink)
     ));
+}
+
+#[test]
+fn version_one_reports_without_media_types_require_content_inspection() {
+    let directory = tempfile::tempdir().unwrap();
+    let input = directory.path().join("legacy.json");
+    let mut value: serde_json::Value =
+        serde_json::from_str(&report().render_json().unwrap()).unwrap();
+    assert_eq!(value["schema_version"], 2);
+    value["schema_version"] = 1.into();
+    value.as_object_mut().unwrap().remove("matching");
+    let candidate = &mut value["visual_candidates"][0];
+    for items in ["items", "copies"] {
+        if items == "items" {
+            for item in candidate[items].as_array_mut().unwrap() {
+                item.as_object_mut().unwrap().remove("media_kind");
+                item["recommendation"] = "delete_candidate".into();
+            }
+        } else {
+            for copies in candidate[items].as_array_mut().unwrap() {
+                for item in copies.as_array_mut().unwrap() {
+                    item.as_object_mut().unwrap().remove("media_kind");
+                    item["recommendation"] = "keep".into();
+                }
+            }
+        }
+    }
+    std::fs::write(&input, value.to_string()).unwrap();
+    let restored = saved_report::read(&input).unwrap();
+    let candidate = &restored.visual_candidates[0];
+    assert!(
+        candidate
+            .items
+            .iter()
+            .chain(candidate.copies.iter().flatten())
+            .all(
+                |item| item.media_kind == unpin::pinterest::MediaKind::Unknown
+                    && item.recommendation == unpin::report::Recommendation::InspectContent
+            )
+    );
+    let html = unpin::visual::render_html(&restored);
+    assert!(html.contains("Matching covers"));
+    assert!(html.contains("Media type unknown"));
 }

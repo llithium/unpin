@@ -1,0 +1,414 @@
+{
+  "dataset": "real-images-v1",
+  "assets": [
+    {
+      "id": "astronaut",
+      "file": "astronaut.png",
+      "sha256": "88431cd9653ccd539741b555fb0a46b61558b301d4110412b5bc28b5e3ea6cb5",
+      "license": "Public domain",
+      "author": "NASA",
+      "category": "photograph",
+      "source_url": "https://raw.githubusercontent.com/scikit-image/scikit-image/v0.25.2/skimage/data/astronaut.png"
+    },
+    {
+      "id": "camera",
+      "file": "camera.png",
+      "sha256": "b0793d2adda0fa6ae899c03989482bff9a42d3d5690fc7e3648f2795d730c23a",
+      "license": "CC0-1.0",
+      "author": "Lav Varshney",
+      "category": "photograph",
+      "source_url": "https://raw.githubusercontent.com/scikit-image/scikit-image/v0.25.2/skimage/data/camera.png"
+    },
+    {
+      "id": "chelsea",
+      "file": "chelsea.png",
+      "sha256": "596aa1e7cb875eb79f437e310381d26b338a81c2da23439704a73c4651e8c4bb",
+      "license": "CC0-1.0",
+      "author": "Stefan van der Walt",
+      "category": "photograph",
+      "source_url": "https://raw.githubusercontent.com/scikit-image/scikit-image/v0.25.2/skimage/data/chelsea.png"
+    },
+    {
+      "id": "text",
+      "file": "text.png",
+      "sha256": "bd84aa3a6e3c9887850d45d606c96b2e59433fbef50338570b63c319e668e6d1",
+      "license": "Public domain",
+      "author": "Wikipedia Corner.png contributor",
+      "category": "text",
+      "source_url": "https://raw.githubusercontent.com/scikit-image/scikit-image/v0.25.2/skimage/data/text.png"
+    },
+    {
+      "id": "report",
+      "file": "report.png",
+      "sha256": "ee411fc067bb0003bda4644a29671dfee22724f668a6bc4faa21a65d1f5e8a97",
+      "license": "Repository-authored screenshot; embedded photograph public domain",
+      "author": "unpin contributors",
+      "category": "screenshot",
+      "source_url": "tests/browser/capture-quality-fixtures.mjs; embedded NASA or Lav Varshney photograph from scikit-image v0.25.2"
+    },
+    {
+      "id": "report-changed",
+      "file": "report-changed.png",
+      "sha256": "9ea0ce0f98b38dbebc43a8e09ec953cab5e5e1e587cfedcbd3b60fedb1175cb7",
+      "license": "Repository-authored screenshot; embedded photograph public domain",
+      "author": "unpin contributors",
+      "category": "screenshot",
+      "source_url": "tests/browser/capture-quality-fixtures.mjs; embedded NASA or Lav Varshney photograph from scikit-image v0.25.2"
+    }
+  ],
+  "pairs": [
+    {
+      "id": "astronaut-resized",
+      "left": {
+        "asset": "astronaut",
+        "transform": "original"
+      },
+      "right": {
+        "asset": "astronaut",
+        "transform": "resized"
+      },
+      "expected_match": true,
+      "reason": "Resizing preserves the full content."
+    },
+    {
+      "id": "astronaut-recompressed",
+      "left": {
+        "asset": "astronaut",
+        "transform": "original"
+      },
+      "right": {
+        "asset": "astronaut",
+        "transform": "recompressed"
+      },
+      "expected_match": true,
+      "reason": "JPEG recompression preserves the full content."
+    },
+    {
+      "id": "astronaut-crop",
+      "left": {
+        "asset": "astronaut",
+        "transform": "original"
+      },
+      "right": {
+        "asset": "astronaut",
+        "transform": "crop"
+      },
+      "expected_match": false,
+      "reason": "A substantial crop removes content and requires separate review."
+    },
+    {
+      "id": "astronaut-caption_overlay",
+      "left": {
+        "asset": "astronaut",
+        "transform": "original"
+      },
+      "right": {
+        "asset": "astronaut",
+        "transform": "caption_overlay"
+      },
+      "expected_match": false,
+      "reason": "A conspicuous caption changes what the pin conveys."
+    },
+    {
+      "id": "camera-resized",
+      "left": {
+        "asset": "camera",
+        "transform": "original"
+      },
+      "right": {
+        "asset": "camera",
+        "transform": "resized"
+      },
+      "expected_match": true,
+      "reason": "Resizing preserves the full content."
+    },
+    {
+      "id": "camera-recompressed",
+      "left": {
+        "asset": "camera",
+        "transform": "original"
+      },
+      "right": {
+        "asset": "camera",
+        "transform": "recompressed"
+      },
+      "expected_match": true,
+      "reason": "JPEG recompression preserves the full content."
+    },
+    {
+      "id": "camera-crop",
+      "left": {
+        "asset": "camera",
+        "transform": "original"
+      },
+      "right": {
+        "asset": "camera",
+        "transform": "crop"
+      },
+      "expected_match": false,
+      "reason": "A substantial crop removes content and requires separate review."
+    },
+    {
+      "id": "camera-caption_overlay",
+      "left": {
+        "asset": "camera",
+        "transform": "original"
+      },
+      "right": {
+        "asset": "camera",
+        "transform": "caption_overlay"
+      },
+      "expected_match": false,
+      "reason": "A conspicuous caption changes what the pin conveys."
+    },
+    {
+      "id": "chelsea-resized",
+      "left": {
+        "asset": "chelsea",
+        "transform": "original"
+      },
+      "right": {
+        "asset": "chelsea",
+        "transform": "resized"
+      },
+      "expected_match": true,
+      "reason": "Resizing preserves the full content."
+    },
+    {
+      "id": "chelsea-recompressed",
+      "left": {
+        "asset": "chelsea",
+        "transform": "original"
+      },
+      "right": {
+        "asset": "chelsea",
+        "transform": "recompressed"
+      },
+      "expected_match": true,
+      "reason": "JPEG recompression preserves the full content."
+    },
+    {
+      "id": "chelsea-crop",
+      "left": {
+        "asset": "chelsea",
+        "transform": "original"
+      },
+      "right": {
+        "asset": "chelsea",
+        "transform": "crop"
+      },
+      "expected_match": false,
+      "reason": "A substantial crop removes content and requires separate review."
+    },
+    {
+      "id": "chelsea-caption_overlay",
+      "left": {
+        "asset": "chelsea",
+        "transform": "original"
+      },
+      "right": {
+        "asset": "chelsea",
+        "transform": "caption_overlay"
+      },
+      "expected_match": false,
+      "reason": "A conspicuous caption changes what the pin conveys."
+    },
+    {
+      "id": "text-resized",
+      "left": {
+        "asset": "text",
+        "transform": "original"
+      },
+      "right": {
+        "asset": "text",
+        "transform": "resized"
+      },
+      "expected_match": true,
+      "reason": "Resizing preserves the full content."
+    },
+    {
+      "id": "text-recompressed",
+      "left": {
+        "asset": "text",
+        "transform": "original"
+      },
+      "right": {
+        "asset": "text",
+        "transform": "recompressed"
+      },
+      "expected_match": true,
+      "reason": "JPEG recompression preserves the full content."
+    },
+    {
+      "id": "text-crop",
+      "left": {
+        "asset": "text",
+        "transform": "original"
+      },
+      "right": {
+        "asset": "text",
+        "transform": "crop"
+      },
+      "expected_match": false,
+      "reason": "A substantial crop removes content and requires separate review."
+    },
+    {
+      "id": "text-caption_overlay",
+      "left": {
+        "asset": "text",
+        "transform": "original"
+      },
+      "right": {
+        "asset": "text",
+        "transform": "caption_overlay"
+      },
+      "expected_match": false,
+      "reason": "A conspicuous caption changes what the pin conveys."
+    },
+    {
+      "id": "astronaut-versus-camera",
+      "left": {
+        "asset": "astronaut",
+        "transform": "original"
+      },
+      "right": {
+        "asset": "camera",
+        "transform": "original"
+      },
+      "expected_match": false,
+      "reason": "Different source content is not interchangeable."
+    },
+    {
+      "id": "astronaut-versus-chelsea",
+      "left": {
+        "asset": "astronaut",
+        "transform": "original"
+      },
+      "right": {
+        "asset": "chelsea",
+        "transform": "original"
+      },
+      "expected_match": false,
+      "reason": "Different source content is not interchangeable."
+    },
+    {
+      "id": "astronaut-versus-text",
+      "left": {
+        "asset": "astronaut",
+        "transform": "original"
+      },
+      "right": {
+        "asset": "text",
+        "transform": "original"
+      },
+      "expected_match": false,
+      "reason": "Different source content is not interchangeable."
+    },
+    {
+      "id": "camera-versus-chelsea",
+      "left": {
+        "asset": "camera",
+        "transform": "original"
+      },
+      "right": {
+        "asset": "chelsea",
+        "transform": "original"
+      },
+      "expected_match": false,
+      "reason": "Different source content is not interchangeable."
+    },
+    {
+      "id": "camera-versus-text",
+      "left": {
+        "asset": "camera",
+        "transform": "original"
+      },
+      "right": {
+        "asset": "text",
+        "transform": "original"
+      },
+      "expected_match": false,
+      "reason": "Different source content is not interchangeable."
+    },
+    {
+      "id": "chelsea-versus-text",
+      "left": {
+        "asset": "chelsea",
+        "transform": "original"
+      },
+      "right": {
+        "asset": "text",
+        "transform": "original"
+      },
+      "expected_match": false,
+      "reason": "Different source content is not interchangeable."
+    },
+    {
+      "id": "report-resized",
+      "left": {
+        "asset": "report",
+        "transform": "original"
+      },
+      "right": {
+        "asset": "report",
+        "transform": "resized"
+      },
+      "expected_match": true,
+      "reason": "Resizing preserves all interface and image content."
+    },
+    {
+      "id": "report-recompressed",
+      "left": {
+        "asset": "report",
+        "transform": "original"
+      },
+      "right": {
+        "asset": "report",
+        "transform": "recompressed"
+      },
+      "expected_match": true,
+      "reason": "Recompression preserves all interface and image content."
+    },
+    {
+      "id": "report-crop",
+      "left": {
+        "asset": "report",
+        "transform": "original"
+      },
+      "right": {
+        "asset": "report",
+        "transform": "crop"
+      },
+      "expected_match": false,
+      "reason": "Cropping removes part of the screenshot content."
+    },
+    {
+      "id": "report-caption_overlay",
+      "left": {
+        "asset": "report",
+        "transform": "original"
+      },
+      "right": {
+        "asset": "report",
+        "transform": "caption_overlay"
+      },
+      "expected_match": false,
+      "reason": "An added caption changes the screenshot content."
+    },
+    {
+      "id": "report-changed-photo",
+      "left": {
+        "asset": "report",
+        "transform": "original"
+      },
+      "right": {
+        "asset": "report-changed",
+        "transform": "original"
+      },
+      "expected_match": false,
+      "reason": "The surrounding interface is identical but the displayed photograph differs."
+    }
+  ],
+  "max_false_positives": 0,
+  "max_false_negatives": 0
+}

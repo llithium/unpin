@@ -7,7 +7,7 @@ use thiserror::Error;
 
 use crate::report::Report;
 
-const SCHEMA_VERSION: u32 = 1;
+const SCHEMA_VERSION: u32 = 2;
 
 #[derive(Debug, Error)]
 pub enum SavedReportError {
@@ -15,7 +15,7 @@ pub enum SavedReportError {
     Io(#[from] std::io::Error),
     #[error("invalid saved report")]
     Json(#[from] serde_json::Error),
-    #[error("unsupported saved report schema; expected version 1")]
+    #[error("unsupported saved report schema; expected version 1 or 2")]
     Version,
     #[error("saved report contains a link that is not an HTTP or HTTPS URL")]
     UnsafeLink,
@@ -36,10 +36,14 @@ pub fn serialize(report: &Report) -> Result<String, serde_json::Error> {
 
 pub fn read(path: &Path) -> Result<Report, SavedReportError> {
     let value: serde_json::Value = serde_json::from_slice(&std::fs::read(path)?)?;
-    if value.get("schema_version").and_then(|v| v.as_u64()) != Some(u64::from(SCHEMA_VERSION)) {
+    if !matches!(
+        value.get("schema_version").and_then(|v| v.as_u64()),
+        Some(1 | 2)
+    ) {
         return Err(SavedReportError::Version);
     }
-    let report: Report = serde_json::from_value(value)?;
+    let mut report: Report = serde_json::from_value(value)?;
+    report.normalize_preview_recommendations();
     // Escaping HTML alone does not make an href safe. Saved reports may have
     // been edited or supplied by someone else.
     let items = report.exact_groups.iter().flat_map(|g| &g.items).chain(

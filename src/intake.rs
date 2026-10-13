@@ -57,6 +57,7 @@ pub(crate) enum SourceOutcome {
 
 #[derive(Debug)]
 pub(crate) struct IntakeSource {
+    pub(crate) collection_issues: Vec<crate::pinterest::CollectionIssue>,
     pub(crate) name: String,
     pub(crate) url: String,
     pub(crate) pins_reported: Option<usize>,
@@ -348,6 +349,7 @@ fn normalize_source(
 ) -> (IntakeSource, Vec<Pin>, Vec<SkippedPin>, Vec<SourceWarning>) {
     retain_unseen_source(fetched, seen_pin_ids);
     let source = IntakeSource {
+        collection_issues: std::mem::take(&mut fetched.collection_issues),
         name: fetched.board_name.clone(),
         url,
         pins_reported: fetched.pins_reported,

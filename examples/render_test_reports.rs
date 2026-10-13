@@ -23,6 +23,8 @@ enum Scenario {
     Mixed,
     Empty,
     LongContent,
+    Subset,
+    Media,
 }
 
 fn item(
@@ -35,6 +37,7 @@ fn item(
     recommendation: Recommendation,
 ) -> ReportItem {
     ReportItem {
+        media_kind: unpin::pinterest::MediaKind::Image,
         image_sha256: String::new(),
         pin_id: id.into(),
         pin_url: format!("https://www.pinterest.com/pin/{id}/"),
@@ -60,17 +63,20 @@ fn fixture() -> Report {
     );
     exact_second.image_url = "https://images.example.test/101.jpg".into();
     Report {
+        matching: Default::default(),
         visual_matching_incomplete: false,
         summary: Summary {
             username: Some("alice".into()),
             boards: vec![
                 ScannedBoard {
+                    collection_issues: Vec::new(),
                     name: "Ideas".into(),
                     url: "https://www.pinterest.com/alice/ideas/".into(),
                     pins_reported: Some(3),
                     pins_found: 3,
                 },
                 ScannedBoard {
+                    collection_issues: Vec::new(),
                     name: "Mood board".into(),
                     url: "https://www.pinterest.com/alice/mood-board/".into(),
                     pins_reported: Some(3),
@@ -171,6 +177,20 @@ fn main() {
     let mut report = fixture();
     match args.scenario {
         Scenario::Mixed => {}
+        Scenario::Subset => {
+            report.summary.boards.truncate(1);
+            report.exact_groups.truncate(1);
+            report.visual_candidates.clear();
+            report.summary.exact_groups = 1;
+            report.summary.visual_candidates = 0;
+        }
+        Scenario::Media => {
+            report.exact_groups[0].items[0].media_kind = unpin::pinterest::MediaKind::Video;
+            report.exact_groups[0].items[1].media_kind = unpin::pinterest::MediaKind::Carousel;
+            report.visual_candidates[0].copies[0][0].media_kind =
+                unpin::pinterest::MediaKind::Story;
+            report.normalize_preview_recommendations();
+        }
         Scenario::Empty => {
             report.exact_groups.clear();
             report.visual_candidates.clear();

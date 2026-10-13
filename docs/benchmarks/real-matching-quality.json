@@ -1,0 +1,227 @@
+{
+  "dataset": "real-images-v1",
+  "threshold": 5,
+  "structural_threshold": 0.97,
+  "true_positives": 10,
+  "false_positives": 0,
+  "true_negatives": 17,
+  "false_negatives": 0,
+  "pairs": [
+    {
+      "id": "astronaut-resized",
+      "expected_match": true,
+      "actual_match": true,
+      "label_reason": "Resizing preserves the full content.",
+      "hash_distance": 0,
+      "structural_similarity": 0.9999954968077958
+    },
+    {
+      "id": "astronaut-recompressed",
+      "expected_match": true,
+      "actual_match": true,
+      "label_reason": "JPEG recompression preserves the full content.",
+      "hash_distance": 0,
+      "structural_similarity": 0.999971066842657
+    },
+    {
+      "id": "astronaut-crop",
+      "expected_match": false,
+      "actual_match": false,
+      "label_reason": "A substantial crop removes content and requires separate review.",
+      "hash_distance": 27,
+      "structural_similarity": 0.4620664515350314
+    },
+    {
+      "id": "astronaut-caption_overlay",
+      "expected_match": false,
+      "actual_match": false,
+      "label_reason": "A conspicuous caption changes what the pin conveys.",
+      "hash_distance": 14,
+      "structural_similarity": 0.4355268696778532
+    },
+    {
+      "id": "camera-resized",
+      "expected_match": true,
+      "actual_match": true,
+      "label_reason": "Resizing preserves the full content.",
+      "hash_distance": 0,
+      "structural_similarity": 0.9999982057488683
+    },
+    {
+      "id": "camera-recompressed",
+      "expected_match": true,
+      "actual_match": true,
+      "label_reason": "JPEG recompression preserves the full content.",
+      "hash_distance": 0,
+      "structural_similarity": 0.9999742927171983
+    },
+    {
+      "id": "camera-crop",
+      "expected_match": false,
+      "actual_match": false,
+      "label_reason": "A substantial crop removes content and requires separate review.",
+      "hash_distance": 12,
+      "structural_similarity": 0.7560531385264262
+    },
+    {
+      "id": "camera-caption_overlay",
+      "expected_match": false,
+      "actual_match": false,
+      "label_reason": "A conspicuous caption changes what the pin conveys.",
+      "hash_distance": 5,
+      "structural_similarity": 0.6259732010988978
+    },
+    {
+      "id": "chelsea-resized",
+      "expected_match": true,
+      "actual_match": true,
+      "label_reason": "Resizing preserves the full content.",
+      "hash_distance": 0,
+      "structural_similarity": 0.9999683389549991
+    },
+    {
+      "id": "chelsea-recompressed",
+      "expected_match": true,
+      "actual_match": true,
+      "label_reason": "JPEG recompression preserves the full content.",
+      "hash_distance": 0,
+      "structural_similarity": 0.9998062156228973
+    },
+    {
+      "id": "chelsea-crop",
+      "expected_match": false,
+      "actual_match": false,
+      "label_reason": "A substantial crop removes content and requires separate review.",
+      "hash_distance": 21,
+      "structural_similarity": 0.3076718392535452
+    },
+    {
+      "id": "chelsea-caption_overlay",
+      "expected_match": false,
+      "actual_match": false,
+      "label_reason": "A conspicuous caption changes what the pin conveys.",
+      "hash_distance": 9,
+      "structural_similarity": 0.44976765584438433
+    },
+    {
+      "id": "text-resized",
+      "expected_match": true,
+      "actual_match": true,
+      "label_reason": "Resizing preserves the full content.",
+      "hash_distance": 0,
+      "structural_similarity": 0.9998631035461856
+    },
+    {
+      "id": "text-recompressed",
+      "expected_match": true,
+      "actual_match": true,
+      "label_reason": "JPEG recompression preserves the full content.",
+      "hash_distance": 0,
+      "structural_similarity": 0.9994256910654515
+    },
+    {
+      "id": "text-crop",
+      "expected_match": false,
+      "actual_match": false,
+      "label_reason": "A substantial crop removes content and requires separate review.",
+      "hash_distance": 16,
+      "structural_similarity": 0.31574183435125
+    },
+    {
+      "id": "text-caption_overlay",
+      "expected_match": false,
+      "actual_match": false,
+      "label_reason": "A conspicuous caption changes what the pin conveys.",
+      "hash_distance": 8,
+      "structural_similarity": 0.40609464735731826
+    },
+    {
+      "id": "astronaut-versus-camera",
+      "expected_match": false,
+      "actual_match": false,
+      "label_reason": "Different source content is not interchangeable.",
+      "hash_distance": 37,
+      "structural_similarity": 0.1275375403002955
+    },
+    {
+      "id": "astronaut-versus-chelsea",
+      "expected_match": false,
+      "actual_match": false,
+      "label_reason": "Different source content is not interchangeable.",
+      "hash_distance": 30,
+      "structural_similarity": -0.08570910267273814
+    },
+    {
+      "id": "astronaut-versus-text",
+      "expected_match": false,
+      "actual_match": false,
+      "label_reason": "Different source content is not interchangeable.",
+      "hash_distance": 33,
+      "structural_similarity": -0.14515399223523837
+    },
+    {
+      "id": "camera-versus-chelsea",
+      "expected_match": false,
+      "actual_match": false,
+      "label_reason": "Different source content is not interchangeable.",
+      "hash_distance": 31,
+      "structural_similarity": 0.05683162806796273
+    },
+    {
+      "id": "camera-versus-text",
+      "expected_match": false,
+      "actual_match": false,
+      "label_reason": "Different source content is not interchangeable.",
+      "hash_distance": 24,
+      "structural_similarity": 0.0012456908639809279
+    },
+    {
+      "id": "chelsea-versus-text",
+      "expected_match": false,
+      "actual_match": false,
+      "label_reason": "Different source content is not interchangeable.",
+      "hash_distance": 35,
+      "structural_similarity": 0.06876848182059482
+    },
+    {
+      "id": "report-resized",
+      "expected_match": true,
+      "actual_match": true,
+      "label_reason": "Resizing preserves all interface and image content.",
+      "hash_distance": 0,
+      "structural_similarity": 0.9999964270140873
+    },
+    {
+      "id": "report-recompressed",
+      "expected_match": true,
+      "actual_match": true,
+      "label_reason": "Recompression preserves all interface and image content.",
+      "hash_distance": 0,
+      "structural_similarity": 0.9999723525353779
+    },
+    {
+      "id": "report-crop",
+      "expected_match": false,
+      "actual_match": false,
+      "label_reason": "Cropping removes part of the screenshot content.",
+      "hash_distance": 20,
+      "structural_similarity": 0.4240878624615854
+    },
+    {
+      "id": "report-caption_overlay",
+      "expected_match": false,
+      "actual_match": false,
+      "label_reason": "An added caption changes the screenshot content.",
+      "hash_distance": 11,
+      "structural_similarity": 0.4000953376441776
+    },
+    {
+      "id": "report-changed-photo",
+      "expected_match": false,
+      "actual_match": false,
+      "label_reason": "The surrounding interface is identical but the displayed photograph differs.",
+      "hash_distance": 29,
+      "structural_similarity": 0.5705853452409968
+    }
+  ]
+}

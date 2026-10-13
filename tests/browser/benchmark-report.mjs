@@ -1,12 +1,16 @@
 // Render the fixture first with examples/render_test_reports. Optional second
 // argument selects another checkout's template for an identical-DOM comparison.
 import { readFile } from "node:fs/promises";
+import { dirname, resolve } from "node:path";
 import { chromium } from "@playwright/test";
 
 const fixture = await readFile(process.argv[2] || "test-results/visual-report.html", "utf8");
-const template = await readFile(process.argv[3] || "templates/report.html", "utf8");
+const templatePath = process.argv[3] || "templates/report.html";
+const template = await readFile(templatePath, "utf8");
 const start = template.lastIndexOf("<script>") + "<script>".length;
-const script = template.slice(start, template.indexOf("</script>", start));
+let script = template.slice(start, template.indexOf("</script>", start));
+const include = script.trim().match(/^\{% include "([^"]+)" %\}$/);
+if (include) script = await readFile(resolve(dirname(templatePath), include[1]), "utf8");
 const expand = `
 const group = document.querySelector('[data-group]');
 const link = document.querySelector('.match-link[data-target]');
@@ -18,7 +22,7 @@ document.querySelectorAll('[data-group], .match-link[data-target]').forEach(node
 for (let i = 0; i < 2000; i++) {
   const g = groupTemplate.cloneNode(true);
   g.id = 'bench-' + i;
-  g.dataset.reviewKey = 'bench:' + i;
+  g.dataset.reviewKey = 'exact:same-board:' + i.toString(16).padStart(64, '0');
   g.classList.remove('is-active');
   groupParent.append(g);
   const l = linkTemplate.cloneNode(true);
