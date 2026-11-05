@@ -5,6 +5,7 @@ import { dirname, resolve } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 
 import { expect, test } from "@playwright/test";
+import AxeBuilder from "@axe-core/playwright";
 
 const repoRoot = resolve(dirname(fileURLToPath(import.meta.url)), "../..");
 const fixturePath = resolve(repoRoot, "test-results/visual-report.html");
@@ -110,6 +111,101 @@ async function decide(page, groupId, action) {
 function visibleGroups(page) {
   return page.locator('[data-group]:not(.is-filtered)');
 }
+
+test("review screens meet automated accessibility checks at desktop and narrow widths", async ({ page }) => {
+  for (const width of [320, 768, 1440]) {
+    await page.setViewportSize({ width, height: 900 });
+    for (const scenario of ["visual-report", "long-content", "media", "empty"]) {
+      await page.goto(`${origin}/${scenario}.html`);
+      const results = await new AxeBuilder({ page }).withTags(["wcag2a", "wcag2aa", "wcag21aa"]).analyze();
+      expect(results.violations, `${scenario} at ${width}px`).toEqual([]);
+    }
+  }
+  await openReport(page);
+  await page.locator('#exact-1 [data-remove-pin="102"]').check();
+  await page.locator("#exact-1 .decision-more > summary").click();
+  expect((await new AxeBuilder({ page }).withTags(["wcag2a", "wcag2aa", "wcag21aa"]).analyze()).violations).toEqual([]);
+});
+
+test("keyboard users can skip navigation, filter, select a copy and save a decision", async ({ page }) => {
+  await openReport(page);
+  await page.keyboard.press("Tab");
+  await expect(page.locator(".skip-link")).toBeFocused();
+  await page.keyboard.press("Enter");
+  await expect(page.locator("main")).toBeFocused();
+  await page.locator("#filter-all").focus();
+  await page.keyboard.press("ArrowRight");
+  await expect(page.locator("#filter-same")).toBeChecked();
+  await page.locator('#exact-1 [data-remove-pin="102"]').focus();
+  await page.keyboard.press("Space");
+  await expect(page.locator('#exact-1 [data-remove-pin="102"]')).toBeChecked();
+  await expect(page.locator('#exact-1 [data-review-label]')).toHaveText("Save decision");
+  await page.locator('#exact-1 [data-review-button]').focus();
+  await page.keyboard.press("Enter");
+  await expect(page.locator("#exact-1")).toHaveAttribute("data-reviewed", "true");
+  await expect(page.locator("#review-progress")).toHaveText("1 / 3");
+});
+
+test("full-size image inspection preserves the review and returns to the same comparison", async ({ page }) => {
+  await page.context().route("https://images.example.test/**", route => route.fulfill({
+    contentType: "image/png",
+    path: resolve(repoRoot, "tests/fixtures/matching/chelsea.png"),
+  }));
+  await openReport(page);
+  await page.locator('#exact-1 [data-remove-pin="102"]').check();
+  const opened = page.waitForEvent("popup");
+  await page.locator("#exact-1 .image-stage").first().click();
+  const image = await opened;
+  await image.waitForLoadState();
+  await expect(image).toHaveURL("https://images.example.test/101.jpg");
+  await expect(image.locator("img")).toBeVisible();
+  expect(await image.locator("img").evaluate(img => img.naturalWidth)).toBeGreaterThan(400);
+  await image.close();
+  await expect(page.locator("#exact-1")).toHaveClass(/is-active/);
+  await expect(page.locator('#exact-1 [data-remove-pin="102"]')).toBeChecked();
+});
+
+test("keyboard navigation reveals and reviews the last copy in a narrow comparison strip", async ({ page }) => {
+  await page.setViewportSize({ width: 320, height: 780 });
+  await page.goto(`${origin}/long-content.html`);
+  const lastCopy = page.locator("#exact-1 .pin-card").last();
+  const choice = lastCopy.locator("[data-remove-pin]");
+  await choice.focus();
+  const bounds = await choice.boundingBox();
+  expect(bounds.x).toBeGreaterThanOrEqual(0);
+  expect(bounds.x + bounds.width).toBeLessThanOrEqual(320);
+  await page.keyboard.press("Space");
+  await expect(choice).toBeChecked();
+  await page.locator("#exact-1 [data-review-button]").focus();
+  await page.keyboard.press("Enter");
+  await expect(page.locator("#exact-1")).toHaveAttribute("data-reviewed", "true");
+  await page.reload();
+  await page.locator("#toggle-filters").click();
+  await page.locator("#unreviewed-only").uncheck();
+  await page.locator('[data-target="exact-1"]').click();
+  await expect(choice).toBeChecked();
+});
+
+test("feedback and expanded details leave decision controls unobstructed", async ({ page }) => {
+  for (const viewport of [{ width: 1280, height: 800 }, { width: 390, height: 844 }]) {
+    await page.setViewportSize(viewport);
+    await openReport(page);
+    const group = page.locator("#exact-1");
+    const choice = group.locator('[data-remove-pin="102"]');
+    if (await choice.isChecked()) await choice.uncheck();
+    await choice.check();
+    const action = await group.locator("[data-review-button]").boundingBox();
+    const feedback = await page.locator("#review-feedback").boundingBox();
+    expect(feedback.y).toBeGreaterThanOrEqual(action.y + action.height);
+    const openPin = group.locator(".button.primary").first();
+    const before = await openPin.evaluate(el => el.getBoundingClientRect().top + scrollY);
+    await group.locator(".pin-details > summary").first().click();
+    const after = await openPin.evaluate(el => el.getBoundingClientRect().top + scrollY);
+    expect(after).toBe(before);
+    const details = await group.locator(".pin-details dl").first().boundingBox();
+    expect(details.width).toBeGreaterThan(viewport.width < 700 ? 100 : 300);
+  }
+});
 
 test("scope, kind, and review filters compose as a user queue", async ({ page }) => {
   await openReport(page);

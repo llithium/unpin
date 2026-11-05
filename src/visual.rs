@@ -2,6 +2,7 @@ use std::io::{self, Write as IoWrite};
 use std::path::{Path, PathBuf};
 
 use askama::Template;
+use percent_encoding::{NON_ALPHANUMERIC, utf8_percent_encode};
 use tempfile::Builder;
 use thiserror::Error;
 
@@ -15,6 +16,7 @@ struct ReportTemplate<'a> {
     same: usize,
     cross: usize,
     quick_wins: usize,
+    icon_uri: String,
 }
 
 impl ReportTemplate<'_> {
@@ -69,6 +71,10 @@ pub fn render_html(report: &Report) -> String {
         same,
         cross,
         quick_wins,
+        icon_uri: format!(
+            "data:image/svg+xml,{}",
+            utf8_percent_encode(include_str!("../templates/icon.svg"), NON_ALPHANUMERIC)
+        ),
     }
     .render()
     .expect("the HTML report template is valid")
@@ -246,7 +252,7 @@ mod tests {
         ));
         assert!(contains_html_fragment(
             &mixed,
-            "for=\"filter-cross\"><span>Cross</span><span class=\"filter-count\">1</span></label>"
+            "for=\"filter-cross\"><span>Across</span><span class=\"filter-count\">1</span></label>"
         ));
         assert!(mixed.contains("aria-label=\"Filter matches by type\""));
         assert!(contains_html_fragment(
@@ -339,7 +345,7 @@ mod tests {
         ));
         assert!(contains_html_fragment(
             &cross_only,
-            "for=\"filter-cross\"><span>Cross</span><span class=\"filter-count\">2</span></label>"
+            "for=\"filter-cross\"><span>Across</span><span class=\"filter-count\">2</span></label>"
         ));
     }
 

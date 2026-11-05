@@ -197,12 +197,12 @@ Run `unpin --help` for the complete interface.
 - The visual report stores decisions for unchanged matches across board selections
   and board renames in this browser. Decisions include reviewed, keep all saves,
   decide later, not a duplicate, and selected copies flagged for removal. Removal
-  flags stay editable until you choose `Save decision`; `Done` marks a comparison
+  flags stay editable until you choose `Save decision`; `Mark reviewed` marks a comparison
   reviewed, and `Keep all` records that choice directly. `More` contains
   decide-later, not-duplicate, and clear-decision actions. Decide-later matches
   stay in the unreviewed queue. Changed image content, media types, or saved-pin
   membership produce a new review item.
-  Pin IDs and media types are under each pin's `Details`; backup and scan details
+  Pin IDs and media types are under each pin's `Pin details`; backup and scan details
   are under `Report tools`. `Export decisions` backs up the browser's decision history as JSON, including
   pin/image links, image fingerprints, and media types. `Import decisions`
   validates the whole file, merges matching decisions, and retains decisions for
