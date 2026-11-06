@@ -229,8 +229,6 @@
           const index = visibleIndices.get(active) ?? -1;
           if (previous) previous.disabled = index <= 0;
           if (next) next.disabled = index < 0 || index >= visible.length - 1;
-          const mobileCount = document.querySelector("[data-mobile-count]");
-          if (mobileCount) mobileCount.textContent = index < 0 ? "0 matches" : `Match ${index + 1} of ${visible.length}`;
         };
 
         const syncQuickWins = () => {
@@ -279,7 +277,6 @@
             }
           }
           updateControls();
-          placeFeedback();
           warmNearbyImages();
           if (options.announce) {
             active.scrollIntoView({ block: "start", behavior: "instant" });
@@ -330,7 +327,7 @@
           const button = group.querySelector("[data-review-button]");
           button?.setAttribute("aria-pressed", reviewed ? "true" : "false");
           const label = button?.querySelector("[data-review-label]");
-          if (label) label.textContent = reviewed ? "Reviewed" : decision?.action === "remove" ? "Save decision" : "Mark reviewed";
+          if (label) label.textContent = reviewed ? "Reviewed" : decision?.action === "remove" ? "Save decision" : "Done";
           const link = linkByTarget.get(group.id);
           link?.classList.toggle("is-reviewed", reviewed);
           if (link) {
@@ -344,11 +341,6 @@
         let undoTarget = null;
         let undoKeys = [];
         const feedback = document.querySelector("#review-feedback");
-        const placeFeedback = () => {
-          const container = active?.querySelector(".match-actions") ||
-            (groups.length ? empty : document.querySelector(".review-transfer"));
-          if (container && feedback.parentElement !== container) container.append(feedback);
-        };
         let feedbackTimer = null;
         const pauseFeedback = () => {
           clearTimeout(feedbackTimer);
@@ -384,7 +376,6 @@
           undoTarget = target;
           undoKeys = keys;
           feedback.hidden = false;
-          placeFeedback();
           document.querySelector("#review-feedback-label").textContent = message;
           scheduleFeedbackDismissal();
         };
@@ -400,8 +391,7 @@
             const index = visibleIndices.get(group) ?? -1;
             preferredActive = visible[index + 1] || visible[index - 1] || null;
           }
-          const message = action === "remove" && !reviewed ? "Selection updated" : action ? "Decision saved" : "Decision cleared";
-          offerUndo(message, group);
+          offerUndo(action ? "Decision saved" : "Decision cleared", group);
           if (action) decisions.set(group.dataset.reviewKey, decisionRecord(group, action, removePinIds, reviewed));
           else decisions.delete(group.dataset.reviewKey);
           dirtyDecisions.add(group.dataset.reviewKey);
@@ -410,7 +400,7 @@
           else syncQuickWins();
           updateProgress();
           if (reviewed) acknowledgeReview();
-          announce(`${message}. ${visible.length} matches shown`);
+          announce(`${action ? "Decision saved" : "Decision cleared"}. ${visible.length} matches shown`);
         };
         const setReviewed = (group, reviewed) => {
           const current = decisions.get(group.dataset.reviewKey);
@@ -454,11 +444,8 @@
             if (mobileCount) mobileCount.textContent = `${visible.length} matches`;
           }
           const emptyTitle = document.querySelector("#filter-empty-title");
-          const complete = reviewedKeys.size === groups.length && groups.length > 0;
-          const completedExport = document.querySelector("#export-completed");
-          if (completedExport) completedExport.hidden = !complete;
           if (emptyTitle) {
-            emptyTitle.textContent = complete
+            emptyTitle.textContent = reviewedKeys.size === groups.length && groups.length > 0
               ? "All matches reviewed"
               : "No matches in the current filters.";
           }
@@ -477,7 +464,7 @@
             if (visible.includes(preferredActive)) active = preferredActive;
           }
           if (active) setActive(active);
-          else { updateControls(); placeFeedback(); }
+          else updateControls();
           announce(`${visible.length} matches shown`);
         };
 
@@ -611,7 +598,7 @@
           }));
         });
         const transferStatus = document.querySelector("#transfer-status");
-        document.querySelectorAll("#export-review, #export-completed").forEach((button) => button.addEventListener("click", () => {
+        document.querySelector("#export-review")?.addEventListener("click", () => {
           try {
             if (mergeStoredDecisions()) { groups.forEach(syncDecisionUi); applyFilter(); updateProgress(); }
           } catch (_) { /* Export remains available when browser storage is unavailable. */ }
@@ -621,7 +608,7 @@
           link.href = url; link.download = "unpin-decisions.json"; link.click();
           setTimeout(() => URL.revokeObjectURL(url), 1000);
           transferStatus.textContent = `Exported ${decisions.size} decisions. This file includes pin and image links.`;
-        }));
+        });
         const reviewFile = document.querySelector("#review-file");
         document.querySelector("#import-review")?.addEventListener("click", () => reviewFile.click());
         reviewFile?.addEventListener("change", async () => {

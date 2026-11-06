@@ -1,8 +1,7 @@
 <article class="pin-card" data-pin-id="{{ item.pin_id }}" data-media-kind="{{ item.media_kind.as_str() }}" data-image-sha256="{{ item.image_sha256 }}">
   <a class="image-stage" href="{{ item.image_url }}" target="_blank" rel="noopener noreferrer"
-    aria-label="Open original image, {{ item.width }} × {{ item.height }} pixels, for pin {{ item.pin_id }}" title="Open full-size image in a new tab">
+    aria-label="Open original image, {{ item.width }} × {{ item.height }} pixels, for pin {{ item.pin_id }}">
     <img src="{{ item.image_url }}" alt="" width="{{ item.width }}" height="{{ item.height }}" loading="lazy" decoding="async" referrerpolicy="no-referrer" />
-    <span class="image-caption"><span>Save {{ loop.index }}</span><span>View image ↗</span></span>
   </a>
   <div class="card-body">
     <div class="card-meta">
@@ -12,14 +11,16 @@
     </div>
     {% if show_boards %}{% match item.board %}{% when Some with (board) %}<span class="board" title="{{ board }}">{{ board }}</span>{% when None %}{% endmatch %}{% endif %}
     <div class="card-actions">
-      <label class="removal-choice"><input type="checkbox" data-remove-pin="{{ item.pin_id }}" /><span class="removal-label">Remove this copy</span><span class="removal-selected">Flagged</span></label>
-    </div>
-    <div class="card-links">
-    <a class="button primary" href="{{ item.pin_url }}" target="_blank" rel="noopener noreferrer">Open pin</a>
-    <details class="pin-details">
-      <summary aria-label="Pin details for save {{ loop.index }}">Details</summary>
-      <dl><dt>Pin</dt><dd>{{ item.pin_id }}</dd><dt>Media</dt><dd>{{ item.media_kind.label() }}</dd></dl>
-    </details>
+      <label class="removal-choice"><input type="checkbox" data-remove-pin="{{ item.pin_id }}" /><span>Remove this copy</span></label>
+      <div class="card-links">
+        <a class="button primary" href="{{ item.pin_url }}" target="_blank" rel="noopener noreferrer">Open pin</a>
+        <details class="pin-details" open>
+          <summary>Details</summary>
+          <p class="pin-id">Pin {{ item.pin_id }}</p>
+          <p>{{ item.media_kind.label() }}</p>
+          <a href="{{ item.image_url }}" target="_blank" rel="noopener noreferrer">Open image</a>
+        </details>
+      </div>
     </div>
   </div>
 </article>
