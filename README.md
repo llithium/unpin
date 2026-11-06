@@ -202,7 +202,7 @@ Run `unpin --help` for the complete interface.
   decide-later, not-duplicate, and clear-decision actions. Decide-later matches
   stay in the unreviewed queue. Changed image content, media types, or saved-pin
   membership produce a new review item.
-  Pin IDs and media types are under each pin's `Details`; backup and scan details
+  Pin IDs and media types are always visible below each preview; backup and scan details
   are under `Report tools`. `Export decisions` backs up the browser's decision history as JSON, including
   pin/image links, image fingerprints, and media types. `Import decisions`
   validates the whole file, merges matching decisions, and retains decisions for

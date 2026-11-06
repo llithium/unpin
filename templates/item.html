@@ -10,16 +10,15 @@
       {% if !item.recommendation.is_inspection() %}<span class="badge {{ item.recommendation.css_class() }}">{{ item.recommendation.html_label() }}</span>{% endif %}
     </div>
     {% if show_boards %}{% match item.board %}{% when Some with (board) %}<span class="board" title="{{ board }}">{{ board }}</span>{% when None %}{% endmatch %}{% endif %}
+    <div class="pin-details">
+      <span class="pin-id">Pin {{ item.pin_id }}</span>
+      <span>{{ item.media_kind.label() }}</span>
+    </div>
     <div class="card-actions">
       <label class="removal-choice"><input type="checkbox" data-remove-pin="{{ item.pin_id }}" /><span>Remove this copy</span></label>
       <div class="card-links">
         <a class="button primary" href="{{ item.pin_url }}" target="_blank" rel="noopener noreferrer">Open pin</a>
-        <details class="pin-details">
-          <summary>Details</summary>
-          <p class="pin-id">Pin {{ item.pin_id }}</p>
-          <p>{{ item.media_kind.label() }}</p>
-          <a href="{{ item.image_url }}" target="_blank" rel="noopener noreferrer">Open image</a>
-        </details>
+        <a class="button primary" href="{{ item.image_url }}" target="_blank" rel="noopener noreferrer">Open image</a>
       </div>
     </div>
   </div>

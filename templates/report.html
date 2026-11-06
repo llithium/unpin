@@ -217,11 +217,12 @@
               data-scope="{{ group.scope.css_class() }}"
               data-kind="exact"
             >
-              <span class="match-number">E{{ loop.index }}</span>
+              <img class="match-thumb" src="{{ group.items[0].image_url }}" alt="" loading="lazy" referrerpolicy="no-referrer" />
               <span class="match-link-copy">
                 <span class="match-link-title"
-                  >Identical images</span
+                  >{% if group.preview_only() %}Matching covers{% else %}Identical images{% endif %}</span
                 >
+                <span class="match-link-detail"><span class="match-number">E{{ loop.index }}</span>{{ group.items.len() }} saves</span>
               </span>
               <span class="match-link-state" aria-hidden="true">Reviewed</span>
             </button>
@@ -233,11 +234,12 @@
               data-scope="{{ candidate.scope.css_class() }}"
               data-kind="visual"
             >
-              <span class="match-number">V{{ loop.index }}</span>
+              <img class="match-thumb" src="{{ candidate.items[0].image_url }}" alt="" loading="lazy" referrerpolicy="no-referrer" />
               <span class="match-link-copy">
                 <span class="match-link-title"
-                  >Similar images</span
+                  >{% if candidate.preview_only() %}Matching covers{% else %}Similar images{% endif %}</span
                 >
+                <span class="match-link-detail"><span class="match-number">V{{ loop.index }}</span>{{ candidate.similarity_percent }}% similarity</span>
               </span>
               <span class="match-link-state" aria-hidden="true">Reviewed</span>
             </button>
