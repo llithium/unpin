@@ -1,5 +1,9 @@
 # Report UI review
 
+The subsequent [fresh GPT-6.1 Sol review loop](rerun/README.md) records the
+follow-up improvements to compact cards, short-screen actions, navigation and
+completion export, with new before/after captures and category scores.
+
 The comparison captures show the report at `d6dbef1` and the redesigned report
 on this branch. Both use the same synthetic scan and offline photographs from
 `tests/fixtures/matching`. No Pinterest account was scanned or changed.

@@ -12,14 +12,14 @@
     </div>
     {% if show_boards %}{% match item.board %}{% when Some with (board) %}<span class="board" title="{{ board }}">{{ board }}</span>{% when None %}{% endmatch %}{% endif %}
     <div class="card-actions">
-      <label class="removal-choice"><input type="checkbox" data-remove-pin="{{ item.pin_id }}" /><span class="removal-label">Remove this copy</span><span class="removal-selected">Flagged for removal</span></label>
-      <div class="card-links">
-        <a class="button primary" href="{{ item.pin_url }}" target="_blank" rel="noopener noreferrer">Open pin</a>
-      </div>
+      <label class="removal-choice"><input type="checkbox" data-remove-pin="{{ item.pin_id }}" /><span class="removal-label">Remove this copy</span><span class="removal-selected">Flagged</span></label>
     </div>
+    <div class="card-links">
+    <a class="button primary" href="{{ item.pin_url }}" target="_blank" rel="noopener noreferrer">Open pin</a>
     <details class="pin-details">
-      <summary>Pin details</summary>
+      <summary aria-label="Pin details for save {{ loop.index }}">Details</summary>
       <dl><dt>Pin</dt><dd>{{ item.pin_id }}</dd><dt>Media</dt><dd>{{ item.media_kind.label() }}</dd></dl>
     </details>
+    </div>
   </div>
 </article>

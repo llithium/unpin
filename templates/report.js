@@ -454,8 +454,11 @@
             if (mobileCount) mobileCount.textContent = `${visible.length} matches`;
           }
           const emptyTitle = document.querySelector("#filter-empty-title");
+          const complete = reviewedKeys.size === groups.length && groups.length > 0;
+          const completedExport = document.querySelector("#export-completed");
+          if (completedExport) completedExport.hidden = !complete;
           if (emptyTitle) {
-            emptyTitle.textContent = reviewedKeys.size === groups.length && groups.length > 0
+            emptyTitle.textContent = complete
               ? "All matches reviewed"
               : "No matches in the current filters.";
           }
@@ -608,7 +611,7 @@
           }));
         });
         const transferStatus = document.querySelector("#transfer-status");
-        document.querySelector("#export-review")?.addEventListener("click", () => {
+        document.querySelectorAll("#export-review, #export-completed").forEach((button) => button.addEventListener("click", () => {
           try {
             if (mergeStoredDecisions()) { groups.forEach(syncDecisionUi); applyFilter(); updateProgress(); }
           } catch (_) { /* Export remains available when browser storage is unavailable. */ }
@@ -618,7 +621,7 @@
           link.href = url; link.download = "unpin-decisions.json"; link.click();
           setTimeout(() => URL.revokeObjectURL(url), 1000);
           transferStatus.textContent = `Exported ${decisions.size} decisions. This file includes pin and image links.`;
-        });
+        }));
         const reviewFile = document.querySelector("#review-file");
         document.querySelector("#import-review")?.addEventListener("click", () => reviewFile.click());
         reviewFile?.addEventListener("change", async () => {

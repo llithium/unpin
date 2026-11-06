@@ -248,11 +248,8 @@
           </nav>
 
           <div class="rail-hint" aria-label="Keyboard shortcuts">
-            <span class="keycap">J</span>
-            <span class="keycap">K</span>
-            <span>move through queue</span>
-            <span class="keycap">E</span>
-            <span>mark reviewed</span>
+            <span><kbd>J</kbd> <kbd>K</kbd> Move through queue</span>
+            <span><kbd>E</kbd> Mark reviewed</span>
           </div>
         </aside>
 
@@ -298,7 +295,7 @@
           <div class="filter-empty" id="filter-empty" role="status">
             <strong id="filter-empty-title">No matches in the current filters.</strong>
             <p>Show all matches to revisit reviewed pins or change your filters.</p>
-            <button class="control" id="clear-filters" type="button">Show all matches</button>
+            <div class="completion-actions"><button class="control" id="clear-filters" type="button">Show all matches</button><button class="control" id="export-completed" type="button" hidden>Export decisions</button></div>
           </div>
 
           <div class="matches">
@@ -368,7 +365,7 @@
                 {% let copies = candidate.copies[loop.index0] %}
                 {% if !copies.is_empty() %}
                 <details class="additional-saves"><summary>{{ copies.len() }} additional save{% if copies.len() != 1 %}s{% endif %}</summary>
-                  <ul>{% for copy in copies %}<li data-pin-id="{{ copy.pin_id }}" data-media-kind="{{ copy.media_kind.as_str() }}" data-image-sha256="{{ copy.image_sha256 }}"><div class="additional-save-identity"><strong>Additional save {{ loop.index }}</strong><span>Same image as save {{ variant_index }}</span>{% match copy.board %}{% when Some with (board) %}<span>{{ board }}</span>{% when None %}{% endmatch %}<a data-image-url="{{ copy.image_url }}" href="{{ copy.pin_url }}" target="_blank" rel="noopener noreferrer">Pin {{ copy.pin_id }}</a></div><label class="removal-choice"><input type="checkbox" data-remove-pin="{{ copy.pin_id }}" aria-label="Flag pin {{ copy.pin_id }} for removal" /><span>Remove this copy</span></label></li>{% endfor %}</ul>
+                  <ul>{% for copy in copies %}<li data-pin-id="{{ copy.pin_id }}" data-media-kind="{{ copy.media_kind.as_str() }}" data-image-sha256="{{ copy.image_sha256 }}"><div class="additional-save-identity"><strong>Additional save {{ loop.index }}</strong><span>Same image as save {{ variant_index }}</span>{% match copy.board %}{% when Some with (board) %}<span>{{ board }}</span>{% when None %}{% endmatch %}<a data-image-url="{{ copy.image_url }}" href="{{ copy.pin_url }}" target="_blank" rel="noopener noreferrer" aria-label="Open pin {{ copy.pin_id }}">Open pin</a><span>Pin {{ copy.pin_id }}</span></div><label class="removal-choice"><input type="checkbox" data-remove-pin="{{ copy.pin_id }}" aria-label="Flag pin {{ copy.pin_id }} for removal" /><span>Remove this copy</span></label></li>{% endfor %}</ul>
                 </details>
                 {% endif %}
               </div>
@@ -382,7 +379,7 @@
           {% if same + cross > 0 %}<p class="workspace-note">Decisions stay in this browser. Changes on Pinterest are manual.</p>{% endif %}
           <p class="storage-notice" id="storage-notice" role="status" hidden>Review progress cannot be saved in this browser. Keep this report open to retain your marks.</p>
           <details class="report-tools">
-          <summary>Report tools</summary>
+          <summary>Import, export and scan details</summary>
           <div class="review-transfer">
             <button class="control" id="export-review" type="button">Export decisions</button>
             <button class="control" id="import-review" type="button">Import decisions</button>

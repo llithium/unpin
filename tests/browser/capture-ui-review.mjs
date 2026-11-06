@@ -1,5 +1,6 @@
 // Capture the real Rust-rendered report with offline photograph fixtures.
-// Usage: node tests/browser/capture-ui-review.mjs <output-directory>
+// Add --reuse-html to recapture a previously rendered baseline without rebuilding it.
+// Usage: node tests/browser/capture-ui-review.mjs <output-directory> [--reuse-html]
 import { createServer } from "node:http";
 import { mkdir, readFile } from "node:fs/promises";
 import { spawnSync } from "node:child_process";
@@ -8,7 +9,7 @@ import { chromium } from "@playwright/test";
 
 const output = resolve(process.argv[2] || "test-results/ui-review/current");
 await mkdir(output, { recursive: true });
-for (const scenario of ["mixed", "empty", "long-content", "media"]) {
+for (const scenario of process.argv.includes("--reuse-html") ? [] : ["mixed", "empty", "long-content", "media"]) {
   const result = spawnSync("cargo", ["run", "--quiet", "--locked", "--example", "render_test_reports", "--", resolve(output, `${scenario}.html`), "--scenario", scenario], { encoding: "utf8" });
   if (result.status !== 0) throw new Error(result.stderr);
 }
@@ -32,6 +33,10 @@ try {
   const page = await context.newPage();
   const capture = async (name, target = page) => {
     await target.locator(".image-stage img").evaluateAll(images => Promise.all(images.map(img => { img.loading = "eager"; return img.decode().catch(() => {}); })));
+    if (["short-phone-exact", "short-phone-selection", "phone-landscape", "short-desktop-exact"].includes(name)) {
+      await target.screenshot({ path: resolve(output, `${name}-viewport.png`), fullPage: false, animations: "disabled" });
+    }
+    await target.evaluate(() => window.scrollTo(0, 0));
     await target.screenshot({ path: resolve(output, `${name}.png`), fullPage: true, animations: "disabled" });
   };
   await page.goto(`${origin}/mixed.html`);
@@ -83,8 +88,22 @@ try {
   const touchPage = await touchContext.newPage();
   await touchPage.goto(`${origin}/mixed.html`);
   await capture("mobile-touch-exact", touchPage);
+  await touchPage.setViewportSize({ width: 375, height: 667 });
+  await touchPage.goto(`${origin}/mixed.html`);
+  await capture("short-phone-exact", touchPage);
+  await touchPage.locator('[data-target="visual-1"]').click();
+  await capture("short-phone-similar", touchPage);
+  await touchPage.locator('#visual-1 [data-remove-pin="302"]').check();
+  await capture("short-phone-selection", touchPage);
+  await touchPage.setViewportSize({ width: 844, height: 390 });
+  await touchPage.goto(`${origin}/mixed.html`);
+  await capture("phone-landscape", touchPage);
   await touchContext.close();
-  console.log(`Captured sixteen report states in ${output}`);
+  await page.setViewportSize({ width: 1280, height: 720 });
+  await page.evaluate(() => localStorage.clear());
+  await page.goto(`${origin}/mixed.html`);
+  await capture("short-desktop-exact");
+  console.log(`Captured twenty-one full-page states and four viewport screenshots in ${output}`);
 } finally {
   await browser.close();
   await new Promise(done => server.close(done));

@@ -194,9 +194,12 @@ test("feedback and expanded details leave decision controls unobstructed", async
     const choice = group.locator('[data-remove-pin="102"]');
     if (await choice.isChecked()) await choice.uncheck();
     await choice.check();
-    const action = await group.locator("[data-review-button]").boundingBox();
-    const feedback = await page.locator("#review-feedback").boundingBox();
-    expect(feedback.y).toBeGreaterThanOrEqual(action.y + action.height);
+    const unobstructed = await group.locator("[data-review-button]").evaluate(el => {
+      const bounds = el.getBoundingClientRect();
+      const hit = document.elementFromPoint(bounds.x + bounds.width / 2, bounds.y + bounds.height / 2);
+      return hit === el || el.contains(hit);
+    });
+    expect(unobstructed, "feedback must not cover the save action").toBe(true);
     const openPin = group.locator(".button.primary").first();
     const before = await openPin.evaluate(el => el.getBoundingClientRect().top + scrollY);
     await group.locator(".pin-details > summary").first().click();
@@ -205,6 +208,51 @@ test("feedback and expanded details leave decision controls unobstructed", async
     const details = await group.locator(".pin-details dl").first().boundingBox();
     expect(details.width).toBeGreaterThan(viewport.width < 700 ? 100 : 300);
   }
+});
+
+test("short viewports keep review actions available without shifting paired selections", async ({ browser }) => {
+  for (const viewport of [{ width: 375, height: 667 }, { width: 844, height: 390 }, { width: 1280, height: 720 }]) {
+    const context = await browser.newContext({ viewport, hasTouch: true });
+    await mockImages(context);
+    const page = await context.newPage();
+    await page.goto(`${origin}${fixtureUrl}`);
+    const action = page.locator("#exact-1 [data-review-button]");
+    const bounds = await action.boundingBox();
+    expect(bounds.y + bounds.height).toBeLessThanOrEqual(viewport.height);
+    const before = await page.locator("#exact-1 .pin-card").last().evaluate(el => el.getBoundingClientRect().height);
+    await page.locator('#exact-1 [data-remove-pin="102"]').check();
+    const after = await page.locator("#exact-1 .pin-card").last().evaluate(el => el.getBoundingClientRect().height);
+    expect(after).toBe(before);
+    await expect(action).toHaveText(/Save decision/);
+    for (const control of [page.locator('#exact-1 [data-remove-pin="102"]'), page.locator("#exact-1 .button.primary").last(), page.locator("#exact-1 .pin-details > summary").last()]) {
+      await control.focus();
+      const exposed = await control.evaluate(el => {
+        const bounds = el.getBoundingClientRect();
+        const hit = document.elementFromPoint(bounds.x + bounds.width / 2, bounds.y + bounds.height / 2);
+        return hit === el || el.contains(hit);
+      });
+      expect(exposed, "keyboard focus must reveal the control above fixed chrome").toBe(true);
+    }
+    const selectedBounds = await action.boundingBox();
+    expect(selectedBounds.y + selectedBounds.height).toBeLessThanOrEqual(viewport.height);
+    await action.click();
+    await expect(page.locator("#exact-1")).toHaveAttribute("data-reviewed", "true");
+    await context.close();
+  }
+});
+
+test("completion exposes export and downloads the saved review decisions", async ({ page }) => {
+  await openReport(page);
+  await page.locator("#unreviewed-only").check();
+  await expect(page.locator("#export-completed")).toBeHidden();
+  for (let i = 0; i < 3; i++) await page.locator(".is-active [data-review-button]").click();
+  await expect(page.locator("#export-completed")).toBeVisible();
+  const downloaded = page.waitForEvent("download");
+  await page.locator("#export-completed").click();
+  const download = await downloaded;
+  const exported = JSON.parse(await readFile(await download.path(), "utf8"));
+  expect(exported.decisions).toHaveLength(3);
+  expect(exported.decisions.every(decision => decision.reviewed)).toBe(true);
 });
 
 test("scope, kind, and review filters compose as a user queue", async ({ page }) => {
