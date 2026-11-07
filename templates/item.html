@@ -4,15 +4,17 @@
     <img src="{{ item.image_url }}" alt="" width="{{ item.width }}" height="{{ item.height }}" loading="lazy" decoding="async" referrerpolicy="no-referrer" />
   </a>
   <div class="card-body">
-    <div class="card-meta">
-      <p class="dimensions">{{ item.width }} × {{ item.height }}</p>
-      <span class="file-size">{{ self.human_bytes(item.byte_size) }}</span>
+    {% if show_boards %}{% match item.board %}{% when Some with (board) %}<span class="board" title="{{ board }}">{{ board }}</span>{% when None %}{% endmatch %}{% endif %}
+    <div class="card-heading">
+      <div class="card-meta">
+        <p class="dimensions">{{ item.width }} × {{ item.height }}</p>
+        <span class="file-size">{{ self.human_bytes(item.byte_size) }}</span>
+      </div>
       {% if !item.recommendation.is_inspection() %}<span class="badge {{ item.recommendation.css_class() }}">{{ item.recommendation.html_label() }}</span>{% endif %}
     </div>
-    {% if show_boards %}{% match item.board %}{% when Some with (board) %}<span class="board" title="{{ board }}">{{ board }}</span>{% when None %}{% endmatch %}{% endif %}
     <div class="pin-details">
       <span class="pin-id">Pin {{ item.pin_id }}</span>
-      <span>{{ item.media_kind.label() }}</span>
+      <span class="pin-media">{{ item.media_kind.label() }}</span>
     </div>
     <div class="card-actions">
       <label class="removal-choice"><input type="checkbox" data-remove-pin="{{ item.pin_id }}" /><span>Remove this copy</span></label>

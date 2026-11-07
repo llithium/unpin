@@ -327,14 +327,9 @@
           const button = group.querySelector("[data-review-button]");
           button?.setAttribute("aria-pressed", reviewed ? "true" : "false");
           const label = button?.querySelector("[data-review-label]");
-          if (label) label.textContent = reviewed ? "Reviewed" : decision?.action === "remove" ? "Save decision" : "Done";
+          if (label) label.textContent = reviewed ? "Reviewed" : decision?.action === "remove" ? "Save decision" : "Mark reviewed";
           const link = linkByTarget.get(group.id);
           link?.classList.toggle("is-reviewed", reviewed);
-          if (link) {
-            const title = link.querySelector(".match-link-title")?.textContent?.trim() || "Match";
-            if (reviewed) link.setAttribute("aria-label", `${title}, reviewed`);
-            else link.removeAttribute("aria-label");
-          }
         };
 
         let undoDecisions = null;
@@ -438,11 +433,7 @@
             (group) => !group.classList.contains("is-filtered"),
           );
           visibleIndices = new Map(visible.map((group, index) => [group, index]));
-          if (visibleCount) {
-            visibleCount.textContent = `${visible.length} shown`;
-            const mobileCount = document.querySelector("[data-mobile-count]");
-            if (mobileCount) mobileCount.textContent = `${visible.length} matches`;
-          }
+          if (visibleCount) visibleCount.textContent = `${visible.length} shown`;
           const emptyTitle = document.querySelector("#filter-empty-title");
           if (emptyTitle) {
             emptyTitle.textContent = reviewedKeys.size === groups.length && groups.length > 0
