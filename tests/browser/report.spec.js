@@ -356,6 +356,7 @@ test("empty scans show their identity and warnings without unusable review contr
   await page.goto(`${origin}/empty.html`);
   await expect(page.locator(".report-intro")).toBeVisible();
   await expect(page.locator(".empty")).toBeVisible();
+  await expect(page.locator(".empty strong")).toHaveText("No matches found");
   await expect(page.locator(".scan-warning")).toBeVisible();
   await expect(page.locator("#scan-warnings")).toHaveAttribute("open", "");
   await expect(page.locator(".rail")).toBeHidden();
@@ -399,6 +400,27 @@ test("long content and three-pin groups fit narrow, tablet, desktop, and overvie
       for (const card of cards) expect(card.content).toBeLessThanOrEqual(card.width + 1);
     }
   }
+});
+
+test("reviewed mobile queue tiles fit long match numbers beside the checkmark", async ({ page }) => {
+  await page.setViewportSize({ width: 320, height: 844 });
+  await openReport(page);
+  const tile = page.locator('[data-target="visual-1"]');
+  await tile.click();
+  await decide(page, "visual-1", "keep_all");
+  await expect(tile).toHaveAccessibleName(/Reviewed/);
+
+  // Exercise a longer queue label using the same reviewed match and layout.
+  const number = tile.locator(".match-number");
+  await number.evaluate(label => { label.textContent = "Visual 1000"; });
+  const [tileBox, numberBox, stateBox] = await Promise.all([
+    tile.boundingBox(),
+    number.boundingBox(),
+    tile.locator(".match-link-state").boundingBox(),
+  ]);
+  expect(numberBox.x + numberBox.width).toBeLessThanOrEqual(stateBox.x);
+  expect(stateBox.x + stateBox.width).toBeLessThanOrEqual(tileBox.x + tileBox.width);
+  expect(await page.evaluate(() => document.documentElement.scrollWidth)).toBe(320);
 });
 
 test("grouped visual variants retain every save with two previews", async ({ page }) => {
@@ -529,6 +551,47 @@ test("comparison images fit their viewing area and decisions stay on screen", as
   const done = await page.locator('#exact-1 [data-review-button]').boundingBox();
   expect(done.y + done.height).toBeLessThanOrEqual(800);
   await expect(page.locator('.report-tools')).not.toHaveAttribute('open', '');
+});
+
+test("widescreen focus uses the available width and keeps large portraits together", async ({ page }) => {
+  await page.route("https://images.example.test/20*.jpg", route => route.fulfill({
+    contentType: "image/svg+xml",
+    body: '<svg xmlns="http://www.w3.org/2000/svg" width="900" height="1200"><rect width="900" height="1200" fill="green"/></svg>',
+  }));
+  await page.setViewportSize({ width: 2560, height: 1200 });
+  await openReport(page);
+  const landscape = await page.locator("#exact-1 .comparison").boundingBox();
+  const landscapeRightGutter = 2560 - landscape.x - landscape.width;
+
+  await page.locator('[data-target="exact-2"]').click();
+  const stages = page.locator("#exact-2 .image-stage");
+  await expect(stages.locator("img.is-loaded")).toHaveCount(2);
+  const [first, second] = await stages.evaluateAll(stages =>
+    stages.map(stage => {
+      const { x, y, width, height } = stage.getBoundingClientRect();
+      const image = stage.querySelector("img");
+      const scale = Math.min(width / image.naturalWidth, height / image.naturalHeight);
+      const paintedWidth = image.naturalWidth * scale;
+      const paintedHeight = image.naturalHeight * scale;
+      return {
+        top: y + (height - paintedHeight) / 2,
+        bottom: y + (height + paintedHeight) / 2,
+        height: paintedHeight,
+        left: x + (width - paintedWidth) / 2,
+        right: x + (width + paintedWidth) / 2,
+      };
+    })
+  );
+  expect.soft(landscapeRightGutter, "landscape comparison fills the report width").toBeLessThan(40);
+  expect.soft(first.height, "portrait uses most of the viewport height").toBeGreaterThanOrEqual(840);
+  expect(second.top).toBe(first.top);
+  expect(second.height).toBe(first.height);
+  expect(first.top).toBeGreaterThanOrEqual(0);
+  expect(first.bottom).toBeLessThanOrEqual(1200);
+  expect.soft(second.left - first.right, "both portraits are close enough for direct comparison").toBeLessThan(30);
+  const review = await page.locator("#exact-2 [data-review-button]").boundingBox();
+  expect(review.y + review.height).toBeLessThanOrEqual(1200);
+  expect(await page.evaluate(() => document.documentElement.scrollWidth)).toBe(2560);
 });
 
 test("decision confirmations expire and newer actions get a fresh Undo window", async ({ page }) => {
