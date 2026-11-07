@@ -356,6 +356,7 @@ test("empty scans show their identity and warnings without unusable review contr
   await page.goto(`${origin}/empty.html`);
   await expect(page.locator(".report-intro")).toBeVisible();
   await expect(page.locator(".empty")).toBeVisible();
+  await expect(page.locator(".empty strong")).toHaveText("No matches found");
   await expect(page.locator(".scan-warning")).toBeVisible();
   await expect(page.locator("#scan-warnings")).toHaveAttribute("open", "");
   await expect(page.locator(".rail")).toBeHidden();
@@ -399,6 +400,27 @@ test("long content and three-pin groups fit narrow, tablet, desktop, and overvie
       for (const card of cards) expect(card.content).toBeLessThanOrEqual(card.width + 1);
     }
   }
+});
+
+test("reviewed mobile queue tiles fit long match numbers beside the checkmark", async ({ page }) => {
+  await page.setViewportSize({ width: 320, height: 844 });
+  await openReport(page);
+  const tile = page.locator('[data-target="visual-1"]');
+  await tile.click();
+  await decide(page, "visual-1", "keep_all");
+  await expect(tile).toHaveAccessibleName(/Reviewed/);
+
+  // Exercise a longer queue label using the same reviewed match and layout.
+  const number = tile.locator(".match-number");
+  await number.evaluate(label => { label.textContent = "Visual 1000"; });
+  const [tileBox, numberBox, stateBox] = await Promise.all([
+    tile.boundingBox(),
+    number.boundingBox(),
+    tile.locator(".match-link-state").boundingBox(),
+  ]);
+  expect(numberBox.x + numberBox.width).toBeLessThanOrEqual(stateBox.x);
+  expect(stateBox.x + stateBox.width).toBeLessThanOrEqual(tileBox.x + tileBox.width);
+  expect(await page.evaluate(() => document.documentElement.scrollWidth)).toBe(320);
 });
 
 test("grouped visual variants retain every save with two previews", async ({ page }) => {
