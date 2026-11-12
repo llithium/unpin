@@ -320,7 +320,9 @@
             button.setAttribute("aria-pressed", decision?.action === button.dataset.decisionAction ? "true" : "false");
           });
           const notice = group.querySelector("[data-decision-notice]");
-          if (notice) notice.textContent = decision?.action === "remove" && !reviewed ? `${decision.remove_pin_ids.length} ${decision.remove_pin_ids.length === 1 ? "copy" : "copies"} selected` : "";
+          if (notice) notice.textContent = decision?.action === "remove"
+            ? `${reviewed ? "" : "Draft: "}${decision.remove_pin_ids.length} ${decision.remove_pin_ids.length === 1 ? "copy" : "copies"} flagged`
+            : "";
           group.querySelectorAll("[data-remove-pin]").forEach((input) => {
             input.checked = Boolean(decision?.remove_pin_ids.includes(input.dataset.removePin));
           });
@@ -386,7 +388,10 @@
             const index = visibleIndices.get(group) ?? -1;
             preferredActive = visible[index + 1] || visible[index - 1] || null;
           }
-          offerUndo(action ? "Decision saved" : "Decision cleared", group);
+          const message = !action ? "Decision cleared"
+            : action === "remove" && !reviewed ? "Selection saved as draft"
+            : action === "later" ? "Decision deferred" : "Decision saved";
+          offerUndo(message, group);
           if (action) decisions.set(group.dataset.reviewKey, decisionRecord(group, action, removePinIds, reviewed));
           else decisions.delete(group.dataset.reviewKey);
           dirtyDecisions.add(group.dataset.reviewKey);
@@ -395,7 +400,7 @@
           else syncQuickWins();
           updateProgress();
           if (reviewed) acknowledgeReview();
-          announce(`${action ? "Decision saved" : "Decision cleared"}. ${visible.length} matches shown`);
+          announce(`${message}. ${visible.length} matches shown`);
         };
         const setReviewed = (group, reviewed) => {
           const current = decisions.get(group.dataset.reviewKey);

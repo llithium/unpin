@@ -85,6 +85,7 @@
           </div>
           <div class="filter-controls" id="match-filters">
             {% if show_boards %}
+            <div class="filters" role="radiogroup" aria-label="Filter matches by board scope">
             <input
               type="radio"
               name="scope-filter"
@@ -107,11 +108,6 @@
               class="filter-input"
               value="cross-board"
             />
-            <div
-              class="filters"
-              role="group"
-              aria-label="Filter matches by board scope"
-            >
               <span class="filter-legend" aria-hidden="true">Board scope</span>
               <label for="filter-all"
                 ><span>All</span
@@ -128,6 +124,7 @@
             </div>
             {% endif %} {% if !report.exact_groups.is_empty() &&
             !report.visual_candidates.is_empty() %}
+            <div class="filters" role="radiogroup" aria-label="Filter matches by type">
             <input
               type="radio"
               name="kind-filter"
@@ -150,11 +147,6 @@
               class="filter-input"
               value="visual"
             />
-            <div
-              class="filters"
-              role="group"
-              aria-label="Filter matches by type"
-            >
               <span class="filter-legend" aria-hidden="true">Match type</span>
               <label for="kind-all"
                 ><span>All</span
@@ -236,7 +228,7 @@
                 >
                 <span class="match-link-detail">
                   <span class="match-number">Visual {{ loop.index }}</span>
-                  <span>{{ candidate.similarity_percent }}% match</span>
+                  <span>{{ candidate.similarity_percent }}% similarity</span>
                 </span>
               </span>
               <span class="match-link-state"><span class="sr-only">Reviewed</span></span>
@@ -361,7 +353,7 @@
                 {% let copies = candidate.copies[loop.index0] %}
                 {% if !copies.is_empty() %}
                 <details class="additional-saves"><summary>{{ copies.len() }} additional {% if copies.len() == 1 %}save{% else %}saves{% endif %}</summary>
-                  <ul>{% for copy in copies %}<li data-pin-id="{{ copy.pin_id }}" data-media-kind="{{ copy.media_kind.as_str() }}" data-image-sha256="{{ copy.image_sha256 }}"><label class="removal-choice"><input type="checkbox" data-remove-pin="{{ copy.pin_id }}" /><span>Remove this copy</span></label><a data-image-url="{{ copy.image_url }}" href="{{ copy.pin_url }}" target="_blank" rel="noopener noreferrer">Pin {{ copy.pin_id }}</a>{% match copy.board %}{% when Some with (board) %} · {{ board }}{% when None %}{% endmatch %}</li>{% endfor %}</ul>
+                  <ul>{% for copy in copies %}<li data-pin-id="{{ copy.pin_id }}" data-media-kind="{{ copy.media_kind.as_str() }}" data-image-sha256="{{ copy.image_sha256 }}"><label class="removal-choice"><input type="checkbox" data-remove-pin="{{ copy.pin_id }}" aria-label="Flag for removal, pin {{ copy.pin_id }}" /><span>Flag for removal</span></label><a data-image-url="{{ copy.image_url }}" href="{{ copy.pin_url }}" target="_blank" rel="noopener noreferrer">Pin {{ copy.pin_id }}</a>{% match copy.board %}{% when Some with (board) %} · {{ board }}{% when None %}{% endmatch %}</li>{% endfor %}</ul>
                 </details>
                 {% endif %}
               </div>

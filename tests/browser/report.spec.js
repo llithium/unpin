@@ -632,3 +632,120 @@ test("Undo stays available during interaction and confirmations can be dismissed
   await page.keyboard.press('Escape');
   await expect(page.locator('#review-feedback')).toBeHidden();
 });
+
+for (const width of [320, 1280]) {
+  test(`removal flags stay drafts until review is saved at ${width}px`, async ({ page }) => {
+    await page.setViewportSize({ width, height: 900 });
+    await openReport(page);
+    const match = page.locator('#exact-1');
+    const flag = match.getByRole('checkbox', { name: 'Flag for removal, pin 102', exact: true });
+    await expect(match.locator('.decision-help')).toBeVisible();
+    await expect(match.locator('.decision-help')).toHaveText('Flags are saved in this browser. Open a pin to remove it on Pinterest.');
+    await expect(page.locator('.report-tools')).not.toHaveAttribute('open', '');
+    await flag.focus();
+    await flag.press('Space');
+    await expect(flag).toBeChecked();
+    await expect(page.locator('#review-feedback-label')).toHaveText('Selection saved as draft');
+    await expect(page.locator('#interaction-status')).toContainText('Selection saved as draft');
+    await expect(match.locator('[data-decision-notice]')).toHaveText('Draft: 1 copy flagged');
+    await expect(match.locator('[data-review-label]')).toHaveText('Save decision');
+    await expect(page.locator('#review-progress')).toHaveText('0 / 3');
+    await page.reload();
+    await expect(flag).toBeChecked();
+    await expect(match.locator('[data-decision-notice]')).toHaveText('Draft: 1 copy flagged');
+    await expect(match).toHaveAttribute('data-reviewed', 'false');
+    await match.locator('[data-review-button]').focus();
+    await match.locator('[data-review-button]').press('Enter');
+    await expect(page.locator('#review-feedback-label')).toHaveText('Decision saved');
+    await expect(page.locator('#review-progress')).toHaveText('1 / 3');
+    await expect(match).toHaveAttribute('data-reviewed', 'true');
+    await page.getByRole('button', { name: 'Undo', exact: true }).click();
+    await expect(flag).toBeChecked();
+    await expect(match.locator('[data-decision-notice]')).toHaveText('Draft: 1 copy flagged');
+    await expect(page.locator('#review-progress')).toHaveText('0 / 3');
+    await flag.uncheck();
+    await expect(page.locator('#review-feedback-label')).toHaveText('Decision cleared');
+    await expect(match.locator('[data-review-label]')).toHaveText('Mark reviewed');
+    expect(await page.evaluate(() => document.documentElement.scrollWidth)).toBe(width);
+  });
+}
+
+test('pin controls have specific accessible names, including additional saves', async ({ page }) => {
+  await openReport(page);
+  const exact = page.locator('#exact-1');
+  for (const id of ['101', '102']) {
+    await expect(exact.getByRole('checkbox', { name: `Flag for removal, pin ${id}`, exact: true })).toHaveCount(1);
+    await expect(exact.getByRole('link', { name: `Open pin ${id}`, exact: true })).toHaveAttribute('href', `https://www.pinterest.com/pin/${id}/`);
+    await expect(exact.getByRole('link', { name: `Open image for pin ${id}`, exact: true })).toHaveCount(1);
+  }
+  await page.locator('.match-link[data-target="visual-1"]').click();
+  const visual = page.locator('#visual-1');
+  await expect(page.locator('.match-link[data-target="visual-1"]')).toContainText('98% similarity');
+  await visual.getByText('1 additional save', { exact: true }).click();
+  const extra = visual.getByRole('checkbox', { name: 'Flag for removal, pin 303', exact: true });
+  await extra.check();
+  await expect(visual.locator('[data-decision-notice]')).toHaveText('Draft: 1 copy flagged');
+  await page.reload();
+  await visual.getByText('1 additional save', { exact: true }).click();
+  await expect(extra).toBeChecked();
+});
+
+test('filter radios belong to their named groups and retain keyboard selection styling', async ({ page }) => {
+  await openReport(page);
+  const scope = page.getByRole('radiogroup', { name: 'Filter matches by board scope', exact: true });
+  const kind = page.getByRole('radiogroup', { name: 'Filter matches by type', exact: true });
+  await expect(scope.getByRole('radio')).toHaveCount(3);
+  await expect(kind.getByRole('radio')).toHaveCount(3);
+  await scope.getByRole('radio', { name: 'All 3', exact: true }).focus();
+  await page.keyboard.press('ArrowRight');
+  await expect(scope.getByRole('radio', { name: 'Same 2', exact: true })).toBeChecked();
+  await expect(scope.getByRole('radio', { name: 'Same 2', exact: true })).toBeFocused();
+  await expect(kind.getByRole('radio', { name: 'All 3', exact: true })).toBeChecked();
+  const selectedStyle = await scope.locator('label[for="filter-same"]').evaluate(label => ({
+    background: getComputedStyle(label).backgroundColor,
+    outline: getComputedStyle(label).outlineStyle,
+  }));
+  expect(selectedStyle.background).toBe('rgb(48, 56, 66)');
+  expect(selectedStyle.outline).toBe('solid');
+  await kind.getByRole('radio', { name: 'All 3', exact: true }).focus();
+  await page.keyboard.press('ArrowRight');
+  await expect(kind.getByRole('radio', { name: 'Exact 2', exact: true })).toBeChecked();
+  await expect(visibleGroups(page)).toHaveCount(1);
+});
+
+for (const width of [320, 390, 2560]) {
+  test(`full board names can be revealed by keyboard and pointer at ${width}px`, async ({ page }) => {
+    await page.setViewportSize({ width, height: 900 });
+    await page.goto(`${origin}/long-content.html`);
+    const details = page.locator('#exact-1 .board-details').first();
+    const name = 'A very long board name with art references and illustration inspiration';
+    const summary = details.getByText(name, { exact: true }).first();
+    await expect(details).not.toHaveAttribute('open', '');
+    await summary.focus();
+    await summary.press('Enter');
+    await expect(details).toHaveAttribute('open', '');
+    await expect(details.locator('.board-full')).toHaveText(name);
+    const textFits = await details.locator('.board-full').evaluate(element => element.scrollWidth <= element.clientWidth);
+    expect(textFits).toBe(true);
+    await summary.press('Space');
+    await expect(details).not.toHaveAttribute('open', '');
+    await summary.click();
+    await expect(details.locator('.board-full')).toBeVisible();
+    expect(await page.evaluate(() => document.documentElement.scrollWidth)).toBe(width);
+  });
+}
+
+test.describe('touch board names', () => {
+  test.use({ hasTouch: true, viewport: { width: 390, height: 844 } });
+
+  test('tap reveals the full board name with a usable touch target', async ({ page }) => {
+    await page.goto(`${origin}/long-content.html`);
+    const details = page.locator('#exact-1 .board-details').first();
+    const summary = details.locator('summary');
+    expect((await summary.boundingBox()).height).toBeGreaterThanOrEqual(44);
+    await summary.tap();
+    await expect(details.locator('.board-full')).toBeVisible();
+    await expect(details.locator('.board-full')).toHaveText('A very long board name with art references and illustration inspiration');
+    expect(await page.evaluate(() => document.documentElement.scrollWidth)).toBe(390);
+  });
+});

@@ -197,11 +197,15 @@ Run `unpin --help` for the complete interface.
 - The visual report stores decisions for unchanged matches across board selections
   and board renames in this browser. Decisions include reviewed, keep all saves,
   decide later, not a duplicate, and selected copies flagged for removal. Removal
-  flags stay editable until you choose `Save decision`; `Done` marks a comparison
+  flags stay editable until you choose `Save decision`; `Mark reviewed` marks a comparison
   reviewed, and `Keep all` records that choice directly. `More` contains
   decide-later, not-duplicate, and clear-decision actions. Decide-later matches
   stay in the unreviewed queue. Changed image content, media types, or saved-pin
   membership produce a new review item.
+  `Flag for removal` saves a draft selection; `Save decision` completes its review.
+  Confirmation messages distinguish those two states. Flags are local review notes;
+  open a pin to remove it manually on Pinterest. Board names can be expanded by
+  clicking, tapping, or pressing Enter to read the full name on narrow screens.
   Pin IDs and media types are always visible below each preview; backup and scan details
   are under `Report tools`. `Export decisions` backs up the browser's decision history as JSON, including
   pin/image links, image fingerprints, and media types. `Import decisions`
