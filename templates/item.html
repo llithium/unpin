@@ -4,7 +4,7 @@
     <img src="{{ item.image_url }}" alt="" width="{{ item.width }}" height="{{ item.height }}" loading="lazy" decoding="async" referrerpolicy="no-referrer" />
   </a>
   <div class="card-body">
-    {% if show_boards %}{% match item.board %}{% when Some with (board) %}<span class="board" title="{{ board }}">{{ board }}</span>{% when None %}{% endmatch %}{% endif %}
+    {% if show_boards %}{% match item.board %}{% when Some with (board) %}<details class="board-details"><summary class="board" title="{{ board }}" aria-label="Board: {{ board }}, pin {{ item.pin_id }}">{{ board }}</summary><p class="board-full">{{ board }}</p></details>{% when None %}{% endmatch %}{% endif %}
     <div class="card-heading">
       <div class="card-meta">
         <p class="dimensions">{{ item.width }} × {{ item.height }}</p>
@@ -17,10 +17,10 @@
       <span class="pin-media">{{ item.media_kind.label() }}</span>
     </div>
     <div class="card-actions">
-      <label class="removal-choice"><input type="checkbox" data-remove-pin="{{ item.pin_id }}" /><span>Remove this copy</span></label>
+      <label class="removal-choice"><input type="checkbox" data-remove-pin="{{ item.pin_id }}" aria-label="Flag for removal, pin {{ item.pin_id }}" /><span>Flag for removal</span></label>
       <div class="card-links">
-        <a class="button primary" href="{{ item.pin_url }}" target="_blank" rel="noopener noreferrer">Open pin</a>
-        <a class="button primary" href="{{ item.image_url }}" target="_blank" rel="noopener noreferrer">Open image</a>
+        <a class="button primary" href="{{ item.pin_url }}" target="_blank" rel="noopener noreferrer" aria-label="Open pin {{ item.pin_id }}">Open pin</a>
+        <a class="button primary" href="{{ item.image_url }}" target="_blank" rel="noopener noreferrer" aria-label="Open image for pin {{ item.pin_id }}">Open image</a>
       </div>
     </div>
   </div>
