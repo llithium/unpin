@@ -104,10 +104,12 @@ purpose, so they sit under **Across boards** and never count as easy calls.
   Covers of video and story pins are never easy calls.
 - Every card has **Remove smaller** (or **Remove duplicate**) and **Keep both**
   buttons, so most matches take one tap without opening them.
-- Open a card to compare its copies side by side. **Remove the smaller copy**
-  and **Keep both** save and move to the next match; `R` and `A` do the same,
-  and `J` and `K` move between matches. To pick copies yourself, tick **Remove
-  this copy** and save. `O` or `Escape` goes back to the gallery.
+- Open a card to compare its copies side by side. The copy that **Remove the
+  smaller copy** would take is marked **Suggested to remove**. That button and
+  **Keep both** save and move to the next match; `R` and `A` do the same, and
+  `J` and `K` move between matches. To choose a copy yourself, tap **Remove this
+  one** on it; that saves straight away too. `O` or `Escape` goes back to the
+  gallery.
 - Everything flagged collects in the removal tray at the bottom of the page.
 
 **2 · Remove.** Choose **Start removing** on the tray.

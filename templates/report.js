@@ -401,15 +401,11 @@
           });
           const notice = group.querySelector("[data-decision-notice]");
           if (notice) notice.textContent = decision?.action === "remove"
-            ? `${reviewed ? "" : "Draft: "}${decision.remove_pin_ids.length} ${decision.remove_pin_ids.length === 1 ? "copy" : "copies"} flagged`
+            ? `${decision.remove_pin_ids.length} ${decision.remove_pin_ids.length === 1 ? "copy" : "copies"} going to the removal tray`
             : "";
           group.querySelectorAll("[data-remove-pin]").forEach((input) => {
             input.checked = Boolean(decision?.remove_pin_ids.includes(input.dataset.removePin));
           });
-          const button = group.querySelector("[data-review-button]");
-          button?.setAttribute("aria-pressed", reviewed ? "true" : "false");
-          const label = button?.querySelector("[data-review-label]");
-          if (label) label.textContent = reviewed ? "Reviewed" : decision?.action === "remove" ? "Save decision" : "Mark reviewed";
           group.querySelector("[data-remove-smaller]")?.setAttribute("aria-pressed", decision?.action === "remove" && reviewed ? "true" : "false");
           group.dataset.draft = decision?.action === "remove" && !reviewed ? "true" : "false";
           document.querySelectorAll(`[data-quick][data-target="${CSS.escape(group.id)}"]`).forEach((quick) => {
@@ -475,11 +471,11 @@
           scheduleFeedbackDismissal();
         };
         // Opening a match from the gallery moves focus into the page, so the
-        // J, K and E shortcuts work straight away and Tab reaches the match.
+        // J, K, R and A shortcuts work straight away and Tab reaches the match.
         const focusMatch = () => document.querySelector("#report-content")?.focus({ preventScroll: true });
         const focusReview = () => {
           active?.scrollIntoView({ block: "start", behavior: "instant" });
-          const target = active?.querySelector("[data-review-button]") || document.querySelector("#clear-filters");
+          const target = active?.querySelector("[data-remove-smaller]") || document.querySelector("#clear-filters");
           target?.focus({ preventScroll: true });
         };
         const setDecision = (group, action, removePinIds = [], reviewed = Boolean(action && action !== "later" && action !== "remove")) => {
@@ -502,11 +498,6 @@
           updateProgress();
           if (reviewed) acknowledgeReview();
           announce(`${message}. ${visible.length} matches shown`);
-        };
-        const setReviewed = (group, reviewed) => {
-          const current = decisions.get(group.dataset.reviewKey);
-          if (reviewed && current?.action === "remove") setDecision(group, "remove", current.remove_pin_ids, true);
-          else setDecision(group, reviewed ? "reviewed" : "");
         };
 
         const advanceAfterReview = (group) => {
@@ -614,17 +605,16 @@
           if (keepLabel && extra === 1) keepLabel.textContent = "Keep both";
         });
 
+        // Mark the copies that Remove the smaller copy would take, and the
+        // one it keeps, until a decision is made.
         groups.forEach((group) => {
-          group
-            .querySelector("[data-review-button]")
-            ?.addEventListener("click", () => {
-              setActive(group);
-              const reviewed = group.dataset.reviewed !== "true";
-              setReviewed(group, reviewed);
-              if (reviewed) advanceAfterReview(group);
-              focusReview();
-              writeStoredState();
-            });
+          const keep = keptPinFor(group);
+          group.querySelectorAll(".pin-card[data-pin-id]").forEach((card) => {
+            const kept = card.dataset.pinId === keep;
+            card.dataset.suggested = kept ? "keep" : "remove";
+            const tag = card.querySelector(".suggestion");
+            if (tag) tag.textContent = kept ? "Keep" : "Suggested to remove";
+          });
         });
 
         [...scopeFilters, ...kindFilters].forEach((filter) =>
@@ -717,7 +707,6 @@
         groups.forEach((group) => {
           group.querySelectorAll("[data-decision-action]").forEach((button) => button.addEventListener("click", () => {
             const action = button.dataset.decisionAction;
-            group.querySelectorAll(".decision-more").forEach((menu) => menu.open = false);
             setDecision(group, action);
             if (action) advanceAfterReview(group);
             focusReview();
@@ -730,9 +719,17 @@
             focusReview();
             writeStoredState();
           });
+          // Picking a copy saves straight away. With two saves the pick is
+          // the whole decision, so the next match opens.
           group.querySelectorAll("[data-remove-pin]").forEach((input) => input.addEventListener("change", () => {
-            const ids = [...group.querySelectorAll("[data-remove-pin]:checked")].map((choice) => choice.dataset.removePin);
-            setDecision(group, ids.length ? "remove" : "", ids);
+            const choices = [...group.querySelectorAll("[data-remove-pin]")];
+            const ids = choices.filter((choice) => choice.checked).map((choice) => choice.dataset.removePin);
+            setActive(group);
+            setDecision(group, ids.length ? "remove" : "", ids, ids.length > 0);
+            if (input.checked && choices.length === 2 && ids.length === 1) {
+              advanceAfterReview(group);
+              if (active !== group) focusReview();
+            }
             writeStoredState();
           }));
         });
@@ -816,13 +813,6 @@
           }
           if (key === "j") move(1);
           if (key === "k") move(-1);
-          if (key === "e" && active && !isGallery()) {
-            const reviewedGroup = active;
-            const reviewed = reviewedGroup.dataset.reviewed !== "true";
-            setReviewed(reviewedGroup, reviewed);
-            if (reviewed) advanceAfterReview(reviewedGroup);
-            writeStoredState();
-          }
           if ((key === "r" || key === "a") && active && !isGallery()) {
             const group = active;
             if (key === "r") removeSmaller(group);

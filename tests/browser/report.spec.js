@@ -112,18 +112,19 @@ async function openMatch(page, target) {
     await page.locator("#gallery-toggle").click();
   }
   const link = page.locator(`.match-link[data-target="${target}"]`);
-  if (await link.evaluate((element) => element.classList.contains("is-filtered"))) {
+  const filtered = () => link.evaluate((element) => element.classList.contains("is-filtered"));
+  if (await filtered()) {
     const all = page.locator('label[for="filter-all"]');
     if (await all.count()) await all.click();
-    else await page.locator("#clear-filters").click();
   }
+  if (await filtered()) await page.locator("#unreviewed-only").uncheck();
   await link.click();
 }
 
 async function decide(page, groupId, action) {
   const group = page.locator(`#${groupId}`);
-  if (action !== "keep_all") await group.locator(".decision-more > summary").click();
-  await group.locator(`[data-decision-action="${action}"]`).click();
+  if (action === "remove") await group.locator("[data-remove-smaller]").click();
+  else await group.locator(`[data-decision-action="${action}"]`).click();
 }
 
 function visibleGroups(page) {
@@ -143,7 +144,7 @@ test("scope, kind, and review filters compose as a user queue", async ({ page })
 
   await page.locator("#unreviewed-only").check();
   await openMatch(page, "exact-1");
-  await page.locator("#exact-1 [data-review-button]").click();
+  await page.locator("#exact-1 [data-decision-action=keep_all]").click();
   await expect(visibleGroups(page)).toHaveCount(0);
   await expect(page.locator("#filter-empty")).toHaveClass(/is-visible/);
   await expect(page.locator("#filter-empty")).toBeVisible();
@@ -313,7 +314,7 @@ test("focus navigation, gallery, keyboard shortcuts, and active state stay coher
   await expect(page.locator("body")).toHaveClass(/gallery-mode/);
   await page.keyboard.press("o");
 
-  await page.keyboard.press("e");
+  await page.keyboard.press("a");
   await expect(page.locator("#exact-2")).toHaveAttribute("data-reviewed", "true");
   await expect(page.locator("#review-progress")).toHaveText("1 / 3");
 });
@@ -323,7 +324,7 @@ test("review state persists, rejects inconsistent state, and resets", async ({ p
   const key = "unpin:review:v3";
 
   await page.evaluate(() => (window.__storageWrites = []));
-  await page.locator("#exact-1 [data-review-button]").click();
+  await page.locator("#exact-1 [data-decision-action=keep_all]").click();
   await expect
     .poll(() => page.evaluate(() => window.__storageWrites.length))
     .toBe(1);
@@ -347,7 +348,7 @@ test("review state persists, rejects inconsistent state, and resets", async ({ p
   await expect(page.locator("#unreviewed-only")).not.toBeChecked();
 
   await openMatch(page, "exact-1");
-  await page.locator("#exact-1 [data-review-button]").click();
+  await page.locator("#exact-1 [data-decision-action=keep_all]").click();
   await page.evaluate(() => (window.__storageWrites = []));
   await page.locator("#reset-review").click();
   await expect
@@ -416,19 +417,19 @@ test("responsive and print modes keep report content within their presentation b
 
 test("review advance preserves keyboard focus and Undo restores the match", async ({ page }) => {
   await openReport(page);
-  const review = page.locator("#exact-1 [data-review-button]");
+  const review = page.locator("#exact-1 [data-decision-action=keep_all]");
   await review.focus();
   await page.keyboard.press("Enter");
-  await expect(page.locator("#exact-2 [data-review-button]")).toBeFocused();
+  await expect(page.locator("#exact-2 [data-remove-smaller]")).toBeFocused();
   await page.locator("#undo-review").click();
-  await expect(review).toBeFocused();
+  await expect(page.locator("#exact-1 [data-remove-smaller]")).toBeFocused();
   await expect(page.locator("#exact-1")).toHaveAttribute("data-reviewed", "false");
   await expect(page.locator("#review-progress")).toHaveText("0 / 3");
 
   await page.locator("#gallery-toggle").click();
   await page.locator("#quick-wins").click();
   await review.click();
-  await page.locator("#visual-1 [data-review-button]").click();
+  await page.locator("#visual-1 [data-decision-action=keep_all]").click();
   await expect(page.locator("#clear-filters")).toBeFocused();
   await page.locator("#clear-filters").click();
   await expect(visibleGroups(page)).toHaveCount(3);
@@ -480,12 +481,12 @@ test("a completed queue explains completion and can be revisited", async ({ page
   await page.locator("#unreviewed-only").check();
   await openMatch(page, "exact-1");
   for (const id of ["exact-1", "exact-2", "visual-1"]) {
-    await page.locator(`#${id} [data-review-button]`).click();
+    await page.locator(`#${id} [data-decision-action=keep_all]`).click();
   }
   await expect(page.locator("#filter-empty-title")).toHaveText("All matches reviewed");
   await expect(page.locator("#clear-filters")).toBeFocused();
   await page.locator("#undo-review").click();
-  await expect(page.locator("#visual-1 [data-review-button]")).toBeFocused();
+  await expect(page.locator("#visual-1 [data-remove-smaller]")).toBeFocused();
   await expect(visibleGroups(page)).toHaveCount(1);
 });
 
@@ -499,7 +500,7 @@ test("failed images explain recovery and storage failures disclose unsaved progr
   const errorText = await page.locator("#exact-1 .image-stage").first().evaluate(el => getComputedStyle(el, "::before").content);
   expect(errorText).toContain("Open the pin");
   await expect(page.locator("#exact-1 .button.primary").first()).toBeVisible();
-  await page.locator("#exact-1 [data-review-button]").click();
+  await page.locator("#exact-1 [data-decision-action=keep_all]").click();
   await expect(page.locator("#storage-notice")).toBeVisible();
   await expect(page.locator("#review-progress")).toHaveText("1 / 3");
 });
@@ -595,13 +596,9 @@ test("decisions survive board subsets, export/import, and undo", async ({ page }
   await openReport(page);
   await page.locator('#exact-1 [data-remove-pin="102"]').check();
   await expect(page.locator("#exact-1")).toHaveAttribute("data-decision", "remove");
-  await expect(page.locator("#exact-1")).toHaveAttribute("data-reviewed", "false");
-  await page.locator('#exact-1 [data-review-button]').click();
-  await expect(page.locator("#exact-1")).toHaveAttribute("data-decision", "remove");
-  await openMatch(page, "exact-2");
+  await expect(page.locator("#exact-1")).toHaveAttribute("data-reviewed", "true");
+  await expect(page.locator('[data-group].is-active')).toHaveAttribute("id", "exact-2");
   await decide(page, "exact-2", "keep_all");
-  await openMatch(page, "visual-1");
-  await decide(page, "visual-1", "later");
   await expect(page.locator("#review-progress")).toHaveText("2 / 3");
   const downloadReady = page.waitForEvent("download");
   await page.locator("#gallery-toggle").click();
@@ -610,7 +607,7 @@ test("decisions survive board subsets, export/import, and undo", async ({ page }
   const download = await downloadReady;
   const exported = JSON.parse(await readFile(await download.path(), "utf8"));
   expect(exported.schema_version).toBe(1);
-  expect(exported.decisions).toHaveLength(3);
+  expect(exported.decisions).toHaveLength(2);
   expect(exported.decisions.find((decision) => decision.action === "remove").remove_pin_ids).toEqual(["102"]);
   expect(exported.decisions.every((decision) => decision.items.every((item) => item.pin_url && item.image_url))).toBe(true);
 
@@ -619,22 +616,24 @@ test("decisions survive board subsets, export/import, and undo", async ({ page }
   await expect(page.locator('#exact-1 [data-remove-pin="102"]')).toBeChecked();
   await page.locator("#reset-review").click();
   const remaining = await page.evaluate(() => JSON.parse(localStorage.getItem("unpin:review:v3")).decisions);
-  expect(remaining.map((decision) => decision.action).sort()).toEqual(["keep_all", "later"]);
+  expect(remaining.map((decision) => decision.action).sort()).toEqual(["keep_all"]);
   await page.evaluate(() => localStorage.clear());
   await page.goto(`${origin}${fixtureUrl}`);
   await page.locator("#review-file").setInputFiles({ name: "decisions.json", mimeType: "application/json", buffer: Buffer.from(JSON.stringify(exported)) });
-  await expect(page.locator("#transfer-status")).toHaveText("Imported 3 decisions; 3 match this report.");
+  await expect(page.locator("#transfer-status")).toHaveText("Imported 2 decisions; 2 match this report.");
   await expect(page.locator("#exact-1")).toHaveAttribute("data-decision", "remove");
   await expect(page.locator("#exact-2")).toHaveAttribute("data-decision", "keep_all");
-  await expect(page.locator("#visual-1")).toHaveAttribute("data-decision", "later");
-  await expect(page.locator("#visual-1")).toHaveAttribute("data-reviewed", "false");
+  await expect(page.locator("#visual-1")).toHaveAttribute("data-decision", "");
   await page.locator("#undo-review").click();
   await expect(page.locator("#review-progress")).toHaveText("0 / 3");
+
+  // With three saves, a pick saves but stays on the match for more picks.
   await openMatch(page, "visual-1");
-  await decide(page, "visual-1", "not_duplicate");
-  await expect(page.locator('[data-group].is-active [data-review-button]')).toBeFocused();
+  await page.locator('#visual-1 [data-remove-pin="302"]').check();
+  await expect(page.locator("#visual-1")).toHaveAttribute("data-decision", "remove");
   await page.reload();
-  await expect(page.locator("#visual-1")).toHaveAttribute("data-decision", "not_duplicate");
+  await expect(page.locator("#visual-1")).toHaveAttribute("data-decision", "remove");
+  await expect(page.locator('#visual-1 [data-remove-pin="302"]')).toBeChecked();
 });
 
 test("imports validate every decision before changing current progress", async ({ page }) => {
@@ -647,9 +646,10 @@ test("imports validate every decision before changing current progress", async (
   await expect(page.locator("#transfer-status")).toContainText("Invalid review decision");
   await expect(page.locator("#exact-1")).toHaveAttribute("data-decision", "keep_all");
   await openMatch(page, "exact-1");
-  await decide(page, "exact-1", "later");
+  await page.locator('#exact-1 [data-remove-pin="102"]').check();
+  await expect(page.locator("#exact-1")).toHaveAttribute("data-decision", "remove");
   await expect(page.locator("#reset-review")).toBeEnabled();
-  await expect(page.locator("#review-progress")).toHaveText("0 / 3");
+  await expect(page.locator("#review-progress")).toHaveText("1 / 3");
 });
 
 test("media covers remain inspection-only and are never easy calls", async ({ page }) => {
@@ -675,8 +675,8 @@ test("open reports merge decisions and resets without losing another report's wo
     await openMatch(page, "exact-2");
     await decide(page, "exact-2", "keep_all");
     await openMatch(other, "exact-1");
-    await decide(other, "exact-1", "not_duplicate");
-    await expect(page.locator('#exact-1')).toHaveAttribute("data-decision", "not_duplicate");
+    await other.locator('#exact-1 [data-remove-pin="102"]').check();
+    await expect(page.locator('#exact-1')).toHaveAttribute("data-decision", "remove");
     await other.locator('#reset-review').click();
     await expect(page.locator('#exact-1')).toHaveAttribute("data-decision", "");
     await expect(page.locator('#exact-2')).toHaveAttribute("data-decision", "keep_all");
@@ -708,7 +708,7 @@ test("comparison images fit their viewing area and decisions stay on screen", as
   expect(bounds.image.y).toBeGreaterThanOrEqual(bounds.stage.y);
   expect(bounds.image.right).toBeLessThanOrEqual(bounds.stage.right + 1);
   expect(bounds.image.bottom).toBeLessThanOrEqual(bounds.stage.bottom + 1);
-  const done = await page.locator('#exact-1 [data-review-button]').boundingBox();
+  const done = await page.locator('#exact-1 [data-decision-action=keep_all]').boundingBox();
   expect(done.y + done.height).toBeLessThanOrEqual(800);
   await expect(page.locator('.report-tools')).not.toHaveAttribute('open', '');
 });
@@ -749,7 +749,7 @@ test("widescreen focus uses the available width and keeps large portraits togeth
   expect(first.top).toBeGreaterThanOrEqual(0);
   expect(first.bottom).toBeLessThanOrEqual(1200);
   expect.soft(second.left - first.right, "both portraits are close enough for direct comparison").toBeLessThan(30);
-  const review = await page.locator("#exact-2 [data-review-button]").boundingBox();
+  const review = await page.locator("#exact-2 [data-decision-action=keep_all]").boundingBox();
   expect(review.y + review.height).toBeLessThanOrEqual(1200);
   expect(await page.evaluate(() => document.documentElement.scrollWidth)).toBe(2560);
 });
@@ -757,10 +757,10 @@ test("widescreen focus uses the available width and keeps large portraits togeth
 test("decision confirmations expire and newer actions get a fresh Undo window", async ({ page }) => {
   await page.clock.install();
   await openReport(page);
-  await page.locator('#exact-1 [data-review-button]').click();
+  await page.locator('#exact-1 [data-decision-action=keep_all]').click();
   await expect(page.locator('#review-feedback')).toBeVisible();
   await page.clock.fastForward(4000);
-  await page.locator('#exact-2 [data-review-button]').click();
+  await page.locator('#exact-2 [data-decision-action=keep_all]').click();
   await page.clock.fastForward(4000);
   await expect(page.locator('#review-feedback')).toBeVisible();
   await page.clock.fastForward(1100);
@@ -770,7 +770,7 @@ test("decision confirmations expire and newer actions get a fresh Undo window", 
 test("Undo stays available during interaction and confirmations can be dismissed", async ({ page }) => {
   await page.clock.install();
   await openReport(page);
-  await page.locator('#exact-1 [data-review-button]').click();
+  await page.locator('#exact-1 [data-decision-action=keep_all]').click();
   await page.locator('#undo-review').hover();
   await page.clock.fastForward(10000);
   await expect(page.locator('#review-feedback')).toBeVisible();
@@ -778,54 +778,55 @@ test("Undo stays available during interaction and confirmations can be dismissed
   await page.mouse.move(0, 0);
   await page.clock.fastForward(10000);
   await expect(page.locator('#review-feedback')).toBeVisible();
-  await page.locator('#exact-2 [data-review-button]').focus();
+  await page.locator('#exact-2 [data-decision-action=keep_all]').focus();
   await page.clock.fastForward(5100);
   await expect(page.locator('#review-feedback')).toBeHidden();
-  await page.locator('#exact-2 [data-review-button]').click();
+  await page.locator('#exact-2 [data-decision-action=keep_all]').click();
   await page.locator('#dismiss-feedback').click();
   await expect(page.locator('#review-feedback')).toBeHidden();
-  await expect(page.locator('[data-group].is-active [data-review-button]')).toBeFocused();
+  await expect(page.locator('[data-group].is-active [data-remove-smaller]')).toBeFocused();
   await page.locator('#reset-review').click();
   await page.clock.fastForward(5100);
   await expect(page.locator('#review-feedback')).toBeHidden();
-  await page.locator('[data-group].is-active [data-review-button]').click();
+  await page.locator('[data-group].is-active [data-decision-action=keep_all]').click();
   await page.keyboard.press('Escape');
   await expect(page.locator('#review-feedback')).toBeHidden();
 });
 
 for (const width of [320, 1280]) {
-  test(`removal flags stay drafts until review is saved at ${width}px`, async ({ page }) => {
+  test(`picking a copy to remove saves in one step at ${width}px`, async ({ page }) => {
     await page.setViewportSize({ width, height: 900 });
     await openReport(page);
     const match = page.locator('#exact-1');
-    const flag = match.getByRole('checkbox', { name: 'Remove this copy, pin 102', exact: true });
-    await expect(match.locator('.decision-help')).toBeVisible();
-    await expect(match.locator('.decision-help')).toHaveText('Both choices save and move to the next match. To pick copies yourself, tick Remove this copy and save.');
+    await expect(match.getByRole('checkbox', { name: 'Remove this one, pin 102', exact: true })).toBeVisible();
+    const flag = match.locator('[data-remove-pin="102"]');
+    await expect(match.locator('.decision-help')).toHaveText('Each choice saves straight away. To choose the copy yourself, tap Remove this one on it.');
+    await expect(match.locator('[data-review-button], .decision-more')).toHaveCount(0);
+    // Until something is decided, the suggestion is marked on the copies.
+    await expect(match.locator('.pin-card[data-pin-id="102"] .suggestion')).toHaveText('Suggested to remove');
+    await expect(match.locator('.pin-card[data-pin-id="102"] .suggestion')).toBeVisible();
+    await expect(match.locator('.pin-card[data-pin-id="101"] .suggestion')).toHaveText('Keep');
     await expect(page.locator('.report-tools')).not.toHaveAttribute('open', '');
     await flag.focus();
     await flag.press('Space');
     await expect(flag).toBeChecked();
-    await expect(page.locator('#review-feedback-label')).toHaveText('Selection saved as draft');
-    await expect(page.locator('#interaction-status')).toContainText('Selection saved as draft');
-    await expect(match.locator('[data-decision-notice]')).toHaveText('Draft: 1 copy flagged');
-    await expect(match.locator('[data-review-label]')).toHaveText('Save decision');
-    await expect(page.locator('#review-progress')).toHaveText('0 / 3');
-    await page.reload();
-    await expect(flag).toBeChecked();
-    await expect(match.locator('[data-decision-notice]')).toHaveText('Draft: 1 copy flagged');
-    await expect(match).toHaveAttribute('data-reviewed', 'false');
-    await match.locator('[data-review-button]').focus();
-    await match.locator('[data-review-button]').press('Enter');
+    await expect(match).toHaveAttribute('data-reviewed', 'true');
+    await expect(match.locator('.pin-card[data-pin-id="102"] .suggestion')).toBeHidden();
     await expect(page.locator('#review-feedback-label')).toHaveText('Decision saved');
     await expect(page.locator('#review-progress')).toHaveText('1 / 3');
-    await expect(match).toHaveAttribute('data-reviewed', 'true');
+    await expect(page.locator('[data-group].is-active')).toHaveAttribute('id', 'exact-2');
+    await expect(page.locator('#exact-2 [data-remove-smaller]')).toBeFocused();
     await page.getByRole('button', { name: 'Undo', exact: true }).click();
-    await expect(flag).toBeChecked();
-    await expect(match.locator('[data-decision-notice]')).toHaveText('Draft: 1 copy flagged');
+    await expect(flag).not.toBeChecked();
     await expect(page.locator('#review-progress')).toHaveText('0 / 3');
+    await flag.check();
+    await page.reload();
+    await openMatch(page, 'exact-1');
+    await expect(flag).toBeChecked();
+    await expect(match.locator('[data-decision-notice]')).toHaveText('1 copy going to the removal tray');
     await flag.uncheck();
     await expect(page.locator('#review-feedback-label')).toHaveText('Decision cleared');
-    await expect(match.locator('[data-review-label]')).toHaveText('Mark reviewed');
+    await expect(match).toHaveAttribute('data-reviewed', 'false');
     expect(await page.evaluate(() => document.documentElement.scrollWidth)).toBe(width);
   });
 }
@@ -834,7 +835,7 @@ test('pin controls have specific accessible names, including additional saves', 
   await openReport(page);
   const exact = page.locator('#exact-1');
   for (const id of ['101', '102']) {
-    await expect(exact.getByRole('checkbox', { name: `Remove this copy, pin ${id}`, exact: true })).toHaveCount(1);
+    await expect(exact.getByRole('checkbox', { name: `Remove this one, pin ${id}`, exact: true })).toHaveCount(1);
     await expect(exact.getByRole('link', { name: `Open pin ${id}`, exact: true })).toHaveAttribute('href', `https://www.pinterest.com/pin/${id}/`);
     await expect(exact.getByRole('link', { name: `Open image for pin ${id}`, exact: true })).toHaveCount(1);
   }
@@ -842,13 +843,11 @@ test('pin controls have specific accessible names, including additional saves', 
   const visual = page.locator('#visual-1');
   await expect(page.locator('.match-link[data-target="visual-1"]')).toContainText('98%');
   await visual.getByText('1 additional save', { exact: true }).click();
-  const extra = visual.getByRole('checkbox', { name: 'Remove this copy, pin 303', exact: true });
+  const extra = visual.getByRole('checkbox', { name: 'Remove this one, pin 303', exact: true });
   await extra.check();
-  await expect(visual.locator('[data-decision-notice]')).toHaveText('Draft: 1 copy flagged');
+  await expect(visual.locator('[data-decision-notice]')).toHaveText('1 copy going to the removal tray');
   await page.reload();
-  await expect(page.locator('body')).not.toHaveClass(/gallery-mode/);
-  await visual.getByText('1 additional save', { exact: true }).click();
-  await expect(extra).toBeChecked();
+  await expect(visual.locator('[data-remove-pin="303"]')).toBeChecked();
 });
 
 test('filter radios belong to their named groups and retain keyboard selection styling', async ({ page }) => {
@@ -876,43 +875,17 @@ test('filter radios belong to their named groups and retain keyboard selection s
 });
 
 for (const width of [320, 390, 2560]) {
-  test(`full board names can be revealed by keyboard and pointer at ${width}px`, async ({ page }) => {
+  test(`long board names wrap in full at ${width}px`, async ({ page }) => {
     await page.setViewportSize({ width, height: 900 });
     await page.goto(`${origin}/long-content.html`);
     await openMatch(page, 'exact-1');
-    const details = page.locator('#exact-1 .board-details').first();
-    const name = 'A very long board name with art references and illustration inspiration';
-    const summary = details.getByText(name, { exact: true }).first();
-    await expect(details).not.toHaveAttribute('open', '');
-    await summary.focus();
-    await summary.press('Enter');
-    await expect(details).toHaveAttribute('open', '');
-    await expect(details.locator('.board-full')).toHaveText(name);
-    const textFits = await details.locator('.board-full').evaluate(element => element.scrollWidth <= element.clientWidth);
-    expect(textFits).toBe(true);
-    await summary.press('Space');
-    await expect(details).not.toHaveAttribute('open', '');
-    await summary.click();
-    await expect(details.locator('.board-full')).toBeVisible();
+    const board = page.locator('#exact-1 .board').first();
+    await expect(board).toHaveText('A very long board name with art references and illustration inspiration');
+    await expect(page.locator('#exact-1 details.board-details')).toHaveCount(0);
+    expect(await board.evaluate(element => element.scrollWidth <= element.clientWidth)).toBe(true);
     expect(await page.evaluate(() => document.documentElement.scrollWidth)).toBe(width);
   });
 }
-
-test.describe('touch board names', () => {
-  test.use({ hasTouch: true, viewport: { width: 390, height: 844 } });
-
-  test('tap reveals the full board name with a usable touch target', async ({ page }) => {
-    await page.goto(`${origin}/long-content.html`);
-    await openMatch(page, 'exact-1');
-    const details = page.locator('#exact-1 .board-details').first();
-    const summary = details.locator('summary');
-    expect((await summary.boundingBox()).height).toBeGreaterThanOrEqual(44);
-    await summary.tap();
-    await expect(details.locator('.board-full')).toBeVisible();
-    await expect(details.locator('.board-full')).toHaveText('A very long board name with art references and illustration inspiration');
-    expect(await page.evaluate(() => document.documentElement.scrollWidth)).toBe(390);
-  });
-});
 
 test("flagged copies form a removal list whose marks survive reloads", async ({ page }) => {
   await openReport(page);
@@ -927,8 +900,7 @@ test("flagged copies form a removal list whose marks survive reloads", async ({ 
 
   await openMatch(page, "exact-1");
   const match = page.locator("#exact-1");
-  await match.getByRole("checkbox", { name: "Remove this copy, pin 102", exact: true }).check();
-  await match.locator("[data-review-button]").click();
+  await match.getByRole("checkbox", { name: "Remove this one, pin 102", exact: true }).check();
   await expect(page.locator("#cleanup-count")).toHaveText("1");
   await page.locator("#cleanup-toggle").click();
   const row = page.locator('.cleanup-row[data-pin-id="102"]');
@@ -961,7 +933,9 @@ test("flagged copies form a removal list whose marks survive reloads", async ({ 
 
 test("flagging every copy of a match warns in the removal list", async ({ page }) => {
   await openReport(page);
-  const match = page.locator("#exact-1");
+  await openMatch(page, "visual-1");
+  const match = page.locator("#visual-1");
+  await match.locator(".additional-saves > summary").click();
   for (const box of await match.locator("[data-remove-pin]").all()) await box.check();
   await page.locator("#cleanup-toggle").click();
   await expect(page.locator(".cleanup-row .cleanup-warning").first()).toContainText("Every copy in this match is flagged");

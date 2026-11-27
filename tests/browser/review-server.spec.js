@@ -82,8 +82,7 @@ test("decisions are saved to the review file, not browser storage", async ({ pag
   await page.goto(reviewUrl);
   await page.locator('.match-link[data-target="exact-1"]').click();
   const match = page.locator("#exact-1");
-  await match.getByRole("checkbox", { name: "Remove this copy, pin 102", exact: true }).check();
-  await match.locator("[data-review-button]").click();
+  await match.getByRole("checkbox", { name: "Remove this one, pin 102", exact: true }).check();
   await expect.poll(async () => {
     try { return JSON.parse(await readFile(storePath, "utf8")).decisions.length; } catch (_) { return 0; }
   }).toBe(1);
@@ -106,7 +105,6 @@ test("returning from Pinterest confirms the removal and moves to the next pin", 
   await page.locator('.match-link[data-target="visual-1"]').click();
   const boxes = visual.locator("[data-remove-pin]");
   await boxes.last().check();
-  await visual.locator("[data-review-button]").click();
   await page.locator("#cleanup-toggle").click();
   await expect(page.locator("#cleanup-help")).toContainText("checks with Pinterest");
   await expect(page.locator("#cleanup-help")).toContainText("--cookies-from-browser");
