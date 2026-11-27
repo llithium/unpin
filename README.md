@@ -1,8 +1,8 @@
 # unpin
 
 `unpin` finds duplicate visual pins in public Pinterest boards, compares their
-resolutions, and prints direct pin links so you can decide what to delete. It
-never changes your Pinterest account.
+resolutions, and walks you through removing the copies you don't want on
+Pinterest. It never changes your Pinterest account.
 
 The program is written in Rust and talks directly to the same undocumented
 Pinterest web resources used by Pinterest's site. It does **not** invoke or
@@ -80,12 +80,46 @@ stderr, so `--no-visual --format json` remains clean on stdout. Paginated
 requests share one rolling status row, keeping large scans readable while
 still showing the latest resource, page, and item count.
 
-By default, every successful run creates a unique `unpin-*.html` comparison
-report in your operating system's temporary directory and opens it in the
-default browser. The report places matching visual previews side by side with
-resolutions, recommendations, and links to the original pin and preview. HTML
-and CLI reports are mutually exclusive; use `--no-visual` to print the CLI
-report instead. The HTML path appears as a completed progress step on stderr.
+By default, every successful run starts a small review server on your own
+computer (`127.0.0.1`, port 7171 when it is free) and opens the review page in
+your browser. The page places matching visual previews side by side with
+resolutions, recommendations, and links to the original pin and preview. Keep
+`unpin` running while you review, and press Ctrl-C when you are done. The
+review address appears as a completed progress step on stderr; it includes a
+random token, and the server refuses requests from other websites.
+
+### Removing duplicates on Pinterest
+
+Pinterest has no way for other apps to delete your pins, so removal happens on
+Pinterest itself. `unpin` keeps that round trip short:
+
+1. In each match, choose **Flag for removal** on the copies you don't want, and
+   save the decision.
+2. Open **Remove** in the top bar. It lists every flagged pin, grouped by board.
+3. Choose **Open on Pinterest**. Pins always open in the same Pinterest tab, so
+   tabs don't pile up. Delete the pin there from its ⋯ menu.
+4. Come back to the review page. `unpin` asks Pinterest whether the pin still
+   exists, ticks it off when it is gone, and moves you to the next one.
+   **Check all with Pinterest** rechecks the whole list, for example after
+   removing pins on your phone.
+
+Checks use the same Pinterest session as the scan. Signed out, a pin on a
+secret board can look removed, so scan with `--cookies-from-browser` for
+reliable checks. You can always mark a pin removed yourself, or undo a mark.
+The review page warns when every copy in a match is flagged.
+
+Decisions and removal marks are saved to `review.json` in your user data folder
+(`~/Library/Application Support/unpin` on macOS, `%APPDATA%\unpin` on Windows,
+`$XDG_DATA_HOME/unpin` or `~/.local/share/unpin` elsewhere), or in
+`UNPIN_DATA_DIR` when it is set. The file uses the same format as
+`Export decisions`, so earlier exports can be imported on the review page.
+
+Use `--static` to write a standalone `unpin-*.html` report to your temporary
+directory instead of starting the server. A standalone report has the same
+removal list, but keeps decisions in that browser and asks you to mark each pin
+removed yourself, because a file opened from disk cannot ask Pinterest. HTML and
+CLI reports are mutually exclusive; use `--no-visual` to print the CLI report
+instead.
 
 The CLI report separates byte-identical images from conservative visual
 candidates. Within each match it marks the best-resolution pin as `KEEP` and
@@ -104,8 +138,11 @@ unpin https://www.pinterest.com/username/board-name/ --exact-only
 # Allow a wider perceptual-hash distance (0-64, default 5)
 unpin https://www.pinterest.com/username/board-name/ --similarity-threshold 8
 
-# Create the temporary visual without opening a browser
+# Start the review server without opening a browser
 unpin https://www.pinterest.com/username/board-name/ --no-open
+
+# Write a standalone HTML report instead of starting the review server
+unpin https://www.pinterest.com/username/board-name/ --static
 
 # Use the CLI report instead of creating a visual report
 unpin https://www.pinterest.com/username/board-name/ --no-visual
@@ -129,14 +166,18 @@ unpin username --same-board-only
 unpin username --cross-board-only
 ```
 
-Save a permanent HTML report, or save JSON and render it later without fetching
+Save a permanent HTML report, or save JSON and review it later without scanning
 Pinterest again:
 
 ```console
 unpin username --output review.html --no-open
 unpin username --no-visual --format json --output scan.json
+unpin render scan.json
 unpin render scan.json --output review.html --no-open
 ```
+
+`unpin render scan.json` starts the review server. It checks removed pins with a
+signed-out Pinterest connection; add `--offline` to skip checks entirely.
 
 Output files are written atomically and existing files are never overwritten.
 New JSON reports carry `schema_version: 2`, including media types, stable source
@@ -194,8 +235,9 @@ Run `unpin --help` for the complete interface.
   it. Fingerprint entries live in an unpin-owned subdirectory beneath that root.
   The entry format is versioned; upgrading `unpin` past a format change means
   one full re-download before the cache is warm again.
-- The visual report stores decisions for unchanged matches across board selections
-  and board renames in this browser. Decisions include reviewed, keep all saves,
+- The review page stores decisions for unchanged matches across board selections
+  and board renames: in `review.json` when served by `unpin`, or in the browser
+  for a standalone report. Decisions include reviewed, keep all saves,
   decide later, not a duplicate, and selected copies flagged for removal. Removal
   flags stay editable until you choose `Save decision`; `Mark reviewed` marks a comparison
   reviewed, and `Keep all` records that choice directly. `More` contains
@@ -203,8 +245,8 @@ Run `unpin --help` for the complete interface.
   stay in the unreviewed queue. Changed image content, media types, or saved-pin
   membership produce a new review item.
   `Flag for removal` saves a draft selection; `Save decision` completes its review.
-  Confirmation messages distinguish those two states. Flags are local review notes;
-  open a pin to remove it manually on Pinterest. Board names can be expanded by
+  Confirmation messages distinguish those two states. Flagged copies are listed
+  under `Remove`, where you remove them on Pinterest. Board names can be expanded by
   clicking, tapping, or pressing Enter to read the full name on narrow screens.
   Pin IDs and media types are always visible below each preview; backup and scan details
   are under `Report tools`. `Export decisions` backs up the browser's decision history as JSON, including
@@ -216,8 +258,9 @@ Run `unpin --help` for the complete interface.
   Escape. Reset clears only decisions in the current report; other open
   reports merge changes instead of overwriting unrelated decisions.
   Review storage from older versions resets once because the identities and
-  decision format changed. Browser handling of local-file storage varies; use
-  export/import when moving browsers, machines, or isolated local-file storage.
+  decision format changed. For standalone reports, browser handling of
+  local-file storage varies; use export/import when moving browsers, machines,
+  or isolated local-file storage.
   If storage is unavailable, a notice explains that progress lasts only for the
   current session. Export still works.
 - Identical downloaded bytes are grouped using SHA-256.
@@ -272,10 +315,13 @@ safe. Interactive text groups large skipped sets by reason; JSON and the HTML re
 - HTML reports embed their controls and styling, but reference Pinterest's
   remote originals and pin links, so network access is still required when
   viewing images or opening those links.
-- Temporary reports remain after `unpin` exits so the browser can load them
-  safely. The operating system eventually cleans them up; use `--output` to
-  retain a report in a location you choose.
-- `unpin` only reports links. Pin deletion is always manual.
+- The review page works only while `unpin` is running. Standalone reports from
+  `--static` remain after `unpin` exits, until the operating system cleans up
+  its temporary files; use `--output` to retain a report in a location you
+  choose.
+- Pin deletion is always manual, on Pinterest. Pinterest's official API only
+  lets approved apps delete pins, so `unpin` opens each pin for you and checks
+  afterwards instead.
 
 ## Development
 
@@ -295,7 +341,9 @@ bun run test:browser
 ```
 
 The browser suite renders synthetic reports through the Rust template, serves
-them locally, and supplies local image responses. It exercises filtering,
+them locally, and supplies local image responses. A second suite runs the
+review server against a stub Pinterest to cover saving decisions to a file,
+reusing one Pinterest tab, and confirming removals. It exercises filtering,
 navigation, review persistence, and responsive presentation without a Pinterest
 account. Its fixture generator is a Cargo example and is not installed with the
 CLI.

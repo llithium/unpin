@@ -15,6 +15,9 @@ struct ReportTemplate<'a> {
     same: usize,
     cross: usize,
     quick_wins: usize,
+    /// Review-server settings and saved state, as JSON that is safe inside a
+    /// `<script>` element. `None` for a standalone HTML file.
+    server_config: Option<String>,
 }
 
 impl ReportTemplate<'_> {
@@ -56,6 +59,27 @@ pub fn open_report(path: &Path) -> io::Result<()> {
 }
 
 pub fn render_html(report: &Report) -> String {
+    render(report, None)
+}
+
+/// Renders the report for the local review server, which supplies the API
+/// location and the saved decisions so the page never reads browser storage
+/// for them.
+pub fn render_review_page(report: &Report, config: &serde_json::Value) -> String {
+    render(report, Some(script_safe_json(config)))
+}
+
+/// JSON with `<`, `>`, and `&` escaped, so data can never close the script
+/// element that holds it.
+fn script_safe_json(value: &serde_json::Value) -> String {
+    value
+        .to_string()
+        .replace('<', "\\u003c")
+        .replace('>', "\\u003e")
+        .replace('&', "\\u0026")
+}
+
+fn render(report: &Report, server_config: Option<String>) -> String {
     let show_boards = report.shows_board_labels();
     let (same, cross) = report.scope_counts();
     let quick_wins = report
@@ -69,6 +93,7 @@ pub fn render_html(report: &Report) -> String {
         same,
         cross,
         quick_wins,
+        server_config,
     }
     .render()
     .expect("the HTML report template is valid")

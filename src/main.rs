@@ -12,10 +12,20 @@ async fn main() -> ExitCode {
     if let Some(unpin::cli::Command::Render {
         input,
         output,
+        static_report,
+        port,
         no_open,
+        offline,
     }) = &cli.command
     {
-        return match render_saved(input, output.as_deref(), *no_open) {
+        let options = RenderOptions {
+            output: output.as_deref(),
+            static_report: *static_report,
+            port: *port,
+            no_open: *no_open,
+            offline: *offline,
+        };
+        return match render_saved(input, options).await {
             Ok(()) => ExitCode::SUCCESS,
             Err(error) => {
                 eprintln!("error: {}", sanitize_terminal_text(&error.to_string()));
@@ -28,8 +38,8 @@ async fn main() -> ExitCode {
     unpin::progress::restore_cursor_on_interrupt();
     let progress_visible = !cli.no_progress && std::io::stderr().is_terminal();
     let progress = TerminalProgress::new(progress_visible);
-    let report = match unpin::run_with_api_root_and_progress(&cli, None, &progress).await {
-        Ok(report) => report,
+    let unpin::Scan { report, client } = match unpin::scan(&cli, None, &progress).await {
+        Ok(scan) => scan,
         Err(error) => {
             progress.step(ProgressStep::Scan {
                 lifecycle: unpin::progress::Lifecycle::Failed,
@@ -38,6 +48,9 @@ async fn main() -> ExitCode {
             return ExitCode::FAILURE;
         }
     };
+    if !cli.no_visual && !cli.static_report && cli.output.is_none() {
+        return serve_review(report, Some(client), cli.port, cli.no_open, &progress).await;
+    }
     let (report_to_open, cli_output) = if !cli.no_visual {
         progress.step(ProgressStep::ReportCreation {
             path: None,
@@ -133,22 +146,93 @@ fn write_html(
     }
 }
 
-fn render_saved(
-    input: &std::path::Path,
-    output: Option<&std::path::Path>,
+struct RenderOptions<'a> {
+    output: Option<&'a std::path::Path>,
+    static_report: bool,
+    port: Option<u16>,
     no_open: bool,
+    offline: bool,
+}
+
+async fn render_saved(
+    input: &std::path::Path,
+    options: RenderOptions<'_>,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let report = unpin::saved_report::read(input)?;
-    let path = write_html(&report, output)?;
+    if options.output.is_none() && !options.static_report {
+        let client = if options.offline {
+            None
+        } else {
+            let root = url::Url::parse("https://www.pinterest.com/").expect("valid URL");
+            Some(unpin::pinterest::PinterestClient::new(root)?)
+        };
+        let progress = TerminalProgress::new(false);
+        return match serve_review(report, client, options.port, options.no_open, &progress).await {
+            ExitCode::SUCCESS => Ok(()),
+            _ => Err("the review server could not run".into()),
+        };
+    }
+    let path = write_html(&report, options.output)?;
     eprintln!(
         "HTML report: {}",
         sanitize_terminal_text(&path.display().to_string())
     );
-    if !no_open && let Err(error) = unpin::visual::open_report(&path) {
+    if !options.no_open
+        && let Err(error) = unpin::visual::open_report(&path)
+    {
         eprintln!(
             "warning: could not open report: {}",
             sanitize_terminal_text(&error.to_string())
         );
     }
     Ok(())
+}
+
+/// Serves the report from 127.0.0.1 until the user presses Ctrl-C.
+async fn serve_review(
+    report: unpin::report::Report,
+    client: Option<unpin::pinterest::PinterestClient>,
+    port: Option<u16>,
+    no_open: bool,
+    progress: &TerminalProgress,
+) -> ExitCode {
+    let fail = |message: String| {
+        progress.step(ProgressStep::Scan {
+            lifecycle: unpin::progress::Lifecycle::Failed,
+        });
+        eprintln!("error: {}", sanitize_terminal_text(&message));
+        ExitCode::FAILURE
+    };
+    let store = match unpin::review_store::ReviewStore::open_default() {
+        Ok(store) => store,
+        Err(error) => return fail(error.to_string()),
+    };
+    let store_path = store.path().display().to_string();
+    let server = match unpin::server::ReviewServer::bind(report, client, store, port).await {
+        Ok(server) => server,
+        Err(error) => return fail(error.to_string()),
+    };
+    let url = server.url().to_owned();
+    progress.step(ProgressStep::ReviewServer { url: url.clone() });
+    progress.step(ProgressStep::Scan {
+        lifecycle: unpin::progress::Lifecycle::Completed,
+    });
+    if !progress.is_visible() {
+        eprintln!("Review page: {}", sanitize_terminal_text(&url));
+    }
+    eprintln!(
+        "Decisions are saved to {}",
+        sanitize_terminal_text(&store_path)
+    );
+    eprintln!("Keep this running while you review. Press Ctrl-C when you are done.");
+    if !no_open && let Err(error) = open::that(&url) {
+        eprintln!(
+            "warning: could not open the review page in a browser: {}",
+            sanitize_terminal_text(&error.to_string())
+        );
+    }
+    match server.run().await {
+        Ok(()) => ExitCode::SUCCESS,
+        Err(error) => fail(error.to_string()),
+    }
 }

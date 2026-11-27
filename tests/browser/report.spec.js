@@ -640,7 +640,7 @@ for (const width of [320, 1280]) {
     const match = page.locator('#exact-1');
     const flag = match.getByRole('checkbox', { name: 'Flag for removal, pin 102', exact: true });
     await expect(match.locator('.decision-help')).toBeVisible();
-    await expect(match.locator('.decision-help')).toHaveText('Flags are saved in this browser. Open a pin to remove it on Pinterest.');
+    await expect(match.locator('.decision-help')).toHaveText('Flagged copies are listed under Remove, ready to delete on Pinterest.');
     await expect(page.locator('.report-tools')).not.toHaveAttribute('open', '');
     await flag.focus();
     await flag.press('Space');
@@ -748,4 +748,54 @@ test.describe('touch board names', () => {
     await expect(details.locator('.board-full')).toHaveText('A very long board name with art references and illustration inspiration');
     expect(await page.evaluate(() => document.documentElement.scrollWidth)).toBe(390);
   });
+});
+
+test("flagged copies form a removal list whose marks survive reloads", async ({ page }) => {
+  await openReport(page);
+  await expect(page.locator("#cleanup-count")).toHaveText("0");
+  await page.locator("#cleanup-toggle").click();
+  await expect(page.locator("#cleanup")).toBeVisible();
+  await expect(page.locator("#cleanup-empty")).toBeVisible();
+  await expect(page.locator("[data-group]:visible")).toHaveCount(0);
+  await page.locator("#cleanup-back").click();
+  await expect(page.locator("#cleanup")).toBeHidden();
+
+  const match = page.locator("#exact-1");
+  await match.getByRole("checkbox", { name: "Flag for removal, pin 102", exact: true }).check();
+  await match.locator("[data-review-button]").click();
+  await expect(page.locator("#cleanup-count")).toHaveText("1");
+  await page.locator("#cleanup-toggle").click();
+  const row = page.locator('.cleanup-row[data-pin-id="102"]');
+  await expect(row).toHaveAttribute("data-state", "pending");
+  await expect(row.locator("[data-cleanup-open]")).toHaveAttribute("href", "https://www.pinterest.com/pin/102/");
+  await expect(row.locator("[data-cleanup-open]")).toHaveAttribute("target", "unpin-pinterest");
+  await expect(row.locator("[data-cleanup-check]")).toHaveCount(0);
+  await expect(page.locator("#cleanup-check-all")).toBeHidden();
+  await expect(page.locator("#cleanup-help")).toContainText("mark it removed");
+
+  await row.getByRole("button", { name: "Mark pin 102 removed" }).click();
+  await expect(row).toHaveAttribute("data-state", "removed");
+  await expect(page.locator("#cleanup-progress")).toHaveText("1 of 1");
+  await expect(page.locator("#cleanup-done")).toBeVisible();
+  await expect(page.locator("#cleanup-count")).toHaveText("0");
+
+  await page.reload();
+  await expect(page.locator('#exact-1 .pin-card[data-pin-id="102"]')).toHaveAttribute("data-removed", "true");
+  await page.locator("#cleanup-toggle").click();
+  await expect(row).toHaveAttribute("data-state", "removed");
+  await row.getByRole("button", { name: "Put pin 102 back on the list" }).click();
+  await expect(row).toHaveAttribute("data-state", "pending");
+  await expect(page.locator("#cleanup-count")).toHaveText("1");
+
+  await row.locator(".cleanup-jump").click();
+  await expect(page.locator("#cleanup")).toBeHidden();
+  await expect(page.locator("#exact-1")).toHaveClass(/is-active/);
+});
+
+test("flagging every copy of a match warns in the removal list", async ({ page }) => {
+  await openReport(page);
+  const match = page.locator("#exact-1");
+  for (const box of await match.locator("[data-remove-pin]").all()) await box.check();
+  await page.locator("#cleanup-toggle").click();
+  await expect(page.locator(".cleanup-row .cleanup-warning").first()).toContainText("Every copy in this match is flagged");
 });

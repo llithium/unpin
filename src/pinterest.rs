@@ -399,6 +399,13 @@ impl BoardPins {
     }
 }
 
+/// Whether a pin is still on Pinterest, as seen by the scan's session.
+#[derive(Debug, Clone, Eq, PartialEq)]
+pub enum PinPresence {
+    Present { board: Option<String> },
+    Missing,
+}
+
 #[derive(Clone)]
 pub struct PinterestClient {
     api: PinterestApi,
@@ -437,9 +444,47 @@ impl PinterestClient {
         })
     }
 
-    #[cfg(test)]
-    pub(crate) fn is_authenticated(&self) -> bool {
+    pub fn is_authenticated(&self) -> bool {
         self.api.is_authenticated()
+    }
+
+    /// Asks Pinterest whether a pin still exists. Pinterest answers a removed
+    /// pin with HTTP 404 ("Pin not found."), and an existing one with the pin
+    /// and the board it is saved to.
+    pub async fn pin_presence(&self, pin_id: &str) -> Result<PinPresence, PinterestError> {
+        let response = match self
+            .api
+            .call(
+                "Pin",
+                json!({ "id": pin_id, "field_set_key": "detailed" }),
+                &NoProgress,
+            )
+            .await
+        {
+            Ok(response) => response,
+            Err(PinterestError::Http { status, .. })
+                if status == reqwest::StatusCode::NOT_FOUND =>
+            {
+                return Ok(PinPresence::Missing);
+            }
+            Err(error) => return Err(error),
+        };
+        let data = response_data(&response, "Pin")?;
+        if data.is_null() {
+            return Ok(PinPresence::Missing);
+        }
+        if value_string(data.get("id")).as_deref() != Some(pin_id) {
+            return Err(invalid_response(
+                "Pin",
+                "resource_response.data.id did not match",
+            ));
+        }
+        Ok(PinPresence::Present {
+            board: data
+                .pointer("/board/name")
+                .and_then(Value::as_str)
+                .map(str::to_owned),
+        })
     }
 
     pub async fn fetch_board(&self, target: &BoardTarget) -> Result<BoardPins, PinterestError> {

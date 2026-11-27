@@ -25,6 +25,14 @@
         const resetReview = document.querySelector("#reset-review");
         const status = document.querySelector("#interaction-status");
         const storageKey = "unpin:review:v3";
+        const removedStorageKey = "unpin:removed:v1";
+        // Set when the page is served by `unpin` itself: decisions then live
+        // in a file the server owns, and pins can be checked with Pinterest.
+        const server = (() => {
+          const element = document.querySelector("#unpin-server");
+          if (!element) return null;
+          try { return JSON.parse(element.textContent); } catch (_) { return null; }
+        })();
         const viewStorageKey = "unpin:view:v1";
         let decisions = new Map();
         const dirtyDecisions = new Set();
@@ -106,6 +114,7 @@
         };
 
         const readStoredState = () => {
+          if (server) return server.state || null;
           try {
             const value = window.localStorage.getItem(storageKey);
             storedRevision = value;
@@ -116,6 +125,7 @@
         };
 
         const mergeStoredDecisions = () => {
+          if (server) return false;
           const value = window.localStorage.getItem(storageKey);
           if (value === storedRevision) return false;
           const latest = value ? parseDecisions(JSON.parse(value)) : new Map();
@@ -128,7 +138,32 @@
           storedRevision = value;
           return changed;
         };
+        let saveChain = Promise.resolve();
+        const saveToServer = () => {
+          const keys = [...dirtyDecisions];
+          dirtyDecisions.clear();
+          const body = JSON.stringify({
+            set: keys.filter((key) => decisions.has(key)).map((key) => decisions.get(key)),
+            remove: keys.filter((key) => !decisions.has(key)),
+          });
+          saveChain = saveChain.then(() => fetch(`${server.api}/decisions`, {
+            method: "PUT", headers: { "Content-Type": "application/json" }, body,
+          })).then((response) => {
+            if (!response.ok) throw new Error(`HTTP ${response.status}`);
+            document.querySelector("#storage-notice").hidden = true;
+          }).catch(() => {
+            // Keep the edits so the next change sends them again.
+            keys.forEach((key) => dirtyDecisions.add(key));
+            const notice = document.querySelector("#storage-notice");
+            notice.textContent = "Couldn't save to unpin. Check that it is still running in your terminal; your next change will try again.";
+            notice.hidden = false;
+          });
+        };
         const writeStoredState = () => {
+          if (server && dirtyDecisions.size) {
+            saveToServer();
+            return;
+          }
           try {
             if (dirtyDecisions.size) {
               // Merge only this page's edits with other open reports. History
@@ -214,6 +249,7 @@
             );
           }
           if (resetReview) resetReview.disabled = !groups.some((group) => decisions.has(group.dataset.reviewKey));
+          refreshCleanup();
         };
 
         const acknowledgeReview = () => {
@@ -492,6 +528,7 @@
           link.addEventListener("pointerenter", warmTarget);
           link.addEventListener("focus", warmTarget);
           link.addEventListener("click", () => {
+            setCleanup(false);
             setOverview(false);
             setActive(document.getElementById(link.dataset.target), {
               announce: true,
@@ -659,6 +696,10 @@
             return;
           }
           const key = event.key.toLowerCase();
+          if (document.body.classList.contains("cleanup-mode")) {
+            if (key === "escape") setCleanup(false);
+            return;
+          }
           if (key === "j") move(1);
           if (key === "k") move(-1);
           if (key === "e" && active) {
@@ -673,6 +714,356 @@
             writeStoredState();
           }
         });
+
+
+        // Cleanup: the pins flagged for removal, removed one at a time on
+        // Pinterest. Pins open in one reused Pinterest tab; on return, the
+        // review server checks whether the pin is gone and moves on.
+        const cleanup = document.querySelector("#cleanup");
+        const cleanupList = document.querySelector("#cleanup-list");
+        const cleanupToggle = document.querySelector("#cleanup-toggle");
+        const cleanupCount = document.querySelector("#cleanup-count");
+        const cleanupProgress = document.querySelector("#cleanup-progress");
+        const cleanupEmpty = document.querySelector("#cleanup-empty");
+        const checkAll = document.querySelector("#cleanup-check-all");
+        const removedPins = (() => {
+          if (server) return new Map(Object.entries(server.state?.removed_pins || {}));
+          try {
+            return new Map(Object.entries(JSON.parse(window.localStorage.getItem(removedStorageKey)) || {}));
+          } catch (_) { return new Map(); }
+        })();
+        const rowStatus = new Map();
+        let pendingPin = null;
+        let pendingSince = 0;
+
+        const saveRemovedLocally = () => {
+          try {
+            window.localStorage.setItem(removedStorageKey, JSON.stringify(Object.fromEntries(removedPins)));
+          } catch (_) { /* Removal marks then last for this session only. */ }
+        };
+        const syncRemovedCards = () => {
+          document.querySelectorAll("[data-group] [data-pin-id]").forEach((element) => {
+            element.dataset.removed = removedPins.has(element.dataset.pinId) ? "true" : "false";
+          });
+        };
+        const setRemoved = (pinId, removed, options = {}) => {
+          if (removed) removedPins.set(pinId, Math.floor(Date.now() / 1000));
+          else removedPins.delete(pinId);
+          if (server && options.persist !== false) {
+            fetch(`${server.api}/pins/${encodeURIComponent(pinId)}/removed`, {
+              method: "POST", headers: { "Content-Type": "application/json" },
+              body: JSON.stringify({ removed }),
+            }).catch(() => { document.querySelector("#storage-notice").hidden = false; });
+          } else if (!server) {
+            saveRemovedLocally();
+          }
+          syncRemovedCards();
+        };
+
+        // One entry per flagged pin in this report, grouped by board.
+        const flaggedPins = () => {
+          const pins = new Map();
+          groups.forEach((group) => {
+            const decision = decisions.get(group.dataset.reviewKey);
+            if (decision?.action !== "remove") return;
+            const label = group.querySelector(".match-index")?.textContent || "Match";
+            const everyCopy = decision.remove_pin_ids.length >= decision.items.length;
+            decision.remove_pin_ids.forEach((pinId) => {
+              const element = group.querySelector(`[data-pin-id="${CSS.escape(pinId)}"]`);
+              const record = decision.items.find((item) => item.pin_id === pinId);
+              if (!element || !record) return;
+              const existing = pins.get(pinId);
+              if (existing) {
+                existing.matches.push({ label, group });
+                existing.everyCopy ||= everyCopy;
+                return;
+              }
+              pins.set(pinId, {
+                pinId, pinUrl: record.pin_url, imageUrl: record.image_url,
+                board: element.dataset.board || "",
+                size: element.querySelector(".dimensions")?.textContent || "",
+                matches: [{ label, group }], everyCopy,
+              });
+            });
+          });
+          return [...pins.values()];
+        };
+
+        const statusText = (pinId) => {
+          if (removedPins.has(pinId)) return "Removed";
+          const status = rowStatus.get(pinId);
+          if (status?.state === "checking") return "Checking with Pinterest…";
+          if (status?.state === "present") return status.board ? `Still on Pinterest, on ${status.board}` : "Still on Pinterest";
+          if (status?.state === "unknown") return `Couldn't check${status.message ? `: ${status.message}` : ""}. If you deleted it, mark it removed.`;
+          if (status?.state === "returned") return "Back from Pinterest. If you deleted it, mark it removed.";
+          return "To remove";
+        };
+        const rowState = (pinId) => removedPins.has(pinId) ? "removed" : rowStatus.get(pinId)?.state || "pending";
+
+        const element = (tag, className, text) => {
+          const node = document.createElement(tag);
+          if (className) node.className = className;
+          if (text !== undefined) node.textContent = text;
+          return node;
+        };
+
+        const buildRow = (pin) => {
+          const row = element("li", "cleanup-row");
+          row.dataset.pinId = pin.pinId;
+          row.dataset.state = rowState(pin.pinId);
+          const thumb = element("img", "cleanup-thumb");
+          thumb.src = pin.imageUrl; thumb.alt = ""; thumb.loading = "lazy";
+          thumb.referrerPolicy = "no-referrer";
+          const copy = element("div", "cleanup-copy");
+          copy.append(element("span", "cleanup-title", `Pin ${pin.pinId}`));
+          const meta = element("span", "cleanup-meta");
+          if (pin.size) meta.append(element("span", "", pin.size));
+          pin.matches.forEach(({ label, group }) => {
+            const jump = element("button", "cleanup-jump", label);
+            jump.type = "button";
+            jump.setAttribute("aria-label", `Show ${label}`);
+            jump.addEventListener("click", () => {
+              setCleanup(false);
+              if (group.classList.contains("is-filtered")) document.querySelector("#clear-filters")?.click();
+              setActive(group, { announce: true });
+              writeStoredState();
+            });
+            meta.append(jump);
+          });
+          copy.append(meta);
+          if (pin.everyCopy) copy.append(element("span", "cleanup-warning", "Every copy in this match is flagged. Keep one if you still want the image."));
+          const status = element("span", "cleanup-status", statusText(pin.pinId));
+          status.dataset.cleanupStatus = "";
+          copy.append(status);
+          const actions = element("div", "cleanup-row-actions");
+          const open = element("a", "button primary", "Open on Pinterest");
+          open.href = pin.pinUrl; open.target = "unpin-pinterest"; open.rel = "noreferrer";
+          open.dataset.cleanupOpen = "";
+          open.setAttribute("aria-label", `Open pin ${pin.pinId} on Pinterest`);
+          open.addEventListener("click", (event) => {
+            event.preventDefault();
+            openOnPinterest(pin.pinUrl);
+            pendingPin = pin.pinId;
+            pendingSince = Date.now();
+            rowStatus.delete(pin.pinId);
+            updateRow(pin.pinId);
+          });
+          actions.append(open);
+          if (server?.checks) {
+            const check = element("button", "control", "Check");
+            check.type = "button";
+            check.dataset.cleanupCheck = "";
+            check.setAttribute("aria-label", `Check pin ${pin.pinId} with Pinterest`);
+            check.addEventListener("click", () => checkPin(pin.pinId, { advance: false }));
+            actions.append(check);
+          }
+          const mark = element("button", "control", "");
+          mark.type = "button";
+          mark.dataset.cleanupMark = "";
+          mark.addEventListener("click", () => {
+            const removed = !removedPins.has(pin.pinId);
+            setRemoved(pin.pinId, removed);
+            rowStatus.delete(pin.pinId);
+            updateRow(pin.pinId);
+            updateCleanupProgress();
+            if (removed) advanceCleanup(pin.pinId);
+            announce(removed ? `Pin ${pin.pinId} marked removed` : `Pin ${pin.pinId} back on the list`);
+          });
+          actions.append(mark);
+          row.append(thumb, copy, actions);
+          return row;
+        };
+
+        const updateRow = (pinId) => {
+          const row = cleanupList?.querySelector(`.cleanup-row[data-pin-id="${CSS.escape(pinId)}"]`);
+          if (!row) return;
+          row.dataset.state = rowState(pinId);
+          row.querySelector("[data-cleanup-status]").textContent = statusText(pinId);
+          const mark = row.querySelector("[data-cleanup-mark]");
+          const removed = removedPins.has(pinId);
+          mark.textContent = removed ? "Undo" : "Mark removed";
+          mark.setAttribute("aria-label", removed ? `Put pin ${pinId} back on the list` : `Mark pin ${pinId} removed`);
+        };
+
+        const updateCleanupProgress = () => {
+          const pins = flaggedPins();
+          const removed = pins.filter((pin) => removedPins.has(pin.pinId)).length;
+          const remaining = pins.length - removed;
+          if (cleanupCount) cleanupCount.textContent = remaining;
+          cleanupToggle?.setAttribute("aria-label", `Remove on Pinterest, ${remaining} ${remaining === 1 ? "pin" : "pins"} left`);
+          if (cleanupProgress) cleanupProgress.textContent = `${removed} of ${pins.length}`;
+          if (cleanupEmpty) cleanupEmpty.hidden = pins.length > 0;
+          if (checkAll) checkAll.hidden = !server?.checks || remaining === 0;
+          const done = document.querySelector("#cleanup-done");
+          if (done) done.hidden = !(pins.length > 0 && remaining === 0);
+        };
+
+        const renderCleanupList = () => {
+          if (!cleanupList) return;
+          const byBoard = new Map();
+          flaggedPins().forEach((pin) => {
+            const board = pin.board || "Pins";
+            if (!byBoard.has(board)) byBoard.set(board, []);
+            byBoard.get(board).push(pin);
+          });
+          const sections = [...byBoard].map(([board, pins]) => {
+            const section = element("section", "cleanup-board");
+            const heading = element("h3", "", board);
+            heading.append(element("span", "cleanup-board-count", ` ${pins.length} ${pins.length === 1 ? "pin" : "pins"}`));
+            const list = element("ol", "cleanup-rows");
+            pins.forEach((pin) => list.append(buildRow(pin)));
+            section.append(heading, list);
+            return section;
+          });
+          cleanupList.replaceChildren(...sections);
+          flaggedPins().forEach((pin) => updateRow(pin.pinId));
+        };
+
+        function refreshCleanup() {
+          if (!cleanup) return;
+          if (document.body.classList.contains("cleanup-mode")) renderCleanupList();
+          updateCleanupProgress();
+        }
+
+        function setCleanup(enabled) {
+          if (!cleanup) return;
+          if (enabled === document.body.classList.contains("cleanup-mode")) return;
+          document.body.classList.toggle("cleanup-mode", enabled);
+          cleanup.hidden = !enabled;
+          cleanupToggle?.setAttribute("aria-pressed", enabled ? "true" : "false");
+          if (enabled) {
+            setOverview(false, { announce: false });
+            renderCleanupList();
+            updateCleanupProgress();
+            cleanup.scrollIntoView({ block: "start", behavior: "instant" });
+            const first = cleanupList.querySelector('.cleanup-row:not([data-state="removed"]) [data-cleanup-open]');
+            (first || document.querySelector("#cleanup-back"))?.focus({ preventScroll: true });
+            announce("Removal list opened");
+          } else {
+            pendingPin = null;
+            applyFilter();
+            announce("Review opened");
+          }
+        }
+
+        // Reuses one named Pinterest tab. The tab keeps its link to this page,
+        // because browsers forget the name of a tab whose opener is cut once
+        // it moves to another site, and a fresh tab would open every time.
+        // The page's no-referrer policy keeps its address out of Pinterest.
+        const openOnPinterest = (url) => {
+          let tab = null;
+          try { tab = window.open("", "unpin-pinterest"); } catch (_) { tab = null; }
+          if (!tab) {
+            window.open(url, "_blank", "noopener,noreferrer");
+            return;
+          }
+          try {
+            tab.location.href = url;
+            tab.focus();
+          } catch (_) {
+            window.open(url, "_blank", "noopener,noreferrer");
+          }
+        };
+
+        const advanceCleanup = (fromPinId) => {
+          const rows = [...(cleanupList?.querySelectorAll(".cleanup-row") || [])];
+          const index = rows.findIndex((row) => row.dataset.pinId === fromPinId);
+          const next = [...rows.slice(index + 1), ...rows.slice(0, Math.max(0, index))]
+            .find((row) => row.dataset.state !== "removed");
+          if (!next) {
+            document.querySelector("#cleanup-done")?.focus?.();
+            announce("Every flagged pin is removed");
+            return;
+          }
+          next.scrollIntoView({ block: "nearest", behavior: "instant" });
+          next.querySelector("[data-cleanup-open]")?.focus({ preventScroll: true });
+        };
+
+        const checkPin = async (pinId, options = {}) => {
+          if (!server?.checks) return;
+          rowStatus.set(pinId, { state: "checking" });
+          updateRow(pinId);
+          let result;
+          try {
+            const response = await fetch(`${server.api}/pins/${encodeURIComponent(pinId)}`);
+            if (!response.ok) throw new Error(`HTTP ${response.status}`);
+            result = await response.json();
+          } catch (_) {
+            result = { state: "unknown", message: "unpin isn't responding. Check that it is still running." };
+          }
+          if (result.state === "removed") {
+            rowStatus.delete(pinId);
+            // The server already recorded it.
+            setRemoved(pinId, true, { persist: false });
+          } else {
+            if (result.state === "present" && removedPins.has(pinId)) setRemoved(pinId, false, { persist: false });
+            rowStatus.set(pinId, result);
+          }
+          updateRow(pinId);
+          updateCleanupProgress();
+          if (options.advance && result.state === "removed") {
+            announce(`Pin ${pinId} is gone from Pinterest`);
+            advanceCleanup(pinId);
+          } else if (options.advance) {
+            const row = cleanupList?.querySelector(`.cleanup-row[data-pin-id="${CSS.escape(pinId)}"]`);
+            row?.querySelector(result.state === "present" ? "[data-cleanup-open]" : "[data-cleanup-mark]")?.focus({ preventScroll: true });
+            announce(statusText(pinId));
+          }
+          return result;
+        };
+
+        const returnedFromPinterest = () => {
+          if (!pendingPin || document.visibilityState !== "visible" || Date.now() - pendingSince < 800) return;
+          const pinId = pendingPin;
+          pendingPin = null;
+          if (server?.checks) {
+            checkPin(pinId, { advance: true });
+          } else {
+            rowStatus.set(pinId, { state: "returned" });
+            updateRow(pinId);
+            cleanupList?.querySelector(`.cleanup-row[data-pin-id="${CSS.escape(pinId)}"] [data-cleanup-mark]`)?.focus({ preventScroll: true });
+          }
+        };
+        document.addEventListener("visibilitychange", returnedFromPinterest);
+        window.addEventListener("focus", returnedFromPinterest);
+
+        checkAll?.addEventListener("click", async () => {
+          checkAll.disabled = true;
+          const queue = flaggedPins().map((pin) => pin.pinId).filter((pinId) => !removedPins.has(pinId));
+          const worker = async () => {
+            while (queue.length) await checkPin(queue.shift());
+          };
+          await Promise.all([worker(), worker(), worker(), worker()]);
+          checkAll.disabled = false;
+          const left = flaggedPins().filter((pin) => !removedPins.has(pin.pinId)).length;
+          announce(left ? `${left} flagged ${left === 1 ? "pin is" : "pins are"} still on Pinterest` : "Every flagged pin is removed");
+        });
+        cleanupToggle?.addEventListener("click", () => setCleanup(!document.body.classList.contains("cleanup-mode")));
+        document.querySelector("#cleanup-back")?.addEventListener("click", () => {
+          setCleanup(false);
+          focusReview();
+        });
+        const cleanupHelp = document.querySelector("#cleanup-help");
+        if (cleanupHelp) {
+          cleanupHelp.textContent = server?.checks
+            ? "Each pin opens in the same Pinterest tab. Delete it there from the pin's ⋯ menu, then come back. unpin checks with Pinterest and moves on to the next pin."
+            : "Each pin opens in the same Pinterest tab. Delete it there from the pin's ⋯ menu, then come back and mark it removed.";
+          if (server?.checks && !server.signed_in) {
+            const note = element("span", "cleanup-note", " Checks are signed out, so a pin on a secret board can look removed. Scan with ");
+            note.append(element("code", "", "--cookies-from-browser"), " for reliable checks.");
+            cleanupHelp.append(note);
+          }
+        }
+        if (server) {
+          const where = server.store_path ? `Decisions are saved to ${server.store_path}.` : "Decisions are saved by unpin.";
+          const notice = document.querySelector(".review-notice");
+          if (notice) notice.textContent = `${where} Open a pin to make changes on Pinterest.`;
+          const footer = document.querySelector("footer");
+          if (footer) footer.textContent = `This review page is served by unpin on your computer and loads images from Pinterest. ${where} unpin never changes your Pinterest account.`;
+          const storageNotice = document.querySelector("#storage-notice");
+          if (storageNotice) storageNotice.textContent = "Couldn't save to unpin. Check that it is still running in your terminal.";
+        }
+        syncRemovedCards();
 
         initializeImages();
         restoreState();

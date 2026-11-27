@@ -15,6 +15,10 @@ struct Args {
     output: PathBuf,
     #[arg(long, value_enum, default_value_t = Scenario::Mixed)]
     scenario: Scenario,
+    /// Write the scan as saved JSON, for `unpin render` and the review
+    /// server, instead of a standalone HTML report.
+    #[arg(long)]
+    json: bool,
 }
 
 #[derive(Clone, Debug, Default, ValueEnum)]
@@ -216,5 +220,10 @@ fn main() {
             report.exact_groups[0].items.push(extra);
         }
     }
-    fs::write(args.output, render_html(&report)).expect("write visual fixture");
+    let contents = if args.json {
+        unpin::saved_report::serialize(&report).expect("serialize visual fixture")
+    } else {
+        render_html(&report)
+    };
+    fs::write(args.output, contents).expect("write visual fixture");
 }

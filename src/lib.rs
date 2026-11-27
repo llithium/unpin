@@ -4,8 +4,10 @@ pub mod cli;
 pub mod pinterest;
 pub mod progress;
 pub mod report;
+pub mod review_store;
 pub mod saved_report;
 pub mod select;
+pub mod server;
 pub mod terminal_text;
 pub mod visual;
 
@@ -128,6 +130,21 @@ pub async fn run_with_api_root_and_progress(
     api_root: Option<Url>,
     progress: &dyn Progress,
 ) -> Result<Report, AppError> {
+    Ok(scan(cli, api_root, progress).await?.report)
+}
+
+/// A finished scan, with the Pinterest session it used so the review server
+/// can check pins later with the same access.
+pub struct Scan {
+    pub report: Report,
+    pub client: PinterestClient,
+}
+
+pub async fn scan(
+    cli: &Cli,
+    api_root: Option<Url>,
+    progress: &dyn Progress,
+) -> Result<Scan, AppError> {
     let target = Target::parse(cli.target.as_deref().unwrap_or_default())?;
     let cookies = if let Some(path) = &cli.cookies {
         auth::load_pinterest_scoped_cookies_file(path)?
@@ -257,7 +274,7 @@ pub async fn run_with_api_root_and_progress(
         visual_candidates: analysis.visual_candidates.len(),
     };
 
-    Ok(Report {
+    let report = Report {
         matching: analysis.matching,
         visual_matching_incomplete: analysis.visual_matching_incomplete,
         summary,
@@ -265,5 +282,6 @@ pub async fn run_with_api_root_and_progress(
         visual_candidates: analysis.visual_candidates,
         skipped,
         warnings,
-    })
+    };
+    Ok(Scan { report, client })
 }

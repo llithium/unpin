@@ -18,9 +18,19 @@ pub struct Cli {
     #[command(subcommand)]
     pub command: Option<Command>,
 
-    /// Write the report to this path instead of stdout or a temporary HTML file.
+    /// Write the report to this path instead of starting the review server
+    /// or printing to stdout.
     #[arg(long, value_name = "FILE")]
     pub output: Option<PathBuf>,
+
+    /// Write a standalone HTML report to a temporary file instead of starting
+    /// the local review server.
+    #[arg(long = "static", conflicts_with_all = ["output", "no_visual"])]
+    pub static_report: bool,
+
+    /// Port for the local review server (default 7171, or any free port).
+    #[arg(long, value_name = "PORT", conflicts_with_all = ["output", "no_visual", "static_report"])]
+    pub port: Option<u16>,
 
     /// Boards to scan for a profile target, by slug or name (repeatable, comma-separated).
     #[arg(
@@ -60,11 +70,11 @@ pub struct Cli {
     #[arg(long, default_value_t = 5, value_parser = clap::value_parser!(u8).range(0..=64))]
     pub similarity_threshold: u8,
 
-    /// Print the CLI report instead of creating an HTML comparison report.
+    /// Print the CLI report instead of opening the review page.
     #[arg(long)]
     pub no_visual: bool,
 
-    /// Create the HTML report without opening it in a browser.
+    /// Do not open the review page or HTML report in a browser.
     #[arg(long)]
     pub no_open: bool,
 
@@ -91,13 +101,26 @@ pub struct Cli {
 
 #[derive(Debug, Clone, Subcommand)]
 pub enum Command {
-    /// Create an HTML report from saved JSON without contacting Pinterest.
+    /// Review a saved JSON scan without scanning Pinterest again.
     Render {
         input: PathBuf,
+        /// Write a standalone HTML report to this path instead of starting
+        /// the review server.
         #[arg(long, value_name = "FILE")]
         output: Option<PathBuf>,
+        /// Write a standalone HTML report to a temporary file instead of
+        /// starting the review server.
+        #[arg(long = "static", conflicts_with = "output")]
+        static_report: bool,
+        /// Port for the local review server.
+        #[arg(long, value_name = "PORT", conflicts_with_all = ["output", "static_report"])]
+        port: Option<u16>,
+        /// Do not open the review page or HTML report in a browser.
         #[arg(long)]
         no_open: bool,
+        /// Do not ask Pinterest whether flagged pins were removed.
+        #[arg(long)]
+        offline: bool,
     },
 }
 

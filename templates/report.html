@@ -8,6 +8,7 @@
       content="Review exact and visually similar Pinterest pins before deciding what to keep."
     />
     <meta name="robots" content="noindex, nofollow" />
+    <meta name="referrer" content="no-referrer" />
     <title>unpin · {{ report.title() }}</title>
     <link
       rel="icon"
@@ -61,6 +62,23 @@
               <path d="M6.25 3.25 11 8l-4.75 4.75" />
             </svg>
           </button>
+          {% if !report.exact_groups.is_empty() ||
+          !report.visual_candidates.is_empty() %}
+          <button
+            class="control"
+            id="cleanup-toggle"
+            type="button"
+            aria-controls="cleanup"
+            aria-pressed="false"
+            title="Pins you flagged, ready to remove on Pinterest"
+          >
+            <svg class="control-icon" viewBox="0 0 16 16" aria-hidden="true">
+              <path d="M3 4.5h10M6.5 4.5V3h3v1.5M4.5 4.5l.6 8.5h5.8l.6-8.5" />
+            </svg>
+            <span class="control-label">Remove</span>
+            <span class="filter-count" id="cleanup-count">0</span>
+          </button>
+          {% endif %}
           <button
             class="control"
             id="overview-toggle"
@@ -283,6 +301,23 @@
           </div>
           {% endif %}
 
+          <section class="cleanup" id="cleanup" aria-labelledby="cleanup-title" hidden>
+            <div class="cleanup-heading">
+              <div>
+                <h2 id="cleanup-title">Remove on Pinterest</h2>
+                <p class="cleanup-help" id="cleanup-help">Each pin opens in the same Pinterest tab. Delete it there from the pin's ⋯ menu, then come back and mark it removed.</p>
+              </div>
+              <p class="cleanup-summary"><strong id="cleanup-progress">0 of 0</strong> removed</p>
+            </div>
+            <div class="cleanup-actions">
+              <button class="control" id="cleanup-check-all" type="button" hidden>Check all with Pinterest</button>
+              <button class="control" id="cleanup-back" type="button">Back to review</button>
+            </div>
+            <p class="cleanup-empty" id="cleanup-empty">No pins are flagged yet. In a match, choose Flag for removal on the copies you don't want, and they'll be listed here.</p>
+            <p class="cleanup-done" id="cleanup-done" tabindex="-1" hidden>Every flagged pin is removed.</p>
+            <div id="cleanup-list"></div>
+          </section>
+
           <div class="filter-empty" id="filter-empty" role="status">
             <strong id="filter-empty-title">No matches in the current filters.</strong>
             <p>Show all matches to revisit reviewed pins or change your filters.</p>
@@ -353,7 +388,7 @@
                 {% let copies = candidate.copies[loop.index0] %}
                 {% if !copies.is_empty() %}
                 <details class="additional-saves"><summary>{{ copies.len() }} additional {% if copies.len() == 1 %}save{% else %}saves{% endif %}</summary>
-                  <ul>{% for copy in copies %}<li data-pin-id="{{ copy.pin_id }}" data-media-kind="{{ copy.media_kind.as_str() }}" data-image-sha256="{{ copy.image_sha256 }}"><label class="removal-choice"><input type="checkbox" data-remove-pin="{{ copy.pin_id }}" aria-label="Flag for removal, pin {{ copy.pin_id }}" /><span>Flag for removal</span></label><a data-image-url="{{ copy.image_url }}" href="{{ copy.pin_url }}" target="_blank" rel="noopener noreferrer">Pin {{ copy.pin_id }}</a>{% match copy.board %}{% when Some with (board) %} · {{ board }}{% when None %}{% endmatch %}</li>{% endfor %}</ul>
+                  <ul>{% for copy in copies %}<li data-pin-id="{{ copy.pin_id }}" data-media-kind="{{ copy.media_kind.as_str() }}" data-image-sha256="{{ copy.image_sha256 }}"{% match copy.board %}{% when Some with (board) %} data-board="{{ board }}"{% when None %}{% endmatch %}><label class="removal-choice"><input type="checkbox" data-remove-pin="{{ copy.pin_id }}" aria-label="Flag for removal, pin {{ copy.pin_id }}" /><span>Flag for removal</span></label><a data-image-url="{{ copy.image_url }}" href="{{ copy.pin_url }}" target="_blank" rel="noopener noreferrer">Pin {{ copy.pin_id }}</a>{% match copy.board %}{% when Some with (board) %} · {{ board }}{% when None %}{% endmatch %}</li>{% endfor %}</ul>
                 </details>
                 {% endif %}
               </div>
@@ -436,6 +471,7 @@
     </div>
     <p class="sr-only" id="interaction-status" aria-live="polite"></p>
 
+    {% match server_config %}{% when Some with (config) %}<script type="application/json" id="unpin-server">{{ config|safe }}</script>{% when None %}{% endmatch %}
     <script>
       {% include "report.js" %}
     </script>

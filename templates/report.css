@@ -247,6 +247,44 @@ html:not(.js) .match { margin-bottom: 28px; }
   .overview-mode .match:not(.is-active) .review-button:not([aria-pressed="true"]) { background: var(--surface); color: var(--ink); border-color: var(--line); }
   .overview-mode .match:not(.is-active) .review-button:hover { background: var(--raised); }
 }
+/* Removal list */
+#cleanup-toggle .filter-count { min-width: 18px; padding: 1px 5px; border-radius: 9px; background: var(--raised); color: var(--ink); font-weight: 650; text-align: center; }
+#cleanup-toggle[aria-pressed="true"] { background: var(--raised); border-color: #738396; }
+.js body.cleanup-mode .match, .js body.cleanup-mode .filter-empty, .js body.cleanup-mode .empty, .js body.cleanup-mode .report-intro { display: none !important; }
+.cleanup { max-width: 920px; }
+.cleanup-heading { display: flex; align-items: end; justify-content: space-between; gap: 16px; margin-bottom: 12px; }
+.cleanup-heading h2 { margin: 0 0 6px; font-size: 24px; letter-spacing: -.02em; }
+.cleanup-help { max-width: 62ch; color: var(--muted); }
+.cleanup-note { color: var(--amber); }
+.cleanup-note code { white-space: nowrap; }
+.cleanup-summary { flex: none; color: var(--muted); font-size: 13px; }
+.cleanup-summary strong { color: var(--ink); font-size: 18px; }
+.cleanup-actions { display: flex; flex-wrap: wrap; gap: 8px; margin-bottom: 18px; }
+.cleanup-empty, .cleanup-done { padding: 18px; border: 1px dashed var(--line); border-radius: 9px; color: var(--muted); }
+.cleanup-done { margin-bottom: 14px; border-style: solid; border-color: #3a5749; background: #273a34; color: #bde5cf; }
+.cleanup-board { margin-bottom: 20px; }
+.cleanup-board h3 { margin: 0 0 8px; font-size: 14px; }
+.cleanup-board-count { color: var(--muted); font-weight: 450; }
+.cleanup-rows { display: grid; gap: 6px; margin: 0; padding: 0; list-style: none; }
+.cleanup-row { display: grid; grid-template-columns: 52px minmax(0, 1fr) auto; align-items: center; gap: 12px; padding: 8px 10px; border: 1px solid var(--line); border-radius: 9px; background: var(--shell); }
+.cleanup-row[data-state="removed"] { background: transparent; border-style: dashed; }
+.cleanup-row[data-state="removed"] .cleanup-thumb { opacity: .35; }
+.cleanup-row[data-state="removed"] .cleanup-title { color: var(--muted); text-decoration: line-through; }
+.cleanup-thumb { width: 52px; height: 52px; border-radius: 6px; object-fit: cover; background: var(--surface); }
+.cleanup-copy { display: grid; gap: 2px; min-width: 0; }
+.cleanup-title { font-weight: 650; }
+.cleanup-meta { display: flex; flex-wrap: wrap; align-items: center; gap: 4px 10px; color: var(--muted); font-size: 12px; }
+.cleanup-jump { padding: 0; border: 0; background: none; color: var(--accent); font-size: 12px; text-decoration: underline; text-underline-offset: 3px; }
+.cleanup-warning { color: var(--amber); font-size: 12px; }
+.cleanup-status { color: var(--muted); font-size: 12px; }
+.cleanup-row[data-state="removed"] .cleanup-status { color: #bde5cf; }
+.cleanup-row[data-state="present"] .cleanup-status, .cleanup-row[data-state="unknown"] .cleanup-status { color: var(--amber); }
+.cleanup-row-actions { display: flex; flex-wrap: wrap; justify-content: end; align-items: center; gap: 6px; }
+.cleanup-row-actions .button.primary { padding-inline: 4px; }
+.cleanup-row[data-state="removed"] [data-cleanup-open], .cleanup-row[data-state="removed"] [data-cleanup-check] { display: none; }
+.pin-card[data-removed="true"] .image-stage img { opacity: .35 !important; }
+.pin-card[data-removed="true"] .pin-details::after { content: "Removed from Pinterest"; flex-basis: 100%; color: #bde5cf; font-size: 12px; }
+.additional-saves li[data-removed="true"] > a { color: var(--muted); text-decoration: line-through; }
 @media (max-width: 900px) {
   :root { --review-rail: 190px; }
   .topbar { gap: 12px; padding-inline: 14px; }
@@ -303,6 +341,12 @@ html:not(.js) .match { margin-bottom: 28px; }
   .review-feedback { right: 10px; bottom: 10px; max-width: calc(100% - 20px); gap: 8px; }
   .intro-title { font-size: 20px; }
   .intro-stats { min-width: 62px; padding-left: 10px; }
+  .cleanup-heading { align-items: start; flex-direction: column; gap: 6px; }
+  .cleanup-heading h2 { font-size: 21px; }
+  .cleanup-row { grid-template-columns: 44px minmax(0, 1fr); gap: 8px 10px; }
+  .cleanup-thumb { width: 44px; height: 44px; }
+  .cleanup-row-actions { grid-column: 1 / -1; justify-content: start; }
+  #cleanup-toggle .control-label { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0,0,0,0); }
   .warning-details { display: none; }
 }
 @media (pointer: coarse) {
