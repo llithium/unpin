@@ -80,6 +80,7 @@ test.afterEach(async ({ page }) => {
 
 test("decisions are saved to the review file, not browser storage", async ({ page }) => {
   await page.goto(reviewUrl);
+  await page.locator('.match-link[data-target="exact-1"]').click();
   const match = page.locator("#exact-1");
   await match.getByRole("checkbox", { name: "Flag for removal, pin 102", exact: true }).check();
   await match.locator("[data-review-button]").click();
@@ -101,6 +102,7 @@ test("decisions are saved to the review file, not browser storage", async ({ pag
 test("returning from Pinterest confirms the removal and moves to the next pin", async ({ page, context }) => {
   await page.goto(reviewUrl);
   const visual = page.locator("#visual-1");
+  await page.locator('label[for="filter-all"]').click();
   await page.locator('.match-link[data-target="visual-1"]').click();
   const boxes = visual.locator("[data-remove-pin]");
   await boxes.last().check();
@@ -110,10 +112,12 @@ test("returning from Pinterest confirms the removal and moves to the next pin", 
   await expect(page.locator("#cleanup-help")).toContainText("--cookies-from-browser");
 
   const rows = page.locator(".cleanup-row");
+  const current = page.locator("#cleanup-current");
   const firstId = await rows.first().getAttribute("data-pin-id");
+  await expect(current.locator(".current-title")).toContainText(`Pin ${firstId}`);
   const [pinterestTab] = await Promise.all([
     context.waitForEvent("page"),
-    rows.first().locator("[data-cleanup-open]").click(),
+    current.locator("[data-current-open]").click(),
   ]);
   await pinterestTab.waitForURL(`https://www.pinterest.com/pin/${firstId}/`);
   expect(await pinterestTab.evaluate(() => document.referrer)).toBe("");
@@ -124,8 +128,10 @@ test("returning from Pinterest confirms the removal and moves to the next pin", 
   await page.evaluate(() => window.dispatchEvent(new Event("focus")));
   await expect(rows.first()).toHaveAttribute("data-state", "present");
   await expect(rows.first().locator("[data-cleanup-status]")).toHaveText("Still on Pinterest, on Ideas");
+  await expect(current.locator("[data-current-status]")).toHaveText("Still on Pinterest, on Ideas");
+  await expect(current.locator("[data-current-open]")).toBeFocused();
 
-  // A second open reuses the same Pinterest tab.
+  // A second open, from the full list, reuses the same Pinterest tab.
   const pagesBefore = context.pages().length;
   await rows.first().locator("[data-cleanup-open]").click();
   await pinterestTab.waitForLoadState();
@@ -136,11 +142,12 @@ test("returning from Pinterest confirms the removal and moves to the next pin", 
   await page.bringToFront();
   await page.evaluate(() => window.dispatchEvent(new Event("focus")));
   await expect(rows.first()).toHaveAttribute("data-state", "removed");
-  await expect(rows.nth(1).locator("[data-cleanup-open]")).toBeFocused();
+  const secondId = await rows.nth(1).getAttribute("data-pin-id");
+  await expect(current.locator(".current-title")).toContainText(`Pin ${secondId}`);
+  await expect(current.locator("[data-current-open]")).toBeFocused();
   await expect.poll(async () => JSON.parse(await readFile(storePath, "utf8")).removed_pins[firstId]).toBeTruthy();
 
   // Check all picks up a pin removed elsewhere.
-  const secondId = await rows.nth(1).getAttribute("data-pin-id");
   removed.add(secondId);
   await page.locator("#cleanup-check-all").click();
   await expect(rows.nth(1)).toHaveAttribute("data-state", "removed");

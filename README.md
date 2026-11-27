@@ -91,17 +91,30 @@ random token, and the server refuses requests from other websites.
 ### Removing duplicates on Pinterest
 
 Pinterest has no way for other apps to delete your pins, so removal happens on
-Pinterest itself. `unpin` keeps that round trip short:
+Pinterest itself. The review page splits the work into two steps, shown at the
+top of the page.
 
-1. In each match, choose **Flag for removal** on the copies you don't want, and
-   save the decision.
-2. Open **Remove** in the top bar. It lists every flagged pin, grouped by board.
-3. Choose **Open on Pinterest**. Pins always open in the same Pinterest tab, so
+**1 · Decide.** Matches appear as a gallery of stacked cards, starting with
+duplicates on the same board. Copies on different boards are often saved on
+purpose, so they sit under **Across boards** and never count as easy calls.
+
+- **Easy calls** are the same image saved more than once on one board. **Accept
+  all** keeps the best copy of each and puts the rest in the removal tray in one
+  step, or choose **Look through them first** to check each one.
+- Open any card to compare its copies side by side, tick **Flag for removal**
+  on the copies you don't want, and save the decision. `J` and `K` move between
+  matches, `E` saves, and `O` or `Escape` goes back to the gallery.
+- Everything flagged collects in the removal tray at the bottom of the page.
+
+**2 · Remove.** Choose **Start removing** on the tray.
+
+1. The page shows one pin at a time, large, with the copy that stays.
+2. Choose **Open on Pinterest**. Pins always open in the same Pinterest tab, so
    tabs don't pile up. Delete the pin there from its ⋯ menu.
-4. Come back to the review page. `unpin` asks Pinterest whether the pin still
-   exists, ticks it off when it is gone, and moves you to the next one.
-   **Check all with Pinterest** rechecks the whole list, for example after
-   removing pins on your phone.
+3. Come back to the review page. `unpin` asks Pinterest whether the pin still
+   exists, ticks it off when it is gone, and shows the next one. **Keep this
+   one** takes a pin out of the tray instead. **Check all with Pinterest**
+   rechecks the whole tray, for example after removing pins on your phone.
 
 Checks use the same Pinterest session as the scan. Signed out, a pin on a
 secret board can look removed, so scan with `--cookies-from-browser` for
@@ -116,7 +129,7 @@ Decisions and removal marks are saved to `review.json` in your user data folder
 
 Use `--static` to write a standalone `unpin-*.html` report to your temporary
 directory instead of starting the server. A standalone report has the same
-removal list, but keeps decisions in that browser and asks you to mark each pin
+steps and tray, but keeps decisions in that browser and asks you to mark each pin
 removed yourself, because a file opened from disk cannot ask Pinterest. HTML and
 CLI reports are mutually exclusive; use `--no-visual` to print the CLI report
 instead.
@@ -298,7 +311,7 @@ usable preview and failed downloads appear in the skipped list rather than
 aborting an otherwise useful scan. Media type is retained through saved reports.
 Any match containing a video poster, story cover, carousel cover, or unknown
 media type is labeled as matching covers and uses `INSPECT` instead of keep/delete
-recommendations. Such matches are excluded from Quick wins. The structural
+recommendations. Such matches are never easy calls. The structural
 similarity percentage is a comparison score, not a probability that deletion is
 safe. Interactive text groups large skipped sets by reason; JSON and the HTML report retain every individual skipped-pin record.
 

@@ -206,12 +206,10 @@ mod tests {
             html.contains("aria-label=\"Open original image, 1200 × 800 pixels, for pin 101\"")
         );
         assert!(html.contains("class=\"app-shell\""));
-        assert!(html.contains("id=\"overview-toggle\""));
-        assert!(html.contains("id=\"quick-wins\""));
+        assert!(html.contains("id=\"gallery-toggle\""));
+        assert!(html.contains("id=\"accept-easy\""));
         assert!(html.contains("id=\"reset-review\""));
-        assert!(html.contains(
-            "aria-label=\"Show exact duplicates saved more than once within one board\""
-        ));
+        assert!(html.contains("id=\"tray\""));
         assert!(html.contains("Review marks are kept"));
         assert!(html.contains("unpin never changes your Pinterest account."));
         assert!(!html.contains("<script src="));
@@ -267,20 +265,20 @@ mod tests {
         ));
         assert!(contains_html_fragment(
             &mixed,
-            "for=\"filter-same\"><span>Same</span><span class=\"filter-count\">1</span></label>"
+            "for=\"filter-same\"><span>Same board</span><span class=\"filter-count\">1</span></label>"
         ));
         assert!(contains_html_fragment(
             &mixed,
-            "for=\"filter-cross\"><span>Cross</span><span class=\"filter-count\">1</span></label>"
+            "for=\"filter-cross\"><span>Across boards</span><span class=\"filter-count\">1</span></label>"
         ));
         assert!(mixed.contains("aria-label=\"Filter matches by type\""));
         assert!(contains_html_fragment(
             &mixed,
-            "for=\"kind-exact\"><span>Exact</span><span class=\"filter-count\">1</span></label>"
+            "for=\"kind-exact\"><span>Identical</span><span class=\"filter-count\">1</span></label>"
         ));
         assert!(contains_html_fragment(
             &mixed,
-            "for=\"kind-visual\"><span>Visual</span><span class=\"filter-count\">1</span></label>"
+            "for=\"kind-visual\"><span>Similar</span><span class=\"filter-count\">1</span></label>"
         ));
 
         let mut exact_only = sample_report();
@@ -293,24 +291,20 @@ mod tests {
     }
 
     #[test]
-    fn quick_wins_control_is_conditional_and_counts_same_board_exact_groups() {
-        let mut exact_only = sample_report();
-        exact_only.visual_candidates.clear();
-        assert!(!render_html(&exact_only).contains("id=\"quick-wins\""));
-
-        let mut multi_report = sample_report();
-        multi_report.summary.boards.push(ScannedBoard {
-            collection_issues: Vec::new(),
-            name: "Mood board".into(),
-            url: "https://www.pinterest.com/alice/mood-board/".into(),
-            pins_reported: Some(1),
-            pins_found: 1,
-        });
-        let multi = render_html(&multi_report);
-        assert!(multi.contains("id=\"quick-wins\""));
+    fn easy_calls_are_conditional_and_count_same_board_exact_groups() {
+        let same_board = render_html(&sample_report());
+        assert!(same_board.contains("id=\"easy-calls\""));
         assert!(contains_html_fragment(
-            &multi,
-            "<span>Quick wins</span> <span class=\"filter-count\">1</span>"
+            &same_board,
+            "<span id=\"easy-count\">1</span> <span id=\"easy-noun\">duplicate is an easy call</span>"
+        ));
+
+        // Copies on different boards are never easy calls.
+        let cross_board = render_html(&multi_board_report());
+        assert!(!cross_board.contains("id=\"easy-calls\""));
+        assert!(contains_html_fragment(
+            &cross_board,
+            "id=\"filter-same\" class=\"filter-input\" value=\"same-board\" checked"
         ));
     }
 
@@ -323,6 +317,7 @@ mod tests {
         assert!(!html.contains("id=\"unreviewed-only\""));
         assert!(!html.contains("id=\"visible-count\""));
         assert!(!html.contains("id=\"quick-wins\""));
+        assert!(!html.contains("id=\"tray\""));
     }
 
     #[test]
@@ -360,11 +355,11 @@ mod tests {
         let cross_only = render_html(&report);
         assert!(contains_html_fragment(
             &cross_only,
-            "for=\"filter-same\"><span>Same</span><span class=\"filter-count\">0</span></label>"
+            "for=\"filter-same\"><span>Same board</span><span class=\"filter-count\">0</span></label>"
         ));
         assert!(contains_html_fragment(
             &cross_only,
-            "for=\"filter-cross\"><span>Cross</span><span class=\"filter-count\">2</span></label>"
+            "for=\"filter-cross\"><span>Across boards</span><span class=\"filter-count\">2</span></label>"
         ));
     }
 

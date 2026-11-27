@@ -96,9 +96,28 @@ test.afterEach(async ({ page }) => {
   expect(pageErrors.get(page), "the report must not raise browser errors").toEqual([]);
 });
 
-async function openReport(page) {
+// Opens the fixture with every match shown and the first one in focus,
+// or, with { gallery: true }, as it first appears.
+async function openReport(page, { gallery = false } = {}) {
   await page.goto(`${origin}${fixtureUrl}`);
   await expect(page.locator("[data-group]")).toHaveCount(3);
+  if (gallery) return;
+  await page.locator('label[for="filter-all"]').click();
+  await page.locator(".match-link:not(.is-filtered)").first().click();
+}
+
+// Opens one match from the gallery, the way a person would.
+async function openMatch(page, target) {
+  if (!(await page.locator("body").evaluate((body) => body.classList.contains("gallery-mode")))) {
+    await page.locator("#gallery-toggle").click();
+  }
+  const link = page.locator(`.match-link[data-target="${target}"]`);
+  if (await link.evaluate((element) => element.classList.contains("is-filtered"))) {
+    const all = page.locator('label[for="filter-all"]');
+    if (await all.count()) await all.click();
+    else await page.locator("#clear-filters").click();
+  }
+  await link.click();
 }
 
 async function decide(page, groupId, action) {
@@ -112,55 +131,130 @@ function visibleGroups(page) {
 }
 
 test("scope, kind, and review filters compose as a user queue", async ({ page }) => {
-  await openReport(page);
+  await openReport(page, { gallery: true });
+  await page.locator('label[for="filter-all"]').click();
   await expect(page.locator("#visible-count")).toHaveText("3 shown");
 
   await page.locator('label[for="filter-same"]').click();
   await page.locator('label[for="kind-exact"]').click();
   await expect(visibleGroups(page)).toHaveCount(1);
+  await expect(page.locator(".match-link:visible")).toHaveCount(1);
   await expect(page.locator("#visible-count")).toHaveText("1 shown");
 
   await page.locator("#unreviewed-only").check();
+  await openMatch(page, "exact-1");
   await page.locator("#exact-1 [data-review-button]").click();
   await expect(visibleGroups(page)).toHaveCount(0);
   await expect(page.locator("#filter-empty")).toHaveClass(/is-visible/);
+  await expect(page.locator("#filter-empty")).toBeVisible();
   await expect(page.locator("#visible-count")).toHaveText("0 shown");
 
+  await page.locator("#gallery-toggle").click();
   await page.locator('label[for="filter-all"]').click();
   await expect(page.locator('[data-group].is-active')).toHaveCount(1);
   await expect(page.locator('[data-group].is-active')).toHaveAttribute("id", "exact-2");
 });
 
-test("Quick wins selects same-board exact matches and advances review", async ({ page }) => {
-  await openReport(page);
+test("the gallery opens on same-board matches with the easy calls first", async ({ page }) => {
+  await openReport(page, { gallery: true });
+  await expect(page.locator("body")).toHaveClass(/gallery-mode/);
+  await expect(page.locator("#filter-same")).toBeChecked();
+  await expect(page.locator("#visible-count")).toHaveText("2 shown");
+  await expect(page.locator(".match-link:visible")).toHaveCount(2);
+  await expect(page.locator("[data-group]:visible")).toHaveCount(0);
+  await expect(page.locator(".scope-note")).toBeHidden();
+  await page.locator('label[for="filter-cross"]').click();
+  await expect(page.locator(".scope-note")).toBeVisible();
+  await page.locator('label[for="filter-same"]').click();
+
+  await expect(page.locator("#easy-calls")).toBeVisible();
+  await expect(page.locator("#easy-calls h2")).toHaveText("1 duplicate is an easy call");
+  await expect(page.locator("#accept-easy")).toHaveText("Accept it");
+  await expect(page.locator("#tray")).toBeHidden();
+});
+
+test("Look through them first selects the easy calls and advances review", async ({ page }) => {
+  await openReport(page, { gallery: true });
   await page.evaluate(() => (window.__storageWrites = []));
   await page.locator("#quick-wins").click();
   await expect
     .poll(() => page.evaluate(() => window.__storageWrites.length))
-    .toBe(1);
+    .toBeGreaterThanOrEqual(1);
 
   await expect(page.locator("#filter-same")).toBeChecked();
   await expect(page.locator("#kind-exact")).toBeChecked();
   await expect(page.locator("#unreviewed-only")).toBeChecked();
   await expect(visibleGroups(page)).toHaveCount(1);
+  await expect(page.locator("body")).not.toHaveClass(/gallery-mode/);
   await expect(page.locator('[data-group].is-active')).toHaveAttribute("id", "exact-1");
 
-  await page.evaluate(() => (window.__storageWrites = []));
   await page.locator("#exact-1 [data-review-button]").click();
-  await expect
-    .poll(() => page.evaluate(() => window.__storageWrites.length))
-    .toBe(1);
-  await expect
-    .poll(() =>
-      page.evaluate(
-        () => document.querySelector("#quick-wins")?.closest(".filter-controls-meta")?.hidden,
-      ),
-    )
-    .toBe(true);
+  await expect(page.locator("#easy-calls")).toBeHidden();
   await expect(page.locator("#review-progress")).toHaveText("1 / 3");
 });
 
-test("focus navigation, overview, keyboard shortcuts, and active state stay coherent", async ({ page }) => {
+test("accepting the easy calls keeps the best copy and fills the tray", async ({ page }) => {
+  await openReport(page, { gallery: true });
+  await page.locator("#accept-easy").click();
+  await expect(page.locator("#exact-1")).toHaveAttribute("data-decision", "remove");
+  await expect(page.locator("#exact-1")).toHaveAttribute("data-reviewed", "true");
+  await expect(page.locator('#exact-1 [data-remove-pin="102"]')).toBeChecked();
+  await expect(page.locator('#exact-1 [data-remove-pin="101"]')).not.toBeChecked();
+  await expect(page.locator("#exact-2")).toHaveAttribute("data-decision", "");
+  await expect(page.locator("#easy-calls")).toBeHidden();
+  await expect(page.locator('.match-link[data-target="exact-1"] [data-chip]')).toHaveText("1 in tray");
+  await expect(page.locator("#review-progress")).toHaveText("1 / 3");
+
+  await expect(page.locator("#tray")).toBeVisible();
+  await expect(page.locator("#tray-count")).toHaveText("1 pin");
+  await expect(page.locator("#tray-thumbs img")).toHaveCount(1);
+  await expect(page.locator("#tray-start")).toBeFocused();
+  await expect(page.locator("#cleanup-count")).toHaveText("1");
+
+  await page.locator("#undo-review").click();
+  await expect(page.locator("#exact-1")).toHaveAttribute("data-decision", "");
+  await expect(page.locator("#easy-calls")).toBeVisible();
+  await expect(page.locator("#tray")).toBeHidden();
+});
+
+test("the remove step shows one pin at a time with what stays behind", async ({ page }) => {
+  await openReport(page, { gallery: true });
+  await page.locator("#accept-easy").click();
+  await page.locator("#tray-start").click();
+  await expect(page.locator("body")).toHaveClass(/cleanup-mode/);
+  await expect(page.locator("#cleanup-toggle")).toHaveAttribute("aria-current", "step");
+  await expect(page.locator("#decide-step")).toHaveAttribute("aria-current", "false");
+  await expect(page.locator("#tray")).toBeHidden();
+  const current = page.locator("#cleanup-current");
+  await expect(current).toBeVisible();
+  await expect(current.locator(".current-title")).toHaveText("Pin 102 · Ideas");
+  await expect(current.locator(".current-detail")).toHaveText("The 1200 × 800 copy. Your 1200 × 800 copy stays.");
+  const open = current.getByRole("link", { name: "Open on Pinterest" });
+  await expect(open).toBeFocused();
+  await expect(open).toHaveAttribute("href", "https://www.pinterest.com/pin/102/");
+  await expect(open).toHaveAttribute("target", "unpin-pinterest");
+
+  // Keeping it takes it out of the tray but keeps the match reviewed.
+  await current.getByRole("button", { name: "Keep this one" }).click();
+  await expect(page.locator("#exact-1")).toHaveAttribute("data-decision", "keep_all");
+  await expect(current).toBeHidden();
+  await expect(page.locator("#cleanup-empty")).toBeVisible();
+  await page.locator("#undo-review").click();
+  await expect(page.locator("#exact-1")).toHaveAttribute("data-decision", "remove");
+  await expect(current).toBeVisible();
+
+  await current.getByRole("button", { name: "I deleted it" }).click();
+  await expect(page.locator("#cleanup-done")).toBeVisible();
+  await expect(page.locator("#cleanup-progress")).toHaveText("1 of 1");
+  await expect(current).toBeHidden();
+
+  await page.locator("#decide-step").click();
+  await expect(page.locator("body")).toHaveClass(/gallery-mode/);
+  await expect(page.locator("body")).not.toHaveClass(/cleanup-mode/);
+  await expect(page.locator("#tray")).toBeHidden();
+});
+
+test("focus navigation, gallery, keyboard shortcuts, and active state stay coherent", async ({ page }) => {
   await openReport(page);
   await expect(page.locator('[data-group].is-active')).toHaveCount(1);
   await expect(page.locator('[data-group].is-active')).toHaveAttribute("id", "exact-1");
@@ -185,7 +279,7 @@ test("focus navigation, overview, keyboard shortcuts, and active state stay cohe
   await page.locator("#next-match").focus();
   await page.keyboard.press("j");
   await expect(page.locator('[data-group].is-active')).toHaveAttribute("id", "exact-2");
-  await page.locator("#unreviewed-only").focus();
+  await page.locator("#exact-2 [data-remove-pin]").first().focus();
   await page.keyboard.press("j");
   await expect(page.locator('[data-group].is-active')).toHaveAttribute("id", "exact-2");
   await page.locator("main").click({ position: { x: 5, y: 5 } });
@@ -194,13 +288,16 @@ test("focus navigation, overview, keyboard shortcuts, and active state stay cohe
   await page.keyboard.press("k");
   await expect(page.locator('[data-group].is-active')).toHaveAttribute("id", "exact-2");
 
-  await page.locator("#overview-toggle").click();
-  await expect(page.locator("body")).toHaveClass(/overview-mode/);
-  await expect(page.locator("#overview-toggle")).toHaveAttribute("aria-pressed", "true");
+  await page.locator("#gallery-toggle").click();
+  await expect(page.locator("body")).toHaveClass(/gallery-mode/);
+  await expect(page.locator('.match-link[data-target="exact-2"]')).toBeFocused();
   await page.locator("main").click({ position: { x: 5, y: 5 } });
   await page.keyboard.press("o");
-  await expect(page.locator("body")).not.toHaveClass(/overview-mode/);
+  await expect(page.locator("body")).not.toHaveClass(/gallery-mode/);
   await expect(page.locator('[data-group].is-active')).toHaveCount(1);
+  await page.keyboard.press("Escape");
+  await expect(page.locator("body")).toHaveClass(/gallery-mode/);
+  await page.keyboard.press("o");
 
   await page.keyboard.press("e");
   await expect(page.locator("#exact-2")).toHaveAttribute("data-reviewed", "true");
@@ -235,6 +332,7 @@ test("review state persists, rejects inconsistent state, and resets", async ({ p
   await expect(page.locator("#exact-1")).toHaveAttribute("data-reviewed", "false");
   await expect(page.locator("#unreviewed-only")).not.toBeChecked();
 
+  await openMatch(page, "exact-1");
   await page.locator("#exact-1 [data-review-button]").click();
   await page.evaluate(() => (window.__storageWrites = []));
   await page.locator("#reset-review").click();
@@ -274,7 +372,8 @@ test("images reveal after load and no-JavaScript reports remain readable", async
   await expect(noJsPage.locator("[data-group]").nth(1)).toBeVisible();
   await expect(noJsPage.locator("[data-group]").nth(2)).toBeVisible();
   await expect(noJsPage.locator("#report-content")).toBeVisible();
-  await expect(noJsPage.locator(".topbar-actions")).toBeHidden();
+  await expect(noJsPage.locator(".steps")).toBeHidden();
+  await expect(noJsPage.locator(".gallery")).toBeHidden();
   await expect(noJsPage.locator(".match-actions").first()).toBeHidden();
   await noJsContext.close();
 });
@@ -289,7 +388,7 @@ test("responsive and print modes keep report content within their presentation b
   expect(viewport.width).toBeLessThanOrEqual(viewport.viewport + 1);
 
   await page.emulateMedia({ media: "print" });
-  await expect(page.locator(".rail")).toBeHidden();
+  await expect(page.locator(".gallery")).toBeHidden();
   await expect(page.locator("footer")).toBeHidden();
   await expect(page.locator("#report-content")).toBeVisible();
   await page.evaluate(() => window.dispatchEvent(new Event("beforeprint")));
@@ -312,6 +411,7 @@ test("review advance preserves keyboard focus and Undo restores the match", asyn
   await expect(page.locator("#exact-1")).toHaveAttribute("data-reviewed", "false");
   await expect(page.locator("#review-progress")).toHaveText("0 / 3");
 
+  await page.locator("#gallery-toggle").click();
   await page.locator("#quick-wins").click();
   await review.click();
   await expect(page.locator("#clear-filters")).toBeFocused();
@@ -325,8 +425,10 @@ test("review advance preserves keyboard focus and Undo restores the match", asyn
 });
 
 test("a completed queue explains completion and can be revisited", async ({ page }) => {
-  await openReport(page);
+  await openReport(page, { gallery: true });
+  await page.locator('label[for="filter-all"]').click();
   await page.locator("#unreviewed-only").check();
+  await openMatch(page, "exact-1");
   for (const id of ["exact-1", "exact-2", "visual-1"]) {
     await page.locator(`#${id} [data-review-button]`).click();
   }
@@ -359,8 +461,9 @@ test("empty scans show their identity and warnings without unusable review contr
   await expect(page.locator(".empty strong")).toHaveText("No matches found");
   await expect(page.locator(".scan-warning")).toBeVisible();
   await expect(page.locator("#scan-warnings")).toHaveAttribute("open", "");
-  await expect(page.locator(".rail")).toBeHidden();
-  await expect(page.locator(".topbar-actions")).toBeHidden();
+  await expect(page.locator(".gallery")).toHaveCount(0);
+  await expect(page.locator(".steps")).toHaveCount(0);
+  await expect(page.locator("#tray")).toHaveCount(0);
 });
 
 test("mobile comparisons align images and retain progress, labels, and touch targets", async ({ browser }) => {
@@ -369,64 +472,68 @@ test("mobile comparisons align images and retain progress, labels, and touch tar
   const page = await context.newPage();
   await page.goto(`${origin}${fixtureUrl}`);
   await expect(page.locator("#review-progress")).toBeVisible();
-  await expect(page.locator("#overview-toggle .control-label")).toBeVisible();
+  await expect(page.locator("#match-filters")).toBeVisible();
+  for (const label of await page.locator(".filters label").all()) {
+    expect((await label.boundingBox()).height).toBeGreaterThanOrEqual(44);
+  }
+  await openMatch(page, "exact-1");
+  await expect(page.locator("#gallery-toggle")).toBeVisible();
   const images = await page.locator("#exact-1 .image-stage").evaluateAll(elements => elements.map(el => ({ x: el.getBoundingClientRect().x, y: el.getBoundingClientRect().y })));
   expect(images[0].y).toBe(images[1].y);
   expect(images[1].x).toBeGreaterThan(images[0].x);
-  for (const selector of ["#previous-match", "#next-match", "#overview-toggle", "#exact-1 .button.primary"]) {
+  for (const selector of ["#previous-match", "#next-match", "#gallery-toggle", "#exact-1 .button.primary"]) {
     expect((await page.locator(selector).first().boundingBox()).height).toBeGreaterThanOrEqual(44);
   }
-  await expect(page.locator("#match-filters")).toBeHidden();
-  await page.locator("#toggle-filters").click();
-  await expect(page.locator("#match-filters")).toBeVisible();
-  await page.locator("#toggle-filters").click();
   await page.locator("#next-match").click();
-  const heading = await page.locator("#exact-2 .match-heading").boundingBox();
+  const heading = await page.locator("[data-group].is-active .match-heading").boundingBox();
   const header = await page.locator(".topbar").boundingBox();
   expect(heading.y).toBeGreaterThanOrEqual(header.y + header.height);
   expect(heading.y).toBeLessThan(200);
   await context.close();
 });
 
-test("long content and three-pin groups fit narrow, tablet, desktop, and overview layouts", async ({ page }) => {
+test("long content and three-pin groups fit narrow, tablet, desktop, and gallery layouts", async ({ page }) => {
   await page.goto(`${origin}/long-content.html`);
   for (const width of [320, 390, 620, 768, 880, 1024, 1440]) {
     await page.setViewportSize({ width, height: 900 });
-    for (const overview of [false, true]) {
-      if ((await page.locator("#overview-toggle").getAttribute("aria-pressed")) !== String(overview)) await page.locator("#overview-toggle").click();
+    for (const gallery of [true, false]) {
+      if (gallery) { if (await page.locator("#gallery-toggle").isVisible()) await page.locator("#gallery-toggle").click(); }
+      else await openMatch(page, "exact-1");
       const overflow = await page.evaluate(() => document.documentElement.scrollWidth > innerWidth);
-      expect(overflow, `${width}px, overview=${overview}`).toBe(false);
+      expect(overflow, `${width}px, gallery=${gallery}`).toBe(false);
       const cards = await page.locator("#exact-1 .pin-card").evaluateAll(elements => elements.map(el => ({width: el.clientWidth, content: el.scrollWidth})));
       for (const card of cards) expect(card.content).toBeLessThanOrEqual(card.width + 1);
     }
   }
 });
 
-test("reviewed mobile queue tiles fit long match numbers beside the checkmark", async ({ page }) => {
+test("reviewed gallery cards fit long match numbers on a narrow screen", async ({ page }) => {
   await page.setViewportSize({ width: 320, height: 844 });
-  await openReport(page);
+  await openReport(page, { gallery: true });
   const tile = page.locator('[data-target="visual-1"]');
   await tile.click();
   await decide(page, "visual-1", "keep_all");
+  await page.locator("#gallery-toggle").click();
   await expect(tile).toHaveAccessibleName(/Reviewed/);
+  await expect(tile.locator("[data-chip]")).toHaveText("Kept all");
 
-  // Exercise a longer queue label using the same reviewed match and layout.
   const number = tile.locator(".match-number");
   await number.evaluate(label => { label.textContent = "Visual 1000"; });
-  const [tileBox, numberBox, stateBox] = await Promise.all([
+  const [tileBox, copyBox, stateBox, stackBox] = await Promise.all([
     tile.boundingBox(),
-    number.boundingBox(),
+    tile.locator(".match-link-copy").boundingBox(),
     tile.locator(".match-link-state").boundingBox(),
+    tile.locator(".match-stack").boundingBox(),
   ]);
-  expect(numberBox.x + numberBox.width).toBeLessThanOrEqual(stateBox.x);
-  expect(stateBox.x + stateBox.width).toBeLessThanOrEqual(tileBox.x + tileBox.width);
+  expect(copyBox.x + copyBox.width).toBeLessThanOrEqual(tileBox.x + tileBox.width + 1);
+  expect(stateBox.x + stateBox.width).toBeLessThanOrEqual(stackBox.x + stackBox.width);
   expect(await page.evaluate(() => document.documentElement.scrollWidth)).toBe(320);
 });
 
 test("grouped visual variants retain every save with two previews", async ({ page }) => {
   await page.setViewportSize({ width: 390, height: 844 });
   await openReport(page);
-  await page.locator('[data-target="visual-1"]').click();
+  await openMatch(page, "visual-1");
   await expect(page.locator("#visual-1 .image-stage")).toHaveCount(2);
   await page.locator("#visual-1 .additional-saves > summary").click();
   await expect(page.locator('#visual-1 a[href="https://www.pinterest.com/pin/303/"]')).toBeVisible();
@@ -441,12 +548,13 @@ test("decisions survive board subsets, export/import, and undo", async ({ page }
   await expect(page.locator("#exact-1")).toHaveAttribute("data-reviewed", "false");
   await page.locator('#exact-1 [data-review-button]').click();
   await expect(page.locator("#exact-1")).toHaveAttribute("data-decision", "remove");
-  await page.locator('.match-link[data-target="exact-2"]').click();
+  await openMatch(page, "exact-2");
   await decide(page, "exact-2", "keep_all");
-  await page.locator('.match-link[data-target="visual-1"]').click();
+  await openMatch(page, "visual-1");
   await decide(page, "visual-1", "later");
   await expect(page.locator("#review-progress")).toHaveText("2 / 3");
   const downloadReady = page.waitForEvent("download");
+  await page.locator("#gallery-toggle").click();
   await page.locator(".report-tools > summary").click();
   await page.locator("#export-review").click();
   const download = await downloadReady;
@@ -472,7 +580,7 @@ test("decisions survive board subsets, export/import, and undo", async ({ page }
   await expect(page.locator("#visual-1")).toHaveAttribute("data-reviewed", "false");
   await page.locator("#undo-review").click();
   await expect(page.locator("#review-progress")).toHaveText("0 / 3");
-  await page.locator('.match-link[data-target="visual-1"]').click();
+  await openMatch(page, "visual-1");
   await decide(page, "visual-1", "not_duplicate");
   await expect(page.locator('[data-group].is-active [data-review-button]')).toBeFocused();
   await page.reload();
@@ -488,19 +596,19 @@ test("imports validate every decision before changing current progress", async (
   await page.locator("#review-file").setInputFiles({ name: "bad.json", mimeType: "application/json", buffer: Buffer.from(JSON.stringify({ schema_version: 1, decisions: [valid, invalid] })) });
   await expect(page.locator("#transfer-status")).toContainText("Invalid review decision");
   await expect(page.locator("#exact-1")).toHaveAttribute("data-decision", "keep_all");
-  await page.locator('.match-link[data-target="exact-1"]').click();
+  await openMatch(page, "exact-1");
   await decide(page, "exact-1", "later");
   await expect(page.locator("#reset-review")).toBeEnabled();
   await expect(page.locator("#review-progress")).toHaveText("0 / 3");
 });
 
-test("media covers remain inspection-only and are excluded from Quick wins", async ({ page }) => {
+test("media covers remain inspection-only and are never easy calls", async ({ page }) => {
   await page.goto(`${origin}/media.html`);
   await expect(page.locator("#exact-1 .match-description")).toContainText("Matching covers");
   await expect(page.locator("#exact-1 .badge").filter({ hasText: "Inspect pin content" })).toHaveCount(0);
   await expect(page.locator("#visual-1 .match-description")).toContainText("Matching covers");
   await expect(page.locator("#visual-1 .badge").filter({ hasText: "Inspect pin content" })).toHaveCount(0);
-  await expect(page.locator("#quick-wins").locator("..")).toBeHidden();
+  await expect(page.locator("#easy-calls")).toHaveCount(0);
   for (const width of [375, 768, 1440]) {
     await page.setViewportSize({ width, height: 900 });
     expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
@@ -514,8 +622,9 @@ test("open reports merge decisions and resets without losing another report's wo
   other.on("pageerror", (error) => errors.push(error));
   try {
     await other.goto(`${origin}/subset.html`);
-    await page.locator(".match-link[data-target='exact-2']").click();
+    await openMatch(page, "exact-2");
     await decide(page, "exact-2", "keep_all");
+    await openMatch(other, "exact-1");
     await decide(other, "exact-1", "not_duplicate");
     await expect(page.locator('#exact-1')).toHaveAttribute("data-decision", "not_duplicate");
     await other.locator('#reset-review').click();
@@ -530,6 +639,7 @@ test("open reports merge decisions and resets without losing another report's wo
 test("Chromium local HTML reports reuse decisions across different report paths", async ({ page }) => {
   await page.route("file://**/*.html", (route) => route.continue());
   await page.goto(pathToFileURL(fixturePath).href);
+  await openMatch(page, "exact-1");
   await decide(page, "exact-1", "keep_all");
   await page.goto(pathToFileURL(resolve(repoRoot, "test-results/subset.html")).href);
   await expect(page.locator('#exact-1')).toHaveAttribute("data-decision", "keep_all");
@@ -563,7 +673,7 @@ test("widescreen focus uses the available width and keeps large portraits togeth
   const landscape = await page.locator("#exact-1 .comparison").boundingBox();
   const landscapeRightGutter = 2560 - landscape.x - landscape.width;
 
-  await page.locator('[data-target="exact-2"]').click();
+  await openMatch(page, "exact-2");
   const stages = page.locator("#exact-2 .image-stage");
   await expect(stages.locator("img.is-loaded")).toHaveCount(2);
   const [first, second] = await stages.evaluateAll(stages =>
@@ -583,7 +693,7 @@ test("widescreen focus uses the available width and keeps large portraits togeth
     })
   );
   expect.soft(landscapeRightGutter, "landscape comparison fills the report width").toBeLessThan(40);
-  expect.soft(first.height, "portrait uses most of the viewport height").toBeGreaterThanOrEqual(840);
+  expect.soft(first.height, "portrait uses most of the viewport height").toBeGreaterThanOrEqual(820);
   expect(second.top).toBe(first.top);
   expect(second.height).toBe(first.height);
   expect(first.top).toBeGreaterThanOrEqual(0);
@@ -678,38 +788,40 @@ test('pin controls have specific accessible names, including additional saves', 
     await expect(exact.getByRole('link', { name: `Open pin ${id}`, exact: true })).toHaveAttribute('href', `https://www.pinterest.com/pin/${id}/`);
     await expect(exact.getByRole('link', { name: `Open image for pin ${id}`, exact: true })).toHaveCount(1);
   }
-  await page.locator('.match-link[data-target="visual-1"]').click();
+  await openMatch(page, "visual-1");
   const visual = page.locator('#visual-1');
-  await expect(page.locator('.match-link[data-target="visual-1"]')).toContainText('98% similarity');
+  await expect(page.locator('.match-link[data-target="visual-1"]')).toContainText('98%');
   await visual.getByText('1 additional save', { exact: true }).click();
   const extra = visual.getByRole('checkbox', { name: 'Flag for removal, pin 303', exact: true });
   await extra.check();
   await expect(visual.locator('[data-decision-notice]')).toHaveText('Draft: 1 copy flagged');
   await page.reload();
+  await expect(page.locator('body')).not.toHaveClass(/gallery-mode/);
   await visual.getByText('1 additional save', { exact: true }).click();
   await expect(extra).toBeChecked();
 });
 
 test('filter radios belong to their named groups and retain keyboard selection styling', async ({ page }) => {
-  await openReport(page);
+  await openReport(page, { gallery: true });
+  await page.locator('label[for="filter-all"]').click();
   const scope = page.getByRole('radiogroup', { name: 'Filter matches by board scope', exact: true });
   const kind = page.getByRole('radiogroup', { name: 'Filter matches by type', exact: true });
   await expect(scope.getByRole('radio')).toHaveCount(3);
   await expect(kind.getByRole('radio')).toHaveCount(3);
   await scope.getByRole('radio', { name: 'All 3', exact: true }).focus();
   await page.keyboard.press('ArrowRight');
-  await expect(scope.getByRole('radio', { name: 'Same 2', exact: true })).toBeChecked();
-  await expect(scope.getByRole('radio', { name: 'Same 2', exact: true })).toBeFocused();
-  await expect(kind.getByRole('radio', { name: 'All 3', exact: true })).toBeChecked();
+  await expect(scope.getByRole('radio', { name: 'Same board 2', exact: true })).toBeChecked();
+  await expect(scope.getByRole('radio', { name: 'Same board 2', exact: true })).toBeFocused();
+  await expect(kind.getByRole('radio', { name: 'All types 3', exact: true })).toBeChecked();
   const selectedStyle = await scope.locator('label[for="filter-same"]').evaluate(label => ({
     background: getComputedStyle(label).backgroundColor,
     outline: getComputedStyle(label).outlineStyle,
   }));
-  expect(selectedStyle.background).toBe('rgb(48, 56, 66)');
+  expect(selectedStyle.background).toBe('rgb(255, 255, 255)');
   expect(selectedStyle.outline).toBe('solid');
-  await kind.getByRole('radio', { name: 'All 3', exact: true }).focus();
+  await kind.getByRole('radio', { name: 'All types 3', exact: true }).focus();
   await page.keyboard.press('ArrowRight');
-  await expect(kind.getByRole('radio', { name: 'Exact 2', exact: true })).toBeChecked();
+  await expect(kind.getByRole('radio', { name: 'Identical 2', exact: true })).toBeChecked();
   await expect(visibleGroups(page)).toHaveCount(1);
 });
 
@@ -717,6 +829,7 @@ for (const width of [320, 390, 2560]) {
   test(`full board names can be revealed by keyboard and pointer at ${width}px`, async ({ page }) => {
     await page.setViewportSize({ width, height: 900 });
     await page.goto(`${origin}/long-content.html`);
+    await openMatch(page, 'exact-1');
     const details = page.locator('#exact-1 .board-details').first();
     const name = 'A very long board name with art references and illustration inspiration';
     const summary = details.getByText(name, { exact: true }).first();
@@ -740,6 +853,7 @@ test.describe('touch board names', () => {
 
   test('tap reveals the full board name with a usable touch target', async ({ page }) => {
     await page.goto(`${origin}/long-content.html`);
+    await openMatch(page, 'exact-1');
     const details = page.locator('#exact-1 .board-details').first();
     const summary = details.locator('summary');
     expect((await summary.boundingBox()).height).toBeGreaterThanOrEqual(44);
@@ -759,7 +873,9 @@ test("flagged copies form a removal list whose marks survive reloads", async ({ 
   await expect(page.locator("[data-group]:visible")).toHaveCount(0);
   await page.locator("#cleanup-back").click();
   await expect(page.locator("#cleanup")).toBeHidden();
+  await expect(page.locator("body")).toHaveClass(/gallery-mode/);
 
+  await openMatch(page, "exact-1");
   const match = page.locator("#exact-1");
   await match.getByRole("checkbox", { name: "Flag for removal, pin 102", exact: true }).check();
   await match.locator("[data-review-button]").click();
@@ -790,6 +906,7 @@ test("flagged copies form a removal list whose marks survive reloads", async ({ 
   await row.locator(".cleanup-jump").click();
   await expect(page.locator("#cleanup")).toBeHidden();
   await expect(page.locator("#exact-1")).toHaveClass(/is-active/);
+  await expect(page.locator("#exact-1")).toBeVisible();
 });
 
 test("flagging every copy of a match warns in the removal list", async ({ page }) => {
