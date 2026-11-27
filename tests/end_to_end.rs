@@ -1217,7 +1217,7 @@ async fn scans_selected_profile_boards_as_one_pooled_report() {
         std::fs::read_to_string(unpin::visual::create_temporary_report(&report).unwrap()).unwrap();
     assert!(html.contains("alice 3 boards"));
     assert!(html.contains("class=\"board\""));
-    assert!(html.contains("title=\"Interiors\""));
+    assert!(html.contains("<p class=\"board\">Interiors</p>"));
     assert!(html.contains("badge cross-board"));
 
     let same_only = Cli::try_parse_from([

@@ -79,6 +79,10 @@ pub enum ProgressStep {
         path: Option<String>,
         lifecycle: Lifecycle,
     },
+    /// The local review server is listening at this address.
+    ReviewServer {
+        url: String,
+    },
     /// Control is handed to or returned from the interactive selector.
     SelectionHandoff {
         lifecycle: Lifecycle,
@@ -163,6 +167,10 @@ impl ProgressGroup {
 }
 
 impl TerminalProgress {
+    pub fn is_visible(&self) -> bool {
+        self.visible
+    }
+
     pub fn new(visible: bool) -> Self {
         let bars = if visible {
             MultiProgress::with_draw_target(ProgressDrawTarget::stderr())
@@ -731,6 +739,14 @@ impl Progress for TerminalProgress {
                     let bar = self.add_active_row(message.clone());
                     Self::complete_row(&bar, message);
                 }
+            }
+            ProgressStep::ReviewServer { url } => {
+                let mut state = self.state.lock().unwrap();
+                self.add_group(&mut state, ProgressGroup::Report);
+                Self::finish_slot(&mut state.matching, "Matches compared".into());
+                let message = format!("Review page: {}", sanitize_terminal_text(&url));
+                let bar = self.add_active_row(message.clone());
+                Self::complete_row(&bar, message);
             }
             ProgressStep::Scan {
                 lifecycle: Lifecycle::Completed,

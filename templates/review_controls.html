@@ -1,16 +1,6 @@
 <div class="decision-options" role="group" aria-label="Review decision">
-  <button class="decision-button" data-decision-action="keep_all" type="button" aria-pressed="false">Keep all</button>
-  <details class="decision-more">
-    <summary class="control">More</summary>
-    <div class="decision-menu">
-      <button data-decision-action="not_duplicate" type="button">Not duplicates</button>
-      <button data-decision-action="later" type="button">Decide later</button>
-      <button data-decision-action="" type="button">Clear decision</button>
-    </div>
-  </details>
+  <button class="decision-primary" data-remove-smaller type="button" aria-pressed="false"><span data-remove-smaller-label>Remove smaller copies</span><kbd>R</kbd></button>
+  <button class="decision-button" data-decision-action="keep_all" type="button" aria-pressed="false"><span data-keep-label>Keep all</span><kbd>A</kbd></button>
 </div>
 <span data-decision-notice role="status"></span>
-<button class="review-button" type="button" data-review-button aria-pressed="false">
-  <span data-review-label>Mark reviewed</span><kbd>E</kbd>
-</button>
-<p class="decision-help">Flags are saved in this browser. Open a pin to remove it on Pinterest.</p>
+<p class="decision-help">Each choice saves straight away. To choose the copy yourself, tap Remove this one on it.</p>

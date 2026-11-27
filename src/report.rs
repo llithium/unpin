@@ -140,7 +140,27 @@ pub struct DuplicateGroup {
     pub items: Vec<ReportItem>,
 }
 
+/// Names the board a match sits on, or how many boards it spans, for the
+/// gallery card.
+fn board_label<'a>(items: impl Iterator<Item = &'a ReportItem>) -> String {
+    let mut boards: Vec<&str> = Vec::new();
+    for board in items.filter_map(|item| item.board.as_deref()) {
+        if !boards.contains(&board) {
+            boards.push(board);
+        }
+    }
+    match boards.as_slice() {
+        [] => String::new(),
+        [only] => (*only).to_owned(),
+        many => format!("{} boards", many.len()),
+    }
+}
+
 impl DuplicateGroup {
+    pub(crate) fn board_label(&self) -> String {
+        board_label(self.items.iter())
+    }
+
     pub(crate) fn preview_only(&self) -> bool {
         self.items
             .iter()
@@ -166,6 +186,15 @@ pub struct VisualCandidate {
 }
 
 impl VisualCandidate {
+    pub(crate) fn board_label(&self) -> String {
+        board_label(self.items.iter().chain(self.copies.iter().flatten()))
+    }
+
+    /// Every saved pin in the match, including byte-identical extra saves.
+    pub(crate) fn save_count(&self) -> usize {
+        self.items.len() + self.copies.iter().map(Vec::len).sum::<usize>()
+    }
+
     pub(crate) fn preview_only(&self) -> bool {
         self.items
             .iter()

@@ -15,6 +15,9 @@ struct ReportTemplate<'a> {
     same: usize,
     cross: usize,
     quick_wins: usize,
+    /// Review-server settings and saved state, as JSON that is safe inside a
+    /// `<script>` element. `None` for a standalone HTML file.
+    server_config: Option<String>,
 }
 
 impl ReportTemplate<'_> {
@@ -56,19 +59,54 @@ pub fn open_report(path: &Path) -> io::Result<()> {
 }
 
 pub fn render_html(report: &Report) -> String {
+    render(report, None)
+}
+
+/// Renders the report for the local review server, which supplies the API
+/// location and the saved decisions so the page never reads browser storage
+/// for them.
+pub fn render_review_page(report: &Report, config: &serde_json::Value) -> String {
+    render(report, Some(script_safe_json(config)))
+}
+
+/// JSON with `<`, `>`, and `&` escaped, so data can never close the script
+/// element that holds it.
+fn script_safe_json(value: &serde_json::Value) -> String {
+    value
+        .to_string()
+        .replace('<', "\\u003c")
+        .replace('>', "\\u003e")
+        .replace('&', "\\u0026")
+}
+
+/// Same-board visual matches at least this similar count as easy calls.
+/// Keep in step with `EASY_SIMILARITY` in report.js.
+const EASY_CALL_SIMILARITY: u8 = 98;
+
+fn render(report: &Report, server_config: Option<String>) -> String {
     let show_boards = report.shows_board_labels();
     let (same, cross) = report.scope_counts();
     let quick_wins = report
         .exact_groups
         .iter()
         .filter(|group| group.scope == MatchScope::SameBoard && !group.preview_only())
-        .count();
+        .count()
+        + report
+            .visual_candidates
+            .iter()
+            .filter(|candidate| {
+                candidate.scope == MatchScope::SameBoard
+                    && !candidate.preview_only()
+                    && candidate.similarity_percent >= EASY_CALL_SIMILARITY
+            })
+            .count();
     ReportTemplate {
         report,
         show_boards,
         same,
         cross,
         quick_wins,
+        server_config,
     }
     .render()
     .expect("the HTML report template is valid")
@@ -181,12 +219,10 @@ mod tests {
             html.contains("aria-label=\"Open original image, 1200 × 800 pixels, for pin 101\"")
         );
         assert!(html.contains("class=\"app-shell\""));
-        assert!(html.contains("id=\"overview-toggle\""));
-        assert!(html.contains("id=\"quick-wins\""));
+        assert!(html.contains("id=\"gallery-toggle\""));
+        assert!(html.contains("id=\"accept-easy\""));
         assert!(html.contains("id=\"reset-review\""));
-        assert!(html.contains(
-            "aria-label=\"Show exact duplicates saved more than once within one board\""
-        ));
+        assert!(html.contains("id=\"tray\""));
         assert!(html.contains("Review marks are kept"));
         assert!(html.contains("unpin never changes your Pinterest account."));
         assert!(!html.contains("<script src="));
@@ -242,20 +278,20 @@ mod tests {
         ));
         assert!(contains_html_fragment(
             &mixed,
-            "for=\"filter-same\"><span>Same</span><span class=\"filter-count\">1</span></label>"
+            "for=\"filter-same\"><span>Same board</span><span class=\"filter-count\">1</span></label>"
         ));
         assert!(contains_html_fragment(
             &mixed,
-            "for=\"filter-cross\"><span>Cross</span><span class=\"filter-count\">1</span></label>"
+            "for=\"filter-cross\"><span>Across boards</span><span class=\"filter-count\">1</span></label>"
         ));
         assert!(mixed.contains("aria-label=\"Filter matches by type\""));
         assert!(contains_html_fragment(
             &mixed,
-            "for=\"kind-exact\"><span>Exact</span><span class=\"filter-count\">1</span></label>"
+            "for=\"kind-exact\"><span>Identical</span><span class=\"filter-count\">1</span></label>"
         ));
         assert!(contains_html_fragment(
             &mixed,
-            "for=\"kind-visual\"><span>Visual</span><span class=\"filter-count\">1</span></label>"
+            "for=\"kind-visual\"><span>Similar</span><span class=\"filter-count\">1</span></label>"
         ));
 
         let mut exact_only = sample_report();
@@ -268,24 +304,23 @@ mod tests {
     }
 
     #[test]
-    fn quick_wins_control_is_conditional_and_counts_same_board_exact_groups() {
-        let mut exact_only = sample_report();
-        exact_only.visual_candidates.clear();
-        assert!(!render_html(&exact_only).contains("id=\"quick-wins\""));
-
-        let mut multi_report = sample_report();
-        multi_report.summary.boards.push(ScannedBoard {
-            collection_issues: Vec::new(),
-            name: "Mood board".into(),
-            url: "https://www.pinterest.com/alice/mood-board/".into(),
-            pins_reported: Some(1),
-            pins_found: 1,
-        });
-        let multi = render_html(&multi_report);
-        assert!(multi.contains("id=\"quick-wins\""));
+    fn easy_calls_count_near_identical_same_board_matches() {
+        // The identical pair and the 98% similar pair are both on one board.
+        let same_board = render_html(&sample_report());
+        assert!(same_board.contains("id=\"easy-calls\""));
         assert!(contains_html_fragment(
-            &multi,
-            "<span>Quick wins</span> <span class=\"filter-count\">1</span>"
+            &same_board,
+            "<span id=\"easy-count\">2</span> <span id=\"easy-noun\">duplicates are easy calls</span>"
+        ));
+
+        // Less similar images, covers, and copies on different boards need a look.
+        let mut report = multi_board_report();
+        report.visual_candidates[0].similarity_percent = 97;
+        let cross_board = render_html(&report);
+        assert!(!cross_board.contains("id=\"easy-calls\""));
+        assert!(contains_html_fragment(
+            &cross_board,
+            "id=\"filter-same\" class=\"filter-input\" value=\"same-board\" checked"
         ));
     }
 
@@ -298,6 +333,7 @@ mod tests {
         assert!(!html.contains("id=\"unreviewed-only\""));
         assert!(!html.contains("id=\"visible-count\""));
         assert!(!html.contains("id=\"quick-wins\""));
+        assert!(!html.contains("id=\"tray\""));
     }
 
     #[test]
@@ -335,11 +371,11 @@ mod tests {
         let cross_only = render_html(&report);
         assert!(contains_html_fragment(
             &cross_only,
-            "for=\"filter-same\"><span>Same</span><span class=\"filter-count\">0</span></label>"
+            "for=\"filter-same\"><span>Same board</span><span class=\"filter-count\">0</span></label>"
         ));
         assert!(contains_html_fragment(
             &cross_only,
-            "for=\"filter-cross\"><span>Cross</span><span class=\"filter-count\">2</span></label>"
+            "for=\"filter-cross\"><span>Across boards</span><span class=\"filter-count\">2</span></label>"
         ));
     }
 

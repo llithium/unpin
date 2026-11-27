@@ -8,22 +8,37 @@
       content="Review exact and visually similar Pinterest pins before deciding what to keep."
     />
     <meta name="robots" content="noindex, nofollow" />
+    <meta name="referrer" content="no-referrer" />
     <title>unpin · {{ report.title() }}</title>
     <link
       rel="icon"
-      href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'%3E%3Crect width='64' height='64' rx='16' fill='%23131209'/%3E%3Cpath d='M18 16v20c0 9 5 14 14 14s14-5 14-14V16h-9v20c0 4-1 6-5 6s-5-2-5-6V16z' fill='%23f4f4f2'/%3E%3C/svg%3E"
+      href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'%3E%3Crect width='64' height='64' rx='16' fill='%231f6f54'/%3E%3Cpath d='M18 16v20c0 9 5 14 14 14s14-5 14-14V16h-9v20c0 4-1 6-5 6s-5-2-5-6V16z' fill='%23ffffff'/%3E%3C/svg%3E"
     />
     <script>
       document.documentElement.classList.add("js");
     </script>
     <style>{% include "report.css" %}</style>
   </head>
-  <body{% if report.exact_groups.is_empty() && report.visual_candidates.is_empty() %} class="no-matches"{% endif %}>
+  <body class="gallery-mode{% if report.exact_groups.is_empty() && report.visual_candidates.is_empty() %} no-matches{% endif %}">
     <a class="skip-link" href="#report-content">Skip to report</a>
     <div class="app-shell">
       <header class="topbar">
         <span class="brand"><span class="brand-mark" aria-hidden="true">U</span>unpin</span>
         <h1 class="report-name" title="{{ report.title() }}">{{ report.title() }}</h1>
+        {% if !report.exact_groups.is_empty() || !report.visual_candidates.is_empty() %}
+        <nav class="steps" aria-label="Steps">
+          <button class="step" id="decide-step" type="button" aria-current="step">
+            <span class="step-number" aria-hidden="true">1</span>
+            <span class="step-label">Decide</span>
+          </button>
+          <span class="step-line" aria-hidden="true"></span>
+          <button class="step" id="cleanup-toggle" type="button" aria-controls="cleanup" aria-pressed="false">
+            <span class="step-number" aria-hidden="true">2</span>
+            <span class="step-label">Remove</span>
+            <span class="step-count" id="cleanup-count">0</span>
+          </button>
+        </nav>
+        {% endif %}
         <div class="progress-block" aria-label="Review progress">
           <span><strong id="review-progress">0 / {{ same + cross }}</strong> reviewed</span>
           <span class="progress-track" aria-hidden="true"
@@ -38,162 +53,97 @@
             Reset
           </button>
         </div>
-        <div class="topbar-actions">
-          <button
-            class="control icon-only"
-            id="previous-match"
-            type="button"
-            aria-label="Previous match"
-            title="Previous match (K)"
-          >
-            <svg class="control-icon" viewBox="0 0 16 16" aria-hidden="true">
-              <path d="M9.75 3.25 5 8l4.75 4.75" />
-            </svg>
-          </button>
-          <button
-            class="control icon-only"
-            id="next-match"
-            type="button"
-            aria-label="Next match"
-            title="Next match (J)"
-          >
-            <svg class="control-icon" viewBox="0 0 16 16" aria-hidden="true">
-              <path d="M6.25 3.25 11 8l-4.75 4.75" />
-            </svg>
-          </button>
-          <button
-            class="control"
-            id="overview-toggle"
-            type="button"
-            aria-label="Toggle overview"
-            aria-pressed="false"
-          >
-            <span class="control-label">Overview</span>
-            <kbd>O</kbd>
-          </button>
-        </div>
       </header>
 
-      <div class="workspace">
-        <aside class="rail" aria-label="Match navigation">
-          {% if !report.exact_groups.is_empty() ||
-          !report.visual_candidates.is_empty() %}
-          <div class="queue-heading">
-            <h2>Match queue</h2>
-            <span class="visible-count" id="visible-count" role="status">{{ same + cross }} shown</span>
-            <button class="control mobile-filters" id="toggle-filters" type="button" aria-expanded="false" aria-controls="match-filters">Filters</button>
+      <main class="content" id="report-content" tabindex="-1">
+        <section class="report-intro" aria-label="Scan summary">
+          <div class="intro-copy">
+            <div class="intro-title">{{ report.title() }}</div>
+            <p class="intro-description">
+              {{ report.summary.pins_found }} pins found · {{ report.summary.analyzed }} analyzed{% if report.summary.skipped > 0 %} · {{ report.summary.skipped }} skipped{% endif %}
+            </p>
           </div>
-          <div class="filter-controls" id="match-filters">
-            {% if show_boards %}
-            <div class="filters" role="radiogroup" aria-label="Filter matches by board scope">
-            <input
-              type="radio"
-              name="scope-filter"
-              id="filter-all"
-              class="filter-input"
-              value="all"
-              checked
-            />
-            <input
-              type="radio"
-              name="scope-filter"
-              id="filter-same"
-              class="filter-input"
-              value="same-board"
-            />
-            <input
-              type="radio"
-              name="scope-filter"
-              id="filter-cross"
-              class="filter-input"
-              value="cross-board"
-            />
-              <span class="filter-legend" aria-hidden="true">Board scope</span>
-              <label for="filter-all"
-                ><span>All</span
-                ><span class="filter-count">{{ same + cross }}</span></label
-              >
-              <label for="filter-same"
-                ><span>Same</span
-                ><span class="filter-count">{{ same }}</span></label
-              >
-              <label for="filter-cross"
-                ><span>Cross</span
-                ><span class="filter-count">{{ cross }}</span></label
-              >
-            </div>
-            {% endif %} {% if !report.exact_groups.is_empty() &&
-            !report.visual_candidates.is_empty() %}
-            <div class="filters" role="radiogroup" aria-label="Filter matches by type">
-            <input
-              type="radio"
-              name="kind-filter"
-              id="kind-all"
-              class="filter-input"
-              value="all"
-              checked
-            />
-            <input
-              type="radio"
-              name="kind-filter"
-              id="kind-exact"
-              class="filter-input"
-              value="exact"
-            />
-            <input
-              type="radio"
-              name="kind-filter"
-              id="kind-visual"
-              class="filter-input"
-              value="visual"
-            />
-              <span class="filter-legend" aria-hidden="true">Match type</span>
-              <label for="kind-all"
-                ><span>All</span
-                ><span class="filter-count"
-                  >{{ report.exact_groups.len() + report.visual_candidates.len()
-                  }}</span
-                ></label
-              >
-              <label for="kind-exact"
-                ><span>Exact</span
-                ><span class="filter-count"
-                  >{{ report.exact_groups.len() }}</span
-                ></label
-              >
-              <label for="kind-visual"
-                ><span>Visual</span
-                ><span class="filter-count"
-                  >{{ report.visual_candidates.len() }}</span
-                ></label
-              >
-            </div>
-            {% endif %} {% if quick_wins > 0 && quick_wins < same + cross %}
-            <div class="filter-controls-meta">
-              <button
-                class="control"
-                id="quick-wins"
-                type="button"
-                aria-label="Show exact duplicates saved more than once within one board"
-                aria-pressed="false"
-              >
-                <span>Quick wins</span>
-                <span class="filter-count">{{ quick_wins }}</span>
-              </button>
-            </div>
-            {% endif %}
+          <div class="intro-stats" aria-label="Match total">
+            <strong>{{ same + cross }}</strong>
+            <span>{% if same + cross == 1 %}Match{% else %}Matches{% endif %}</span>
+          </div>
+        </section>
+        {% if report.visual_matching_incomplete %}
+        <p class="scan-warning" role="status">Visual matching incomplete: only comparisons found before the safety limit are shown. Exact matching is complete for analyzed images.</p>
+        {% endif %}
+        {% if report.collection_incomplete() %}<p class="scan-warning">Pin collection incomplete. Results include retained pins from successful pages. <a href="#scan-warnings">View collection failures</a></p>{% endif %}
+        {% if !report.warnings.is_empty() %}
+        <a class="scan-warning warning-link" href="#scan-warnings">
+          <svg class="control-icon" viewBox="0 0 16 16" aria-hidden="true">
+            <circle cx="8" cy="8" r="6.25" /><path d="M8 4.5v4.25M8 10.5v1" />
+          </svg>
+          <span>{% if report.warnings.len() == 1 %}{{ report.warnings[0] }}{% else %}{{ report.warnings.len() }} scan warnings{% endif %}</span>
+          <span class="warning-details">Scan details</span>
+        </a>
+        {% endif %}
 
-            <div class="filter-controls-meta">
+        {% if report.exact_groups.is_empty() &&
+        report.visual_candidates.is_empty() %}
+        <div class="empty">
+          <svg class="empty-icon" viewBox="0 0 32 32" aria-hidden="true">
+            <path d="M10 5h14a3 3 0 0 1 3 3v13M8 25l5-5 4 3 3-3 3 3M8 11h12a3 3 0 0 1 3 3v11a3 3 0 0 1-3 3H8a3 3 0 0 1-3-3V14a3 3 0 0 1 3-3Z" />
+            <circle cx="11" cy="16" r="1.5" />
+          </svg>
+          <strong>No matches found</strong>
+          {% if report.visual_matching_incomplete %}
+          <p class="empty-copy">Visual matching stopped early. Narrow the scan and try again.</p>
+          {% endif %}
+        </div>
+        {% else %}
+
+        <section class="gallery" id="gallery" aria-label="Duplicate matches">
+          {% if quick_wins > 0 %}
+          <section class="easy-calls" id="easy-calls" aria-labelledby="easy-calls-title">
+            <div class="easy-copy">
+              <h2 id="easy-calls-title"><span id="easy-count">{{ quick_wins }}</span> <span id="easy-noun">{% if quick_wins == 1 %}duplicate is an easy call{% else %}duplicates are easy calls{% endif %}</span></h2>
+              <p>The same or nearly the same image, saved more than once on one board. Accepting keeps the largest copy of each and puts the rest in your removal tray. You can still change any of them.</p>
+            </div>
+            <div class="easy-actions">
+              <button class="primary-action" id="accept-easy" type="button">Accept all</button>
+              <button class="text-action" id="quick-wins" type="button" aria-pressed="false">Look through them first</button>
+            </div>
+          </section>
+          {% endif %}
+
+          <div class="gallery-toolbar">
+            <div class="filter-controls" id="match-filters">
+              {% if show_boards %}
+              <div class="filters" role="radiogroup" aria-label="Filter matches by board scope">
+                <input type="radio" name="scope-filter" id="filter-same" class="filter-input" value="same-board"{% if same > 0 %} checked{% endif %} />
+                <input type="radio" name="scope-filter" id="filter-cross" class="filter-input" value="cross-board" />
+                <input type="radio" name="scope-filter" id="filter-all" class="filter-input" value="all"{% if same == 0 %} checked{% endif %} />
+                <label for="filter-same"><span>Same board</span><span class="filter-count">{{ same }}</span></label>
+                <label for="filter-cross"><span>Across boards</span><span class="filter-count">{{ cross }}</span></label>
+                <label for="filter-all"><span>All</span><span class="filter-count">{{ same + cross }}</span></label>
+              </div>
+              {% endif %}
+              {% if !report.exact_groups.is_empty() && !report.visual_candidates.is_empty() %}
+              <div class="filters" role="radiogroup" aria-label="Filter matches by type">
+                <input type="radio" name="kind-filter" id="kind-all" class="filter-input" value="all" checked />
+                <input type="radio" name="kind-filter" id="kind-exact" class="filter-input" value="exact" />
+                <input type="radio" name="kind-filter" id="kind-visual" class="filter-input" value="visual" />
+                <label for="kind-all"><span>All types</span><span class="filter-count">{{ report.exact_groups.len() + report.visual_candidates.len() }}</span></label>
+                <label for="kind-exact"><span>Identical</span><span class="filter-count">{{ report.exact_groups.len() }}</span></label>
+                <label for="kind-visual"><span>Similar</span><span class="filter-count">{{ report.visual_candidates.len() }}</span></label>
+              </div>
+              {% endif %}
               <label class="unreviewed-filter" for="unreviewed-only">
                 <input type="checkbox" id="unreviewed-only" />
-                <span>Unreviewed only</span>
+                <span>Undecided only</span>
               </label>
             </div>
+            <span class="visible-count" id="visible-count" role="status">{{ same + cross }} shown</span>
           </div>
-          {% endif %}
+          {% if show_boards %}<p class="scope-note">Copies on different boards are often saved on purpose, so they are never part of the easy calls.</p>{% endif %}
 
           <nav class="match-nav" aria-label="Duplicate matches">
             {% for group in report.exact_groups %}
+            <div class="match-card">
             <button
               class="match-link {{ group.scope.css_class() }}"
               type="button"
@@ -201,19 +151,31 @@
               data-scope="{{ group.scope.css_class() }}"
               data-kind="exact"
             >
-              <img class="match-thumb" src="{{ group.items[0].image_url }}" alt="" loading="lazy" referrerpolicy="no-referrer" />
+              <span class="match-stack" style="aspect-ratio: {{ group.items[0].width }} / {{ group.items[0].height }}">
+                <img class="match-thumb" src="{{ group.items[0].image_url }}" alt="" loading="lazy" referrerpolicy="no-referrer" />
+                <span class="match-count" aria-label="{{ group.items.len() }} saves">×{{ group.items.len() }}</span>
+                <span class="match-chip" data-chip></span>
+              </span>
               <span class="match-link-copy">
-                <span class="match-link-title"
-                  >{% if group.preview_only() %}Matching covers{% else %}Identical images{% endif %}</span
-                >
+                <span class="match-link-title">{% if group.preview_only() %}Matching covers{% else %}Identical images{% endif %}</span>
                 <span class="match-link-detail">
                   <span class="match-number">Exact {{ loop.index }}</span>
-                  <span>{{ group.items.len() }} saves</span>
+                  <span class="match-board">{{ group.board_label() }}</span>
                 </span>
               </span>
               <span class="match-link-state"><span class="sr-only">Reviewed</span></span>
             </button>
+            <div class="card-quick" role="group" aria-label="Decision for Exact {{ loop.index }}">
+              <button class="quick-remove" type="button" data-quick="remove" data-target="exact-{{ loop.index }}" aria-pressed="false">{% if group.items.len() == 2 %}Remove duplicate{% else %}Remove {{ group.items.len() - 1 }} duplicates{% endif %}</button>
+              <button class="quick-keep" type="button" data-quick="keep_all" data-target="exact-{{ loop.index }}" aria-pressed="false">{% if group.items.len() == 2 %}Keep both{% else %}Keep all{% endif %}</button>
+            </div>
+            <div class="card-status" data-card-status hidden>
+              <span class="card-status-text" data-card-status-text role="status"></span>
+              <button class="card-change" type="button" data-card-change data-target="exact-{{ loop.index }}">Change</button>
+            </div>
+            </div>
             {% endfor %} {% for candidate in report.visual_candidates %}
+            <div class="match-card">
             <button
               class="match-link {{ candidate.scope.css_class() }}"
               type="button"
@@ -221,213 +183,227 @@
               data-scope="{{ candidate.scope.css_class() }}"
               data-kind="visual"
             >
-              <img class="match-thumb" src="{{ candidate.items[0].image_url }}" alt="" loading="lazy" referrerpolicy="no-referrer" />
+              <span class="match-stack" style="aspect-ratio: {{ candidate.items[0].width }} / {{ candidate.items[0].height }}">
+                <img class="match-thumb" src="{{ candidate.items[0].image_url }}" alt="" loading="lazy" referrerpolicy="no-referrer" />
+                <span class="match-count" aria-label="{{ candidate.save_count() }} saves">×{{ candidate.save_count() }}</span>
+                <span class="match-chip" data-chip></span>
+              </span>
               <span class="match-link-copy">
-                <span class="match-link-title"
-                  >{% if candidate.preview_only() %}Matching covers{% else %}Similar images{% endif %}</span
-                >
+                <span class="match-link-title">{% if candidate.preview_only() %}Matching covers{% else %}Similar images{% endif %}</span>
                 <span class="match-link-detail">
                   <span class="match-number">Visual {{ loop.index }}</span>
-                  <span>{{ candidate.similarity_percent }}% similarity</span>
+                  <span class="match-board">{{ candidate.similarity_percent }}% · {{ candidate.board_label() }}</span>
                 </span>
               </span>
               <span class="match-link-state"><span class="sr-only">Reviewed</span></span>
             </button>
+            <div class="card-quick" role="group" aria-label="Decision for Visual {{ loop.index }}">
+              <button class="quick-remove" type="button" data-quick="remove" data-target="visual-{{ loop.index }}" aria-pressed="false">{% if candidate.save_count() == 2 %}Remove smaller{% else %}Remove {{ candidate.save_count() - 1 }} copies{% endif %}</button>
+              <button class="quick-keep" type="button" data-quick="keep_all" data-target="visual-{{ loop.index }}" aria-pressed="false">{% if candidate.save_count() == 2 %}Keep both{% else %}Keep all{% endif %}</button>
+            </div>
+            <div class="card-status" data-card-status hidden>
+              <span class="card-status-text" data-card-status-text role="status"></span>
+              <button class="card-change" type="button" data-card-change data-target="visual-{{ loop.index }}">Change</button>
+            </div>
+            </div>
             {% endfor %}
           </nav>
+        </section>
 
-          <div class="rail-hint" aria-label="Keyboard shortcuts">
-            <span><kbd>J</kbd> <kbd>K</kbd></span><span>Next / previous</span>
-            <span><kbd>E</kbd></span><span>Mark reviewed</span>
+        <div class="focus-bar" id="focus-bar">
+          <button class="control" id="gallery-toggle" type="button" aria-label="Back to gallery">
+            <svg class="control-icon" viewBox="0 0 16 16" aria-hidden="true"><path d="M2.75 2.75h4v4h-4zM9.25 2.75h4v4h-4zM2.75 9.25h4v4h-4zM9.25 9.25h4v4h-4z" /></svg>
+            <span class="control-label">Gallery</span>
+            <kbd>O</kbd>
+          </button>
+          <span class="focus-position" id="focus-position"></span>
+          <span class="focus-nav">
+            <button class="control icon-only" id="previous-match" type="button" aria-label="Previous match" title="Previous match (K)">
+              <svg class="control-icon" viewBox="0 0 16 16" aria-hidden="true"><path d="M9.75 3.25 5 8l4.75 4.75" /></svg>
+            </button>
+            <button class="control icon-only" id="next-match" type="button" aria-label="Next match" title="Next match (J)">
+              <svg class="control-icon" viewBox="0 0 16 16" aria-hidden="true"><path d="M6.25 3.25 11 8l-4.75 4.75" /></svg>
+            </button>
+          </span>
+          <span class="focus-hint" aria-hidden="true"><kbd>R</kbd> remove · <kbd>A</kbd> keep all · <kbd>J</kbd> <kbd>K</kbd> next / previous</span>
+        </div>
+
+        <section class="cleanup" id="cleanup" aria-labelledby="cleanup-title" hidden>
+          <div class="cleanup-heading">
+            <div>
+              <h2 id="cleanup-title">Clear the tray</h2>
+              <p class="cleanup-help" id="cleanup-help">Each pin opens in the same Pinterest tab. Delete it there from the pin's ⋯ menu, then come back and mark it removed.</p>
+            </div>
+            <p class="cleanup-summary"><strong id="cleanup-progress">0 of 0</strong> gone from Pinterest</p>
           </div>
-        </aside>
+          <div class="cleanup-actions">
+            <button class="control" id="cleanup-check-all" type="button" hidden>Check all with Pinterest</button>
+            <button class="control" id="cleanup-back" type="button">Back to deciding</button>
+          </div>
+          <p class="cleanup-empty" id="cleanup-empty">Your tray is empty. Accept the easy calls, or flag the copies you don't want in a match, and they'll be listed here.</p>
+          <p class="cleanup-done" id="cleanup-done" tabindex="-1" hidden>Every pin in the tray is gone from Pinterest.</p>
+          <div class="cleanup-current" id="cleanup-current" hidden></div>
+          <details class="cleanup-all" id="cleanup-all" open>
+            <summary>Everything in the tray</summary>
+            <div id="cleanup-list"></div>
+          </details>
+        </section>
 
-        <main class="content" id="report-content" tabindex="-1">
-          <section class="report-intro" aria-label="Scan summary">
-            <div class="intro-copy">
-              <div class="intro-title">{{ report.title() }}</div>
-              <p class="intro-description">
-                {{ report.summary.pins_found }} pins found · {{ report.summary.analyzed }} analyzed{% if report.summary.skipped > 0 %} · {{ report.summary.skipped }} skipped{% endif %}
+        <div class="filter-empty" id="filter-empty" role="status">
+          <strong id="filter-empty-title">No matches in the current filters.</strong>
+          <p>Show all matches to revisit reviewed pins or change your filters.</p>
+          <button class="control" id="clear-filters" type="button">Show all matches</button>
+        </div>
+        {% endif %}
+
+        {% for group in report.exact_groups %}
+        <section
+          class="match {{ group.scope.css_class() }}"
+          id="exact-{{ loop.index }}"
+          data-preview-only="{{ group.preview_only() }}"
+          data-group
+          data-scope="{{ group.scope.css_class() }}"
+          data-kind="exact"
+          data-review-key="{{ group.review_key() }}"
+          data-reviewed="false"
+          style="--preview-width: {{ group.items[0].width }}; --preview-height: {{ group.items[0].height }}"
+        >
+          <div class="match-heading">
+            <div>
+              <div class="match-title">
+                <h2><span class="match-index">Exact {{ loop.index }}</span> {% if group.preview_only() %}Matching covers{% else %}Identical images{% endif %}</h2>
+                {% if show_boards %}<span
+                  class="badge {{ group.scope.css_class() }}"
+                  >{{ group.scope.html_label() }}</span
+                >{% endif %}
+              </div>
+              <p class="match-description">
+                {% if group.preview_only() %}Matching covers only. Check the full pins before removing a copy.{% else %}The same image file, saved more than once.{% endif %}
               </p>
             </div>
-            <div class="intro-stats" aria-label="Match total">
-              <strong>{{ same + cross }}</strong>
-              <span>{% if same + cross == 1 %}Match{% else %}Matches{% endif %}</span>
-            </div>
-          </section>
-          {% if report.visual_matching_incomplete %}
-          <p class="scan-warning" role="status">Visual matching incomplete: only comparisons found before the safety limit are shown. Exact matching is complete for analyzed images.</p>
-          {% endif %}
-          {% if report.collection_incomplete() %}<p class="scan-warning">Pin collection incomplete. Results include retained pins from successful pages. <a href="#scan-warnings">View collection failures</a></p>{% endif %}
-          {% if !report.warnings.is_empty() %}
-          <a class="scan-warning warning-link" href="#scan-warnings">
-            <svg class="control-icon" viewBox="0 0 16 16" aria-hidden="true">
-              <circle cx="8" cy="8" r="6.25" /><path d="M8 4.5v4.25M8 10.5v1" />
-            </svg>
-            <span>{% if report.warnings.len() == 1 %}{{ report.warnings[0] }}{% else %}{{ report.warnings.len() }} scan warnings{% endif %}</span>
-            <span class="warning-details">Scan details</span>
-          </a>
-          {% endif %}
-
-          {% if report.exact_groups.is_empty() &&
-          report.visual_candidates.is_empty() %}
-          <div class="empty">
-            <svg class="empty-icon" viewBox="0 0 32 32" aria-hidden="true">
-              <path d="M10 5h14a3 3 0 0 1 3 3v13M8 25l5-5 4 3 3-3 3 3M8 11h12a3 3 0 0 1 3 3v11a3 3 0 0 1-3 3H8a3 3 0 0 1-3-3V14a3 3 0 0 1 3-3Z" />
-              <circle cx="11" cy="16" r="1.5" />
-            </svg>
-            <strong>No matches found</strong>
-            {% if report.visual_matching_incomplete %}
-            <p class="empty-copy">Visual matching stopped early. Narrow the scan and try again.</p>
-            {% endif %}
           </div>
-          {% endif %}
-
-          <div class="filter-empty" id="filter-empty" role="status">
-            <strong id="filter-empty-title">No matches in the current filters.</strong>
-            <p>Show all matches to revisit reviewed pins or change your filters.</p>
-            <button class="control" id="clear-filters" type="button">Show all matches</button>
+          <div class="comparison">
+            {% for item in group.items %}{% include "item.html" %}{% endfor %}
           </div>
-
-          {% for group in report.exact_groups %}
-          <section
-            class="match {{ group.scope.css_class() }}"
-            id="exact-{{ loop.index }}"
-            data-preview-only="{{ group.preview_only() }}"
-            data-group
-            data-scope="{{ group.scope.css_class() }}"
-            data-kind="exact"
-            data-review-key="{{ group.review_key() }}"
-            data-reviewed="false"
-            style="--preview-width: {{ group.items[0].width }}; --preview-height: {{ group.items[0].height }}"
-          >
-            <div class="match-heading">
-              <div>
-                <div class="match-title">
-                  <h2><span class="match-index">Exact {{ loop.index }}</span> {% if group.preview_only() %}Matching covers{% else %}Identical images{% endif %}</h2>
-                  {% if show_boards %}<span
-                    class="badge {{ group.scope.css_class() }}"
-                    >{{ group.scope.html_label() }}</span
-                  >{% endif %}
-                </div>
-                <p class="match-description">
-                  {% if group.preview_only() %}Matching covers only. Check the full pins before removing a copy.{% else %}The same image file, saved more than once.{% endif %}
-                </p>
+          <div class="match-actions">{% include "review_controls.html" %}</div>
+        </section>
+        {% endfor %} {% for candidate in report.visual_candidates %}
+        <section
+          class="match {{ candidate.scope.css_class() }}"
+          id="visual-{{ loop.index }}"
+          data-preview-only="{{ candidate.preview_only() }}"
+          data-group
+          data-scope="{{ candidate.scope.css_class() }}"
+          data-kind="visual"
+          data-similarity="{{ candidate.similarity_percent }}"
+          data-review-key="{{ candidate.review_key() }}"
+          data-reviewed="false"
+          style="--preview-width: {{ candidate.items[0].width }}; --preview-height: {{ candidate.items[0].height }}"
+        >
+          <div class="match-heading">
+            <div>
+              <div class="match-title">
+                <h2><span class="match-index">Visual {{ loop.index }}</span> {% if candidate.preview_only() %}Matching covers{% else %}Similar images{% endif %}</h2>
+                {% if show_boards %}<span
+                  class="badge {{ candidate.scope.css_class() }}"
+                  >{{ candidate.scope.html_label() }}</span
+                >{% endif %}
               </div>
+              <p class="match-description">
+                {% if candidate.preview_only() %}Matching covers only. Check the full pins before removing a copy.{% else %}{{ candidate.similarity_percent }}% structural similarity. Check the details before removing a copy.{% endif %}
+              </p>
             </div>
-            <div class="comparison">
-              {% for item in group.items %}{% include "item.html" %}{% endfor %}
-            </div>
-            <div class="match-actions">{% include "review_controls.html" %}</div>
-          </section>
-          {% endfor %} {% for candidate in report.visual_candidates %}
-          <section
-            class="match {{ candidate.scope.css_class() }}"
-            id="visual-{{ loop.index }}"
-            data-preview-only="{{ candidate.preview_only() }}"
-            data-group
-            data-scope="{{ candidate.scope.css_class() }}"
-            data-kind="visual"
-            data-review-key="{{ candidate.review_key() }}"
-            data-reviewed="false"
-            style="--preview-width: {{ candidate.items[0].width }}; --preview-height: {{ candidate.items[0].height }}"
-          >
-            <div class="match-heading">
-              <div>
-                <div class="match-title">
-                  <h2><span class="match-index">Visual {{ loop.index }}</span> {% if candidate.preview_only() %}Matching covers{% else %}Similar images{% endif %}</h2>
-                  {% if show_boards %}<span
-                    class="badge {{ candidate.scope.css_class() }}"
-                    >{{ candidate.scope.html_label() }}</span
-                  >{% endif %}
-                </div>
-                <p class="match-description">
-                  {% if candidate.preview_only() %}Matching covers only. Check the full pins before removing a copy.{% else %}{{ candidate.similarity_percent }}% structural similarity. Check the details before removing a copy.{% endif %}
-                </p>
-              </div>
-            </div>
-            <div class="comparison">
-              {% for item in candidate.items %}
-              <div class="variant">
-                {% include "item.html" %}
-                {% let copies = candidate.copies[loop.index0] %}
-                {% if !copies.is_empty() %}
-                <details class="additional-saves"><summary>{{ copies.len() }} additional {% if copies.len() == 1 %}save{% else %}saves{% endif %}</summary>
-                  <ul>{% for copy in copies %}<li data-pin-id="{{ copy.pin_id }}" data-media-kind="{{ copy.media_kind.as_str() }}" data-image-sha256="{{ copy.image_sha256 }}"><label class="removal-choice"><input type="checkbox" data-remove-pin="{{ copy.pin_id }}" aria-label="Flag for removal, pin {{ copy.pin_id }}" /><span>Flag for removal</span></label><a data-image-url="{{ copy.image_url }}" href="{{ copy.pin_url }}" target="_blank" rel="noopener noreferrer">Pin {{ copy.pin_id }}</a>{% match copy.board %}{% when Some with (board) %} · {{ board }}{% when None %}{% endmatch %}</li>{% endfor %}</ul>
-                </details>
-                {% endif %}
-              </div>
-              {% endfor %}
-            </div>
-            <div class="match-actions">{% include "review_controls.html" %}</div>
-          </section>
-          {% endfor %}
-
-          <p class="storage-notice" id="storage-notice" role="status" hidden>Review progress cannot be saved in this browser. Keep this report open to retain your marks.</p>
-          <details class="report-tools">
-          <summary>Report tools</summary>
-          <div class="review-transfer">
-            <button class="control" id="export-review" type="button">Export decisions</button>
-            <button class="control" id="import-review" type="button">Import decisions</button>
-            <input id="review-file" type="file" accept="application/json,.json" hidden />
-            <span id="transfer-status" role="status"></span>
           </div>
-          <p class="review-notice">Decisions are saved in this browser. Open a pin to make changes on Pinterest.</p>
-          <div class="secondary-panels">
-            {% if show_boards %}
-            <details>
-              <summary>Scanned boards</summary>
-              <p class="scan-details">
-                {% for board in report.summary.boards %}{% if !loop.first %} ·
-                {% endif %}{% if board.url.is_empty() %}{{ board.name }}{% else
-                %}<a
-                  href="{{ board.url }}"
+          <div class="comparison">
+            {% for item in candidate.items %}
+            <div class="variant">
+              {% include "item.html" %}
+              {% let copies = candidate.copies[loop.index0] %}
+              {% if !copies.is_empty() %}
+              <details class="additional-saves"><summary>{{ copies.len() }} additional {% if copies.len() == 1 %}save{% else %}saves{% endif %}</summary>
+                <ul>{% for copy in copies %}<li data-pin-id="{{ copy.pin_id }}" data-media-kind="{{ copy.media_kind.as_str() }}" data-image-sha256="{{ copy.image_sha256 }}"{% match copy.board %}{% when Some with (board) %} data-board="{{ board }}"{% when None %}{% endmatch %}><label class="removal-choice"><input type="checkbox" data-remove-pin="{{ copy.pin_id }}" aria-label="Remove this one, pin {{ copy.pin_id }}" /><span class="removal-off">Remove this one</span><span class="removal-on">Removing</span></label><a data-image-url="{{ copy.image_url }}" href="{{ copy.pin_url }}" target="_blank" rel="noopener noreferrer">Pin {{ copy.pin_id }}</a>{% match copy.board %}{% when Some with (board) %} · {{ board }}{% when None %}{% endmatch %}</li>{% endfor %}</ul>
+              </details>
+              {% endif %}
+            </div>
+            {% endfor %}
+          </div>
+          <div class="match-actions">{% include "review_controls.html" %}</div>
+        </section>
+        {% endfor %}
+
+        <p class="storage-notice" id="storage-notice" role="status" hidden>Review progress cannot be saved in this browser. Keep this report open to retain your marks.</p>
+        <details class="report-tools">
+        <summary>Report tools</summary>
+        <div class="review-transfer">
+          <button class="control" id="export-review" type="button">Export decisions</button>
+          <button class="control" id="import-review" type="button">Import decisions</button>
+          <input id="review-file" type="file" accept="application/json,.json" hidden />
+          <span id="transfer-status" role="status"></span>
+        </div>
+        <p class="review-notice">Decisions are saved in this browser. Open a pin to make changes on Pinterest.</p>
+        <div class="secondary-panels">
+          {% if show_boards %}
+          <details>
+            <summary>Scanned boards</summary>
+            <p class="scan-details">
+              {% for board in report.summary.boards %}{% if !loop.first %} ·
+              {% endif %}{% if board.url.is_empty() %}{{ board.name }}{% else
+              %}<a
+                href="{{ board.url }}"
+                target="_blank"
+                rel="noopener noreferrer"
+                >{{ board.name }}</a
+              >{% endif %} ({{ board.pins_found }} pins){% endfor %}
+            </p>
+          </details>
+          {% endif %} {% if !report.skipped.is_empty() %}
+          <details>
+            <summary>{{ report.skipped.len() }} skipped pin(s)</summary>
+            <ul>
+              {% for skipped in report.skipped %}
+              <li>
+                {% match skipped.pin_url %}{% when Some with (url) %}<a
+                  href="{{ url }}"
                   target="_blank"
                   rel="noopener noreferrer"
-                  >{{ board.name }}</a
-                >{% endif %} ({{ board.pins_found }} pins){% endfor %}
-              </p>
-            </details>
-            {% endif %} {% if !report.skipped.is_empty() %}
-            <details>
-              <summary>{{ report.skipped.len() }} skipped pin(s)</summary>
-              <ul>
-                {% for skipped in report.skipped %}
-                <li>
-                  {% match skipped.pin_url %}{% when Some with (url) %}<a
-                    href="{{ url }}"
-                    target="_blank"
-                    rel="noopener noreferrer"
-                    >{{ skipped.pin_id.as_deref().unwrap_or("Unknown pin") }}</a
-                  >{% when None %}{{
-                  skipped.pin_id.as_deref().unwrap_or("Unknown pin") }}{%
-                  endmatch %}: {{ skipped.reason }}
-                </li>
-                {% endfor %}
-              </ul>
-            </details>
-            {% endif %} {% if !report.warnings.is_empty() %}
-            <details id="scan-warnings" open>
-              <summary>{{ report.warnings.len() }} scan {% if report.warnings.len() == 1 %}warning{% else %}warnings{% endif %}</summary>
-              <ul>
-                {% for warning in report.warnings %}
-                <li>{{ warning }}</li>
-                {% endfor %}
-              </ul>
-            </details>
-            {% endif %}
-          </div>
-
-          <footer>
-            This local report loads images from Pinterest and may disappear when
-            your operating system cleans temporary files. Review marks are kept
-            in this browser and reused for unchanged matches across board selections.
-            Export decisions for a portable backup. unpin never changes your Pinterest account.
-          </footer>
+                  >{{ skipped.pin_id.as_deref().unwrap_or("Unknown pin") }}</a
+                >{% when None %}{{
+                skipped.pin_id.as_deref().unwrap_or("Unknown pin") }}{%
+                endmatch %}: {{ skipped.reason }}
+              </li>
+              {% endfor %}
+            </ul>
           </details>
-        </main>
-      </div>
+          {% endif %} {% if !report.warnings.is_empty() %}
+          <details id="scan-warnings" open>
+            <summary>{{ report.warnings.len() }} scan {% if report.warnings.len() == 1 %}warning{% else %}warnings{% endif %}</summary>
+            <ul>
+              {% for warning in report.warnings %}
+              <li>{{ warning }}</li>
+              {% endfor %}
+            </ul>
+          </details>
+          {% endif %}
+        </div>
+
+        <footer>
+          This local report loads images from Pinterest and may disappear when
+          your operating system cleans temporary files. Review marks are kept
+          in this browser and reused for unchanged matches across board selections.
+          Export decisions for a portable backup. unpin never changes your Pinterest account.
+        </footer>
+        </details>
+      </main>
     </div>
+
+    {% if !report.exact_groups.is_empty() || !report.visual_candidates.is_empty() %}
+    <div class="tray" id="tray" hidden>
+      <span class="tray-label">Removal tray</span>
+      <span class="tray-thumbs" id="tray-thumbs" aria-hidden="true"></span>
+      <span class="tray-count" id="tray-count"></span>
+      <button class="tray-start" id="tray-start" type="button">Start removing</button>
+    </div>
+    {% endif %}
 
     <div class="review-feedback" id="review-feedback" hidden>
       <span id="review-feedback-label" role="status"></span>
@@ -436,6 +412,7 @@
     </div>
     <p class="sr-only" id="interaction-status" aria-live="polite"></p>
 
+    {% match server_config %}{% when Some with (config) %}<script type="application/json" id="unpin-server">{{ config|safe }}</script>{% when None %}{% endmatch %}
     <script>
       {% include "report.js" %}
     </script>
