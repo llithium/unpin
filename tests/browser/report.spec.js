@@ -212,8 +212,9 @@ test("accepting the easy calls keeps the best copy and fills the tray", async ({
   await expect(page.locator('#visual-1 [data-remove-pin="302"]')).toBeChecked();
   await expect(page.locator('#visual-1 [data-remove-pin="303"]')).toBeChecked();
   await expect(page.locator("#easy-calls")).toBeHidden();
-  await expect(page.locator('.match-link[data-target="exact-1"] [data-chip]')).toHaveText("1 in tray");
-  await expect(page.locator('.match-link[data-target="visual-1"] [data-chip]')).toHaveText("2 in tray");
+  await expect(page.locator('.match-card:has([data-target="exact-1"]) [data-card-status-text]')).toHaveText("Removing 1 copy");
+  await expect(page.locator('.match-card:has([data-target="visual-1"]) [data-card-status-text]')).toHaveText("Removing 2 copies");
+  await expect(page.locator('.match-link[data-target="exact-1"] [data-chip]')).toHaveText("");
   await expect(page.locator("#review-progress")).toHaveText("2 / 3");
 
   await expect(page.locator("#tray")).toBeVisible();
@@ -448,15 +449,31 @@ test("gallery cards decide in one tap without opening the match", async ({ page 
   await expect(page.locator("body")).toHaveClass(/gallery-mode/);
   await expect(page.locator("#visual-1")).toHaveAttribute("data-decision", "remove");
   await expect(page.locator("#visual-1")).toHaveAttribute("data-reviewed", "true");
-  await expect(remove).toHaveAttribute("aria-pressed", "true");
-  await expect(card.locator("[data-chip]")).toHaveText("2 in tray");
+  // A decided card swaps its buttons for what was chosen, with a way to change it.
+  await expect(remove).toBeHidden();
+  await expect(card.locator("[data-card-status-text]")).toHaveText("Removing 2 copies");
+  await expect(card.locator("[data-chip]")).toHaveText("");
   await expect(page.locator("#tray-count")).toHaveText("2 pins");
+  await card.getByRole("button", { name: "Change" }).click();
+  await expect(page.locator("#visual-1")).toHaveAttribute("data-decision", "");
+  await expect(remove).toBeFocused();
   await card.getByRole("button", { name: "Keep all" }).click();
   await expect(page.locator("#visual-1")).toHaveAttribute("data-decision", "keep_all");
-  await expect(remove).toHaveAttribute("aria-pressed", "false");
+  await expect(card.locator("[data-card-status-text]")).toHaveText("Keeping all");
   await expect(page.locator("#tray")).toBeHidden();
   await page.locator("#undo-review").click();
-  await expect(page.locator("#visual-1")).toHaveAttribute("data-decision", "remove");
+  await expect(page.locator("#visual-1")).toHaveAttribute("data-decision", "");
+});
+
+test("gallery cards use the wide screen and line up their buttons", async ({ page }) => {
+  await page.setViewportSize({ width: 1920, height: 1000 });
+  await openReport(page, { gallery: true });
+  await page.locator('label[for="filter-all"]').click();
+  const nav = await page.locator(".match-nav").boundingBox();
+  expect(nav.width).toBeGreaterThan(1500);
+  const rows = await page.locator(".match-card:visible .card-quick").evaluateAll((elements) => elements.map((el) => el.getBoundingClientRect().top));
+  expect(rows.length).toBeGreaterThan(1);
+  for (const top of rows) expect(Math.abs(top - rows[0])).toBeLessThan(1);
 });
 
 test("the match view saves a decision and moves on in one step", async ({ page }) => {
@@ -566,7 +583,7 @@ test("reviewed gallery cards fit long match numbers on a narrow screen", async (
   await decide(page, "visual-1", "keep_all");
   await page.locator("#gallery-toggle").click();
   await expect(tile).toHaveAccessibleName(/Reviewed/);
-  await expect(tile.locator("[data-chip]")).toHaveText("Kept all");
+  await expect(page.locator('.match-card:has([data-target="visual-1"]) [data-card-status-text]')).toHaveText("Keeping all");
 
   const number = tile.locator(".match-number");
   await number.evaluate(label => { label.textContent = "Visual 1000"; });
@@ -919,6 +936,12 @@ test("flagged copies form a removal list whose marks survive reloads", async ({ 
 
   await page.reload();
   await expect(page.locator('#exact-1 .pin-card[data-pin-id="102"]')).toHaveAttribute("data-removed", "true");
+  // The gallery card says the copy is gone and no longer offers decisions.
+  const removedCard = page.locator('.match-card:has([data-target="exact-1"])');
+  await expect(removedCard.locator("[data-card-status-text]")).toHaveText("Removed from Pinterest");
+  await expect(removedCard.locator("[data-chip]")).toHaveText("Removed");
+  await expect(removedCard.locator("[data-card-change]")).toBeHidden();
+  await expect(removedCard.locator(".card-quick")).toBeHidden();
   await page.locator("#cleanup-toggle").click();
   await expect(row).toHaveAttribute("data-state", "removed");
   await row.getByRole("button", { name: "Put pin 102 back on the list" }).click();

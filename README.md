@@ -103,7 +103,10 @@ purpose, so they sit under **Across boards** and never count as easy calls.
   rest in the removal tray in one step, or choose **Look through them first**.
   Covers of video and story pins are never easy calls.
 - Every card has **Remove smaller** (or **Remove duplicate**) and **Keep both**
-  buttons, so most matches take one tap without opening them.
+  buttons, so most matches take one tap without opening them. Once you decide,
+  the buttons give way to what you chose (for example **Removing 1 copy**) and
+  a **Change** link; after you remove the copy on Pinterest the card says
+  **Removed from Pinterest**.
 - Open a card to compare its copies side by side. The copy that **Remove the
   smaller copy** would take is marked **Suggested to remove**. That button and
   **Keep both** save and move to the next match; `R` and `A` do the same, and

@@ -151,7 +151,7 @@
               data-scope="{{ group.scope.css_class() }}"
               data-kind="exact"
             >
-              <span class="match-stack" style="aspect-ratio: {{ group.items[0].width }} / {{ group.items[0].height }}">
+              <span class="match-stack">
                 <img class="match-thumb" src="{{ group.items[0].image_url }}" alt="" loading="lazy" referrerpolicy="no-referrer" />
                 <span class="match-count" aria-label="{{ group.items.len() }} saves">×{{ group.items.len() }}</span>
                 <span class="match-chip" data-chip></span>
@@ -169,6 +169,10 @@
               <button class="quick-remove" type="button" data-quick="remove" data-target="exact-{{ loop.index }}" aria-pressed="false">{% if group.items.len() == 2 %}Remove duplicate{% else %}Remove {{ group.items.len() - 1 }} duplicates{% endif %}</button>
               <button class="quick-keep" type="button" data-quick="keep_all" data-target="exact-{{ loop.index }}" aria-pressed="false">{% if group.items.len() == 2 %}Keep both{% else %}Keep all{% endif %}</button>
             </div>
+            <div class="card-status" data-card-status hidden>
+              <span class="card-status-text" data-card-status-text role="status"></span>
+              <button class="card-change" type="button" data-card-change data-target="exact-{{ loop.index }}">Change</button>
+            </div>
             </div>
             {% endfor %} {% for candidate in report.visual_candidates %}
             <div class="match-card">
@@ -179,7 +183,7 @@
               data-scope="{{ candidate.scope.css_class() }}"
               data-kind="visual"
             >
-              <span class="match-stack" style="aspect-ratio: {{ candidate.items[0].width }} / {{ candidate.items[0].height }}">
+              <span class="match-stack">
                 <img class="match-thumb" src="{{ candidate.items[0].image_url }}" alt="" loading="lazy" referrerpolicy="no-referrer" />
                 <span class="match-count" aria-label="{{ candidate.save_count() }} saves">×{{ candidate.save_count() }}</span>
                 <span class="match-chip" data-chip></span>
@@ -196,6 +200,10 @@
             <div class="card-quick" role="group" aria-label="Decision for Visual {{ loop.index }}">
               <button class="quick-remove" type="button" data-quick="remove" data-target="visual-{{ loop.index }}" aria-pressed="false">{% if candidate.save_count() == 2 %}Remove smaller{% else %}Remove {{ candidate.save_count() - 1 }} copies{% endif %}</button>
               <button class="quick-keep" type="button" data-quick="keep_all" data-target="visual-{{ loop.index }}" aria-pressed="false">{% if candidate.save_count() == 2 %}Keep both{% else %}Keep all{% endif %}</button>
+            </div>
+            <div class="card-status" data-card-status hidden>
+              <span class="card-status-text" data-card-status-text role="status"></span>
+              <button class="card-change" type="button" data-card-change data-target="visual-{{ loop.index }}">Change</button>
             </div>
             </div>
             {% endfor %}

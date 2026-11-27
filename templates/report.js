@@ -388,6 +388,36 @@
           writeStoredState();
         };
 
+        // Removal marks load further down; until then nothing counts as removed.
+        let isPinRemoved = () => false;
+        // A decided gallery card swaps its buttons for what was chosen.
+        const syncCard = (group) => {
+          const link = linkByTarget.get(group.id);
+          const card = link?.closest(".match-card");
+          if (!link || !card) return;
+          const decision = decisions.get(group.dataset.reviewKey);
+          const ids = decision?.action === "remove" ? decision.remove_pin_ids : [];
+          const removed = ids.length > 0 && ids.every((id) => isPinRemoved(id));
+          const status = card.querySelector("[data-card-status]");
+          const text = card.querySelector("[data-card-status-text]");
+          const quick = card.querySelector(".card-quick");
+          const decided = Boolean(decision && group.dataset.reviewed === "true");
+          const extra = smallerCopies(group).length;
+          card.dataset.decision = decided ? decision.action : "";
+          card.dataset.removed = removed ? "true" : "false";
+          if (quick) quick.hidden = decided;
+          if (status) status.hidden = !decided;
+          if (text) text.textContent = !decided ? ""
+            : removed ? (ids.length === 1 ? "Removed from Pinterest" : `${ids.length} removed from Pinterest`)
+            : decision.action === "remove" ? (ids.length === 1 ? "Removing 1 copy" : `Removing ${ids.length} copies`)
+            : decision.action === "keep_all" ? (extra === 1 ? "Keeping both" : "Keeping all")
+            : decision.action === "not_duplicate" ? "Not duplicates"
+            : "Reviewed";
+          const change = card.querySelector("[data-card-change]");
+          if (change) change.hidden = removed;
+          const chip = link.querySelector("[data-chip]");
+          if (chip) chip.textContent = removed ? "Removed" : "";
+        };
         const syncDecisionUi = (group) => {
           const decision = decisions.get(group.dataset.reviewKey);
           const reviewed = isComplete(decision);
@@ -416,16 +446,7 @@
           const link = linkByTarget.get(group.id);
           link?.classList.toggle("is-reviewed", reviewed);
           if (link) link.dataset.decision = decision?.action || "";
-          const chip = link?.querySelector("[data-chip]");
-          if (chip) {
-            const flagged = decision?.remove_pin_ids?.length || 0;
-            chip.textContent = !decision ? ""
-              : decision.action === "remove" ? `${flagged} in tray${reviewed ? "" : " · draft"}`
-              : decision.action === "keep_all" ? (smallerCopies(group).length === 1 ? "Kept both" : "Kept all")
-              : decision.action === "not_duplicate" ? "Not duplicates"
-              : decision.action === "later" ? "Later"
-              : "Reviewed";
-          }
+          syncCard(group);
         };
 
         let undoDecisions = null;
@@ -742,6 +763,14 @@
           else setDecision(group, quick.dataset.quick);
           writeStoredState();
         }));
+        document.querySelectorAll("[data-card-change]").forEach((change) => change.addEventListener("click", () => {
+          const group = document.getElementById(change.dataset.target);
+          if (!group) return;
+          setActive(group);
+          setDecision(group, "");
+          writeStoredState();
+          change.closest(".match-card")?.querySelector(".card-quick button")?.focus();
+        }));
         const transferStatus = document.querySelector("#transfer-status");
         document.querySelector("#export-review")?.addEventListener("click", () => {
           try {
@@ -847,6 +876,8 @@
             return new Map(Object.entries(JSON.parse(window.localStorage.getItem(removedStorageKey)) || {}));
           } catch (_) { return new Map(); }
         })();
+        isPinRemoved = (pinId) => removedPins.has(pinId);
+        groups.forEach(syncCard);
         const rowStatus = new Map();
         let pendingPin = null;
         let pendingSince = 0;
@@ -873,6 +904,7 @@
             saveRemovedLocally();
           }
           syncRemovedCards();
+          groups.forEach(syncCard);
         };
 
         // One entry per flagged pin in this report, grouped by board.
