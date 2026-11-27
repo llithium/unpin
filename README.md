@@ -107,6 +107,9 @@ purpose, so they sit under **Across boards** and never count as easy calls.
   the buttons give way to what you chose (for example **Removing 1 copy**) and
   a **Change** link; after you remove the copy on Pinterest the card says
   **Removed from Pinterest**.
+- The gallery is a masonry grid: every image keeps its own shape, uncropped.
+  The browser's Back and Forward buttons move between the gallery, a match and
+  the Remove step, and a link to a match opens it directly.
 - Open a card to compare its copies side by side. The copy that **Remove the
   smaller copy** would take is marked **Suggested to remove**. That button and
   **Keep both** save and move to the next match; `R` and `A` do the same, and

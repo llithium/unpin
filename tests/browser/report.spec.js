@@ -465,15 +465,65 @@ test("gallery cards decide in one tap without opening the match", async ({ page 
   await expect(page.locator("#visual-1")).toHaveAttribute("data-decision", "");
 });
 
-test("gallery cards use the wide screen and line up their buttons", async ({ page }) => {
-  await page.setViewportSize({ width: 1920, height: 1000 });
+test("the gallery stacks cards without gaps or cropping and uses the wide screen", async ({ page }) => {
+  for (const width of [1920, 390]) {
+    await page.setViewportSize({ width, height: 1000 });
+    await openReport(page, { gallery: true });
+    await page.locator('label[for="filter-all"]').click();
+    const nav = await page.locator(".match-nav").boundingBox();
+    if (width > 1000) expect(nav.width).toBeGreaterThan(1500);
+    await expect.poll(async () => {
+      const cards = await page.locator(".match-card:visible").evaluateAll((elements) => elements.map((card) => {
+        const box = card.getBoundingClientRect();
+        const stack = card.querySelector(".match-stack").getBoundingClientRect();
+        return { left: Math.round(box.left), top: box.top, bottom: box.bottom, right: box.right, stackRatio: stack.width / stack.height };
+      }));
+      const ratios = await page.locator(".match-card:visible .match-stack").evaluateAll((stacks) => stacks.map((stack) => {
+        const [w, h] = stack.style.aspectRatio.split("/").map(Number);
+        return w / h;
+      }));
+      const columns = new Map();
+      for (const card of cards) columns.set(card.left, [...(columns.get(card.left) || []), card]);
+      const rowGap = Number.parseFloat(await page.locator(".match-nav").evaluate((el) => getComputedStyle(el).getPropertyValue("--masonry-row-gap")));
+      const gapless = [...columns.values()].every((column) => column.sort((a, b) => a.top - b.top)
+        .every((card, index) => index === 0 || Math.abs(card.top - column[index - 1].bottom - rowGap) < 1.5));
+      const uncropped = cards.every((card, index) => Math.abs(card.stackRatio - ratios[index]) < 0.02);
+      const inside = cards.every((card) => card.right <= nav.x + nav.width + 1);
+      return { columns: columns.size > 1, gapless, uncropped, inside };
+    }).toEqual({ columns: true, gapless: true, uncropped: true, inside: true });
+  }
+});
+
+test("browser Back and Forward move between the gallery, a match and the Remove step", async ({ page }) => {
   await openReport(page, { gallery: true });
+  const body = page.locator("body");
   await page.locator('label[for="filter-all"]').click();
-  const nav = await page.locator(".match-nav").boundingBox();
-  expect(nav.width).toBeGreaterThan(1500);
-  const rows = await page.locator(".match-card:visible .card-quick").evaluateAll((elements) => elements.map((el) => el.getBoundingClientRect().top));
-  expect(rows.length).toBeGreaterThan(1);
-  for (const top of rows) expect(Math.abs(top - rows[0])).toBeLessThan(1);
+  await page.locator('.match-link[data-target="exact-1"]').click();
+  await expect(page).toHaveURL(/#match\/exact-1$/);
+  await expect(body).not.toHaveClass(/gallery-mode/);
+
+  // Moving between matches replaces the entry, so Back returns to the gallery.
+  await page.keyboard.press("j");
+  await expect(page).toHaveURL(/#match\/exact-2$/);
+  await page.goBack();
+  await expect(body).toHaveClass(/gallery-mode/);
+  await expect(page).not.toHaveURL(/#/);
+  await page.goForward();
+  await expect(body).not.toHaveClass(/gallery-mode/);
+  await expect(page.locator("[data-group].is-active")).toHaveAttribute("id", "exact-2");
+
+  await page.locator("#cleanup-toggle").click();
+  await expect(page).toHaveURL(/#remove$/);
+  await expect(body).toHaveClass(/cleanup-mode/);
+  await page.goBack();
+  await expect(body).not.toHaveClass(/cleanup-mode/);
+  await expect(page.locator("[data-group].is-active")).toHaveAttribute("id", "exact-2");
+  await expect(page.locator("#exact-2")).toBeVisible();
+
+  // A link to a match opens it directly.
+  await page.reload();
+  await expect(body).not.toHaveClass(/gallery-mode/);
+  await expect(page.locator("#exact-2")).toBeVisible();
 });
 
 test("the match view saves a decision and moves on in one step", async ({ page }) => {

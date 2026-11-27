@@ -327,8 +327,72 @@
           );
         };
 
+        // Gallery masonry: each card goes under the shortest column, in order,
+        // so images keep their own shape and columns have no gaps.
+        const masonryNav = document.querySelector(".match-nav");
+        const masonryCards = masonryNav ? [...masonryNav.querySelectorAll(".match-card")] : [];
+        let masonryFrame = 0;
+        function layoutMasonry() {
+          masonryFrame = 0;
+          if (!masonryNav || !isGallery() || document.body.classList.contains("cleanup-mode")) return;
+          const style = window.getComputedStyle(masonryNav);
+          const width = masonryNav.clientWidth - parseFloat(style.paddingLeft) - parseFloat(style.paddingRight);
+          if (width <= 0) return;
+          const minimum = parseFloat(style.getPropertyValue("--masonry-min")) || 250;
+          const gap = parseFloat(style.getPropertyValue("--masonry-gap")) || 0;
+          const rowGap = parseFloat(style.getPropertyValue("--masonry-row-gap")) || 0;
+          const columns = Math.max(1, Math.floor((width + gap) / (minimum + gap)));
+          masonryNav.style.setProperty("--masonry-columns", String(columns));
+          const heights = new Array(columns).fill(0);
+          masonryCards.forEach((card) => {
+            if (!card.offsetParent) return;
+            let column = 0;
+            heights.forEach((height, index) => { if (height < heights[column]) column = index; });
+            card.style.setProperty("--masonry-col", String(column));
+            card.style.top = `${heights[column]}px`;
+            heights[column] += card.offsetHeight + rowGap;
+          });
+          masonryNav.style.height = `${Math.max(0, Math.max(...heights) - rowGap)}px`;
+          masonryNav.classList.add("is-laid-out");
+        }
+        function scheduleMasonry() {
+          if (!masonryFrame) masonryFrame = window.requestAnimationFrame(layoutMasonry);
+        }
+        if (masonryNav && "ResizeObserver" in window) {
+          const masonryObserver = new ResizeObserver(scheduleMasonry);
+          masonryObserver.observe(masonryNav);
+          masonryCards.forEach((card) => masonryObserver.observe(card));
+        }
+
+        // Browser history: Back and Forward move between the gallery, a match
+        // and the Remove step. Moving from match to match replaces the entry,
+        // so Back from any match returns to where you came from.
+        let routeQueued = false;
+        let applyingRoute = false;
+        const currentRoute = () => document.body.classList.contains("cleanup-mode") ? "#remove"
+          : isGallery() || !active ? "" : `#match/${active.id}`;
+        const routeMode = (hash) => hash.startsWith("#match/") ? "match" : hash === "#remove" ? "remove" : "gallery";
+        const routeUrl = (hash) => `${window.location.pathname}${window.location.search}${hash}`;
+        const writeRoute = (push) => {
+          const hash = currentRoute();
+          if (hash === window.location.hash) return;
+          try {
+            if (push && routeMode(hash) !== routeMode(window.location.hash)) window.history.pushState(null, "", routeUrl(hash));
+            else window.history.replaceState(null, "", routeUrl(hash));
+          } catch (_) { /* Navigation history is a convenience. */ }
+        };
+        const recordRoute = () => {
+          if (routeQueued || applyingRoute) return;
+          routeQueued = true;
+          queueMicrotask(() => {
+            routeQueued = false;
+            if (!applyingRoute) writeRoute(true);
+          });
+        };
+
         const setActive = (group, options = {}) => {
           if (!group || group.classList.contains("is-filtered")) return;
+          recordRoute();
           warmGroupImages(group);
           active?.classList.remove("is-active");
           linkByTarget.get(active?.id)?.setAttribute("aria-current", "false");
@@ -367,6 +431,8 @@
         const setGallery = (enabled, options = {}) => {
           const was = isGallery();
           document.body.classList.toggle("gallery-mode", enabled);
+          recordRoute();
+          if (enabled && !was) scheduleMasonry();
           if (options.announce !== false && was !== enabled) {
             announce(enabled ? "Gallery opened" : "Match opened");
           }
@@ -1177,6 +1243,7 @@
           if (enabled === document.body.classList.contains("cleanup-mode")) return;
           document.body.classList.toggle("cleanup-mode", enabled);
           cleanup.hidden = !enabled;
+          recordRoute();
           cleanupToggle?.setAttribute("aria-pressed", enabled ? "true" : "false");
           document.querySelector("#decide-step")?.setAttribute("aria-current", enabled ? "false" : "step");
           cleanupToggle?.setAttribute("aria-current", enabled ? "step" : "false");
@@ -1340,4 +1407,34 @@
         restoreState();
         applyFilter();
         updateProgress();
+
+        const applyRoute = () => {
+          const hash = window.location.hash;
+          applyingRoute = true;
+          try {
+            if (hash === "#remove" && cleanup) {
+              setCleanup(true);
+            } else if (hash.startsWith("#match/")) {
+              const group = document.getElementById(decodeURIComponent(hash.slice(7)));
+              setCleanup(false);
+              if (group?.matches("[data-group]") && !group.classList.contains("is-filtered")) {
+                setGallery(false);
+                setActive(group, { announce: true });
+                focusMatch();
+              } else {
+                setGallery(true);
+              }
+            } else {
+              setCleanup(false);
+              setGallery(true);
+            }
+          } finally {
+            applyingRoute = false;
+          }
+          writeRoute(false);
+        };
+        window.addEventListener("popstate", () => { applyRoute(); writeStoredState(); });
+        if (window.location.hash) applyRoute();
+        else writeRoute(false);
+        scheduleMasonry();
       })();

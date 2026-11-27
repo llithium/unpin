@@ -151,7 +151,7 @@
               data-scope="{{ group.scope.css_class() }}"
               data-kind="exact"
             >
-              <span class="match-stack">
+              <span class="match-stack" style="aspect-ratio: {{ group.items[0].width }} / {{ group.items[0].height }}">
                 <img class="match-thumb" src="{{ group.items[0].image_url }}" alt="" loading="lazy" referrerpolicy="no-referrer" />
                 <span class="match-count" aria-label="{{ group.items.len() }} saves">×{{ group.items.len() }}</span>
                 <span class="match-chip" data-chip></span>
@@ -183,7 +183,7 @@
               data-scope="{{ candidate.scope.css_class() }}"
               data-kind="visual"
             >
-              <span class="match-stack">
+              <span class="match-stack" style="aspect-ratio: {{ candidate.items[0].width }} / {{ candidate.items[0].height }}">
                 <img class="match-thumb" src="{{ candidate.items[0].image_url }}" alt="" loading="lazy" referrerpolicy="no-referrer" />
                 <span class="match-count" aria-label="{{ candidate.save_count() }} saves">×{{ candidate.save_count() }}</span>
                 <span class="match-chip" data-chip></span>
