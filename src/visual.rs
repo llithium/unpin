@@ -79,6 +79,10 @@ fn script_safe_json(value: &serde_json::Value) -> String {
         .replace('&', "\\u0026")
 }
 
+/// Same-board visual matches at least this similar count as easy calls.
+/// Keep in step with `EASY_SIMILARITY` in report.js.
+const EASY_CALL_SIMILARITY: u8 = 98;
+
 fn render(report: &Report, server_config: Option<String>) -> String {
     let show_boards = report.shows_board_labels();
     let (same, cross) = report.scope_counts();
@@ -86,7 +90,16 @@ fn render(report: &Report, server_config: Option<String>) -> String {
         .exact_groups
         .iter()
         .filter(|group| group.scope == MatchScope::SameBoard && !group.preview_only())
-        .count();
+        .count()
+        + report
+            .visual_candidates
+            .iter()
+            .filter(|candidate| {
+                candidate.scope == MatchScope::SameBoard
+                    && !candidate.preview_only()
+                    && candidate.similarity_percent >= EASY_CALL_SIMILARITY
+            })
+            .count();
     ReportTemplate {
         report,
         show_boards,
@@ -291,16 +304,19 @@ mod tests {
     }
 
     #[test]
-    fn easy_calls_are_conditional_and_count_same_board_exact_groups() {
+    fn easy_calls_count_near_identical_same_board_matches() {
+        // The identical pair and the 98% similar pair are both on one board.
         let same_board = render_html(&sample_report());
         assert!(same_board.contains("id=\"easy-calls\""));
         assert!(contains_html_fragment(
             &same_board,
-            "<span id=\"easy-count\">1</span> <span id=\"easy-noun\">duplicate is an easy call</span>"
+            "<span id=\"easy-count\">2</span> <span id=\"easy-noun\">duplicates are easy calls</span>"
         ));
 
-        // Copies on different boards are never easy calls.
-        let cross_board = render_html(&multi_board_report());
+        // Less similar images, covers, and copies on different boards need a look.
+        let mut report = multi_board_report();
+        report.visual_candidates[0].similarity_percent = 97;
+        let cross_board = render_html(&report);
         assert!(!cross_board.contains("id=\"easy-calls\""));
         assert!(contains_html_fragment(
             &cross_board,

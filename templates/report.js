@@ -41,8 +41,13 @@
         let storedRevision = null;
         const actions = new Set(["reviewed", "keep_all", "remove", "later", "not_duplicate"]);
         const groupByKey = new Map(groups.map((group) => [group.dataset.reviewKey, group]));
+        // Easy calls: copies on one board that are identical or nearly so.
+        // Covers of videos and stories always need a look, and so do copies
+        // on different boards, which are often saved there on purpose.
+        const EASY_SIMILARITY = 98;
         const isQuickWin = (group) => group.dataset.scope === "same-board" &&
-          group.dataset.kind === "exact" && group.dataset.previewOnly !== "true";
+          group.dataset.previewOnly !== "true" &&
+          (group.dataset.kind === "exact" || Number(group.dataset.similarity) >= EASY_SIMILARITY);
         const isComplete = (decision) => Boolean(decision?.reviewed);
         const validKey = (key) => typeof key === "string" && /^(exact|visual):(same-board|cross-board):[a-f0-9]{64}$/.test(key);
         const parseDecisions = (value) => {
@@ -250,9 +255,25 @@
           const accept = document.querySelector("#accept-easy");
           if (accept) accept.textContent = count === 1 ? "Accept it" : `Accept all ${count}`;
         };
+        // The copy to keep: the suggested one, else the largest image. Every
+        // other save in the match, including extra saves of the kept image,
+        // is a copy to remove.
         const keptPinFor = (group) => {
           const cards = [...group.querySelectorAll(".pin-card[data-pin-id]")];
-          return (cards.find((card) => card.dataset.recommendation === "keep") || cards[0])?.dataset.pinId;
+          const area = (card) => (Number(card.dataset.width) || 0) * (Number(card.dataset.height) || 0);
+          const keep = cards.find((card) => card.dataset.recommendation === "keep") ||
+            cards.reduce((best, card) => (area(card) > area(best) ? card : best), cards[0]);
+          return keep?.dataset.pinId;
+        };
+        const smallerCopies = (group) => {
+          const keep = keptPinFor(group);
+          return [...group.querySelectorAll("[data-remove-pin]")]
+            .map((input) => input.dataset.removePin)
+            .filter((id) => id !== keep);
+        };
+        const removeSmaller = (group) => {
+          const ids = smallerCopies(group);
+          if (ids.length) setDecision(group, "remove", ids, true);
         };
 
         const updateProgress = () => {
@@ -389,6 +410,13 @@
           button?.setAttribute("aria-pressed", reviewed ? "true" : "false");
           const label = button?.querySelector("[data-review-label]");
           if (label) label.textContent = reviewed ? "Reviewed" : decision?.action === "remove" ? "Save decision" : "Mark reviewed";
+          group.querySelector("[data-remove-smaller]")?.setAttribute("aria-pressed", decision?.action === "remove" && reviewed ? "true" : "false");
+          group.dataset.draft = decision?.action === "remove" && !reviewed ? "true" : "false";
+          document.querySelectorAll(`[data-quick][data-target="${CSS.escape(group.id)}"]`).forEach((quick) => {
+            quick.setAttribute("aria-pressed", quick.dataset.quick === "remove"
+              ? (decision?.action === "remove" && reviewed ? "true" : "false")
+              : (decision?.action === quick.dataset.quick ? "true" : "false"));
+          });
           const link = linkByTarget.get(group.id);
           link?.classList.toggle("is-reviewed", reviewed);
           if (link) link.dataset.decision = decision?.action || "";
@@ -397,7 +425,7 @@
             const flagged = decision?.remove_pin_ids?.length || 0;
             chip.textContent = !decision ? ""
               : decision.action === "remove" ? `${flagged} in tray${reviewed ? "" : " · draft"}`
-              : decision.action === "keep_all" ? "Kept all"
+              : decision.action === "keep_all" ? (smallerCopies(group).length === 1 ? "Kept both" : "Kept all")
               : decision.action === "not_duplicate" ? "Not duplicates"
               : decision.action === "later" ? "Later"
               : "Reviewed";
@@ -576,6 +604,17 @@
         });
 
         groups.forEach((group) => {
+          const extra = smallerCopies(group).length;
+          const exact = group.dataset.kind === "exact";
+          const removeLabel = group.querySelector("[data-remove-smaller-label]");
+          if (removeLabel) removeLabel.textContent = extra === 1
+            ? (exact ? "Remove the duplicate" : "Remove the smaller copy")
+            : `Remove ${extra} ${exact ? "duplicates" : "smaller copies"}`;
+          const keepLabel = group.querySelector("[data-keep-label]");
+          if (keepLabel && extra === 1) keepLabel.textContent = "Keep both";
+        });
+
+        groups.forEach((group) => {
           group
             .querySelector("[data-review-button]")
             ?.addEventListener("click", () => {
@@ -601,9 +640,9 @@
           const sameBoard = scopeFilters.find(
             (filter) => filter.value === "same-board",
           );
-          const exact = kindFilters.find((filter) => filter.value === "exact");
+          const allKinds = kindFilters.find((filter) => filter.value === "all");
           if (sameBoard) sameBoard.checked = true;
-          if (exact) exact.checked = true;
+          if (allKinds) allKinds.checked = true;
           applyFilter();
           if (visible.length) {
             setGallery(false);
@@ -618,10 +657,7 @@
           offerUndo(`${accepted.length} easy ${accepted.length === 1 ? "call" : "calls"} accepted`, active, accepted.map((group) => group.dataset.reviewKey));
           let flagged = 0;
           accepted.forEach((group) => {
-            const keep = keptPinFor(group);
-            const ids = [...group.querySelectorAll("[data-remove-pin]")]
-              .map((input) => input.dataset.removePin)
-              .filter((id) => id !== keep);
+            const ids = smallerCopies(group);
             if (!ids.length) return;
             flagged += ids.length;
             decisions.set(group.dataset.reviewKey, decisionRecord(group, "remove", ids, true));
@@ -687,12 +723,28 @@
             focusReview();
             writeStoredState();
           }));
+          group.querySelector("[data-remove-smaller]")?.addEventListener("click", () => {
+            setActive(group);
+            removeSmaller(group);
+            advanceAfterReview(group);
+            focusReview();
+            writeStoredState();
+          });
           group.querySelectorAll("[data-remove-pin]").forEach((input) => input.addEventListener("change", () => {
             const ids = [...group.querySelectorAll("[data-remove-pin]:checked")].map((choice) => choice.dataset.removePin);
             setDecision(group, ids.length ? "remove" : "", ids);
             writeStoredState();
           }));
         });
+        // One-tap decisions on the gallery cards, without opening the match.
+        document.querySelectorAll("[data-quick]").forEach((quick) => quick.addEventListener("click", () => {
+          const group = document.getElementById(quick.dataset.target);
+          if (!group) return;
+          setActive(group);
+          if (quick.dataset.quick === "remove") removeSmaller(group);
+          else setDecision(group, quick.dataset.quick);
+          writeStoredState();
+        }));
         const transferStatus = document.querySelector("#transfer-status");
         document.querySelector("#export-review")?.addEventListener("click", () => {
           try {
@@ -753,8 +805,6 @@
             event.target instanceof HTMLInputElement ||
             event.target instanceof HTMLTextAreaElement ||
             event.target instanceof HTMLSelectElement ||
-            (event.target instanceof HTMLButtonElement && !event.target.classList.contains("match-link")) ||
-            event.target instanceof HTMLAnchorElement ||
             event.target?.isContentEditable
           ) {
             return;
@@ -771,6 +821,13 @@
             const reviewed = reviewedGroup.dataset.reviewed !== "true";
             setReviewed(reviewedGroup, reviewed);
             if (reviewed) advanceAfterReview(reviewedGroup);
+            writeStoredState();
+          }
+          if ((key === "r" || key === "a") && active && !isGallery()) {
+            const group = active;
+            if (key === "r") removeSmaller(group);
+            else setDecision(group, "keep_all");
+            advanceAfterReview(group);
             writeStoredState();
           }
           if (key === "o") {

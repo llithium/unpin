@@ -82,7 +82,7 @@ test("decisions are saved to the review file, not browser storage", async ({ pag
   await page.goto(reviewUrl);
   await page.locator('.match-link[data-target="exact-1"]').click();
   const match = page.locator("#exact-1");
-  await match.getByRole("checkbox", { name: "Flag for removal, pin 102", exact: true }).check();
+  await match.getByRole("checkbox", { name: "Remove this copy, pin 102", exact: true }).check();
   await match.locator("[data-review-button]").click();
   await expect.poll(async () => {
     try { return JSON.parse(await readFile(storePath, "utf8")).decisions.length; } catch (_) { return 0; }

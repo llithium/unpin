@@ -98,12 +98,16 @@ top of the page.
 duplicates on the same board. Copies on different boards are often saved on
 purpose, so they sit under **Across boards** and never count as easy calls.
 
-- **Easy calls** are the same image saved more than once on one board. **Accept
-  all** keeps the best copy of each and puts the rest in the removal tray in one
-  step, or choose **Look through them first** to check each one.
-- Open any card to compare its copies side by side, tick **Flag for removal**
-  on the copies you don't want, and save the decision. `J` and `K` move between
-  matches, `E` saves, and `O` or `Escape` goes back to the gallery.
+- **Easy calls** are the same image, or a 98% or closer match, saved more than
+  once on one board. **Accept all** keeps the largest copy of each and puts the
+  rest in the removal tray in one step, or choose **Look through them first**.
+  Covers of video and story pins are never easy calls.
+- Every card has **Remove smaller** (or **Remove duplicate**) and **Keep both**
+  buttons, so most matches take one tap without opening them.
+- Open a card to compare its copies side by side. **Remove the smaller copy**
+  and **Keep both** save and move to the next match; `R` and `A` do the same,
+  and `J` and `K` move between matches. To pick copies yourself, tick **Remove
+  this copy** and save. `O` or `Escape` goes back to the gallery.
 - Everything flagged collects in the removal tray at the bottom of the page.
 
 **2 · Remove.** Choose **Start removing** on the tray.

@@ -101,7 +101,7 @@
           <section class="easy-calls" id="easy-calls" aria-labelledby="easy-calls-title">
             <div class="easy-copy">
               <h2 id="easy-calls-title"><span id="easy-count">{{ quick_wins }}</span> <span id="easy-noun">{% if quick_wins == 1 %}duplicate is an easy call{% else %}duplicates are easy calls{% endif %}</span></h2>
-              <p>The same image saved more than once on the same board. Accepting keeps the sharpest copy of each and puts the rest in your removal tray. You can still change any of them.</p>
+              <p>The same or nearly the same image, saved more than once on one board. Accepting keeps the largest copy of each and puts the rest in your removal tray. You can still change any of them.</p>
             </div>
             <div class="easy-actions">
               <button class="primary-action" id="accept-easy" type="button">Accept all</button>
@@ -143,6 +143,7 @@
 
           <nav class="match-nav" aria-label="Duplicate matches">
             {% for group in report.exact_groups %}
+            <div class="match-card">
             <button
               class="match-link {{ group.scope.css_class() }}"
               type="button"
@@ -164,7 +165,13 @@
               </span>
               <span class="match-link-state"><span class="sr-only">Reviewed</span></span>
             </button>
+            <div class="card-quick" role="group" aria-label="Decision for Exact {{ loop.index }}">
+              <button class="quick-remove" type="button" data-quick="remove" data-target="exact-{{ loop.index }}" aria-pressed="false">{% if group.items.len() == 2 %}Remove duplicate{% else %}Remove {{ group.items.len() - 1 }} duplicates{% endif %}</button>
+              <button class="quick-keep" type="button" data-quick="keep_all" data-target="exact-{{ loop.index }}" aria-pressed="false">{% if group.items.len() == 2 %}Keep both{% else %}Keep all{% endif %}</button>
+            </div>
+            </div>
             {% endfor %} {% for candidate in report.visual_candidates %}
+            <div class="match-card">
             <button
               class="match-link {{ candidate.scope.css_class() }}"
               type="button"
@@ -186,6 +193,11 @@
               </span>
               <span class="match-link-state"><span class="sr-only">Reviewed</span></span>
             </button>
+            <div class="card-quick" role="group" aria-label="Decision for Visual {{ loop.index }}">
+              <button class="quick-remove" type="button" data-quick="remove" data-target="visual-{{ loop.index }}" aria-pressed="false">{% if candidate.save_count() == 2 %}Remove smaller{% else %}Remove {{ candidate.save_count() - 1 }} copies{% endif %}</button>
+              <button class="quick-keep" type="button" data-quick="keep_all" data-target="visual-{{ loop.index }}" aria-pressed="false">{% if candidate.save_count() == 2 %}Keep both{% else %}Keep all{% endif %}</button>
+            </div>
+            </div>
             {% endfor %}
           </nav>
         </section>
@@ -205,7 +217,7 @@
               <svg class="control-icon" viewBox="0 0 16 16" aria-hidden="true"><path d="M6.25 3.25 11 8l-4.75 4.75" /></svg>
             </button>
           </span>
-          <span class="focus-hint" aria-hidden="true"><kbd>J</kbd> <kbd>K</kbd> next / previous · <kbd>E</kbd> mark reviewed</span>
+          <span class="focus-hint" aria-hidden="true"><kbd>R</kbd> remove · <kbd>A</kbd> keep all · <kbd>J</kbd> <kbd>K</kbd> next / previous</span>
         </div>
 
         <section class="cleanup" id="cleanup" aria-labelledby="cleanup-title" hidden>
@@ -275,6 +287,7 @@
           data-group
           data-scope="{{ candidate.scope.css_class() }}"
           data-kind="visual"
+          data-similarity="{{ candidate.similarity_percent }}"
           data-review-key="{{ candidate.review_key() }}"
           data-reviewed="false"
           style="--preview-width: {{ candidate.items[0].width }}; --preview-height: {{ candidate.items[0].height }}"
@@ -300,7 +313,7 @@
               {% let copies = candidate.copies[loop.index0] %}
               {% if !copies.is_empty() %}
               <details class="additional-saves"><summary>{{ copies.len() }} additional {% if copies.len() == 1 %}save{% else %}saves{% endif %}</summary>
-                <ul>{% for copy in copies %}<li data-pin-id="{{ copy.pin_id }}" data-media-kind="{{ copy.media_kind.as_str() }}" data-image-sha256="{{ copy.image_sha256 }}"{% match copy.board %}{% when Some with (board) %} data-board="{{ board }}"{% when None %}{% endmatch %}><label class="removal-choice"><input type="checkbox" data-remove-pin="{{ copy.pin_id }}" aria-label="Flag for removal, pin {{ copy.pin_id }}" /><span>Flag for removal</span></label><a data-image-url="{{ copy.image_url }}" href="{{ copy.pin_url }}" target="_blank" rel="noopener noreferrer">Pin {{ copy.pin_id }}</a>{% match copy.board %}{% when Some with (board) %} · {{ board }}{% when None %}{% endmatch %}</li>{% endfor %}</ul>
+                <ul>{% for copy in copies %}<li data-pin-id="{{ copy.pin_id }}" data-media-kind="{{ copy.media_kind.as_str() }}" data-image-sha256="{{ copy.image_sha256 }}"{% match copy.board %}{% when Some with (board) %} data-board="{{ board }}"{% when None %}{% endmatch %}><label class="removal-choice"><input type="checkbox" data-remove-pin="{{ copy.pin_id }}" aria-label="Remove this copy, pin {{ copy.pin_id }}" /><span>Remove this copy</span></label><a data-image-url="{{ copy.image_url }}" href="{{ copy.pin_url }}" target="_blank" rel="noopener noreferrer">Pin {{ copy.pin_id }}</a>{% match copy.board %}{% when Some with (board) %} · {{ board }}{% when None %}{% endmatch %}</li>{% endfor %}</ul>
               </details>
               {% endif %}
             </div>

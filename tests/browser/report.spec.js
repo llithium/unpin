@@ -168,8 +168,9 @@ test("the gallery opens on same-board matches with the easy calls first", async 
   await page.locator('label[for="filter-same"]').click();
 
   await expect(page.locator("#easy-calls")).toBeVisible();
-  await expect(page.locator("#easy-calls h2")).toHaveText("1 duplicate is an easy call");
-  await expect(page.locator("#accept-easy")).toHaveText("Accept it");
+  // The identical pair and the 98% similar pair on one board.
+  await expect(page.locator("#easy-calls h2")).toHaveText("2 duplicates are easy calls");
+  await expect(page.locator("#accept-easy")).toHaveText("Accept all 2");
   await expect(page.locator("#tray")).toBeHidden();
 });
 
@@ -182,15 +183,19 @@ test("Look through them first selects the easy calls and advances review", async
     .toBeGreaterThanOrEqual(1);
 
   await expect(page.locator("#filter-same")).toBeChecked();
-  await expect(page.locator("#kind-exact")).toBeChecked();
+  await expect(page.locator("#kind-all")).toBeChecked();
   await expect(page.locator("#unreviewed-only")).toBeChecked();
-  await expect(visibleGroups(page)).toHaveCount(1);
+  await expect(visibleGroups(page)).toHaveCount(2);
   await expect(page.locator("body")).not.toHaveClass(/gallery-mode/);
   await expect(page.locator('[data-group].is-active')).toHaveAttribute("id", "exact-1");
 
-  await page.locator("#exact-1 [data-review-button]").click();
+  await page.locator("#exact-1 [data-remove-smaller]").click();
+  await expect(page.locator('[data-group].is-active')).toHaveAttribute("id", "visual-1");
+  await expect(page.locator("#easy-count")).toHaveText("1");
+  await page.keyboard.press("a");
+  await expect(page.locator("#visual-1")).toHaveAttribute("data-decision", "keep_all");
   await expect(page.locator("#easy-calls")).toBeHidden();
-  await expect(page.locator("#review-progress")).toHaveText("1 / 3");
+  await expect(page.locator("#review-progress")).toHaveText("2 / 3");
 });
 
 test("accepting the easy calls keeps the best copy and fills the tray", async ({ page }) => {
@@ -201,15 +206,20 @@ test("accepting the easy calls keeps the best copy and fills the tray", async ({
   await expect(page.locator('#exact-1 [data-remove-pin="102"]')).toBeChecked();
   await expect(page.locator('#exact-1 [data-remove-pin="101"]')).not.toBeChecked();
   await expect(page.locator("#exact-2")).toHaveAttribute("data-decision", "");
+  // The similar match keeps its largest image and drops the rest, extra saves included.
+  await expect(page.locator('#visual-1 [data-remove-pin="301"]')).not.toBeChecked();
+  await expect(page.locator('#visual-1 [data-remove-pin="302"]')).toBeChecked();
+  await expect(page.locator('#visual-1 [data-remove-pin="303"]')).toBeChecked();
   await expect(page.locator("#easy-calls")).toBeHidden();
   await expect(page.locator('.match-link[data-target="exact-1"] [data-chip]')).toHaveText("1 in tray");
-  await expect(page.locator("#review-progress")).toHaveText("1 / 3");
+  await expect(page.locator('.match-link[data-target="visual-1"] [data-chip]')).toHaveText("2 in tray");
+  await expect(page.locator("#review-progress")).toHaveText("2 / 3");
 
   await expect(page.locator("#tray")).toBeVisible();
-  await expect(page.locator("#tray-count")).toHaveText("1 pin");
-  await expect(page.locator("#tray-thumbs img")).toHaveCount(1);
+  await expect(page.locator("#tray-count")).toHaveText("3 pins");
+  await expect(page.locator("#tray-thumbs img")).toHaveCount(3);
   await expect(page.locator("#tray-start")).toBeFocused();
-  await expect(page.locator("#cleanup-count")).toHaveText("1");
+  await expect(page.locator("#cleanup-count")).toHaveText("3");
 
   await page.locator("#undo-review").click();
   await expect(page.locator("#exact-1")).toHaveAttribute("data-decision", "");
@@ -237,15 +247,16 @@ test("the remove step shows one pin at a time with what stays behind", async ({ 
   // Keeping it takes it out of the tray but keeps the match reviewed.
   await current.getByRole("button", { name: "Keep this one" }).click();
   await expect(page.locator("#exact-1")).toHaveAttribute("data-decision", "keep_all");
-  await expect(current).toBeHidden();
-  await expect(page.locator("#cleanup-empty")).toBeVisible();
+  await expect(current.locator(".current-title")).toHaveText("Pin 303 · Mood board");
   await page.locator("#undo-review").click();
   await expect(page.locator("#exact-1")).toHaveAttribute("data-decision", "remove");
-  await expect(current).toBeVisible();
 
-  await current.getByRole("button", { name: "I deleted it" }).click();
+  for (const pin of ["303", "302", "102"]) {
+    await expect(current.locator(".current-title")).toContainText(`Pin ${pin}`);
+    await current.getByRole("button", { name: "I deleted it" }).click();
+  }
   await expect(page.locator("#cleanup-done")).toBeVisible();
-  await expect(page.locator("#cleanup-progress")).toHaveText("1 of 1");
+  await expect(page.locator("#cleanup-progress")).toHaveText("3 of 3");
   await expect(current).toBeHidden();
 
   await page.locator("#decide-step").click();
@@ -276,9 +287,6 @@ test("focus navigation, gallery, keyboard shortcuts, and active state stay coher
     .poll(() => page.evaluate(() => window.__storageWrites.length))
     .toBe(1);
   await expect(page.locator('[data-group].is-active')).toHaveAttribute("id", "exact-2");
-  await page.locator("#next-match").focus();
-  await page.keyboard.press("j");
-  await expect(page.locator('[data-group].is-active')).toHaveAttribute("id", "exact-2");
   await page.locator("#exact-2 [data-remove-pin]").first().focus();
   await page.keyboard.press("j");
   await expect(page.locator('[data-group].is-active')).toHaveAttribute("id", "exact-2");
@@ -286,6 +294,12 @@ test("focus navigation, gallery, keyboard shortcuts, and active state stay coher
   await page.keyboard.press("j");
   await expect(page.locator('[data-group].is-active')).toHaveAttribute("id", "visual-1");
   await page.keyboard.press("k");
+  await expect(page.locator('[data-group].is-active')).toHaveAttribute("id", "exact-2");
+  // Shortcuts keep working after a button click leaves focus on a button.
+  await page.locator("#next-match").focus();
+  await page.keyboard.press("k");
+  await expect(page.locator('[data-group].is-active')).toHaveAttribute("id", "exact-1");
+  await page.keyboard.press("j");
   await expect(page.locator('[data-group].is-active')).toHaveAttribute("id", "exact-2");
 
   await page.locator("#gallery-toggle").click();
@@ -414,6 +428,7 @@ test("review advance preserves keyboard focus and Undo restores the match", asyn
   await page.locator("#gallery-toggle").click();
   await page.locator("#quick-wins").click();
   await review.click();
+  await page.locator("#visual-1 [data-review-button]").click();
   await expect(page.locator("#clear-filters")).toBeFocused();
   await page.locator("#clear-filters").click();
   await expect(visibleGroups(page)).toHaveCount(3);
@@ -421,7 +436,42 @@ test("review advance preserves keyboard focus and Undo restores the match", asyn
   await page.locator("#reset-review").click();
   await page.locator("#undo-review").click();
   await expect(page.locator("#exact-1")).toHaveAttribute("data-reviewed", "true");
-  await expect(page.locator("#review-progress")).toHaveText("1 / 3");
+  await expect(page.locator("#review-progress")).toHaveText("2 / 3");
+});
+
+test("gallery cards decide in one tap without opening the match", async ({ page }) => {
+  await openReport(page, { gallery: true });
+  const card = page.locator('.match-card:has([data-target="visual-1"])');
+  const remove = card.getByRole("button", { name: "Remove 2 copies" });
+  await remove.click();
+  await expect(page.locator("body")).toHaveClass(/gallery-mode/);
+  await expect(page.locator("#visual-1")).toHaveAttribute("data-decision", "remove");
+  await expect(page.locator("#visual-1")).toHaveAttribute("data-reviewed", "true");
+  await expect(remove).toHaveAttribute("aria-pressed", "true");
+  await expect(card.locator("[data-chip]")).toHaveText("2 in tray");
+  await expect(page.locator("#tray-count")).toHaveText("2 pins");
+  await card.getByRole("button", { name: "Keep all" }).click();
+  await expect(page.locator("#visual-1")).toHaveAttribute("data-decision", "keep_all");
+  await expect(remove).toHaveAttribute("aria-pressed", "false");
+  await expect(page.locator("#tray")).toBeHidden();
+  await page.locator("#undo-review").click();
+  await expect(page.locator("#visual-1")).toHaveAttribute("data-decision", "remove");
+});
+
+test("the match view saves a decision and moves on in one step", async ({ page }) => {
+  await openReport(page);
+  await expect(page.locator("#exact-1 [data-remove-smaller]")).toHaveText(/Remove the duplicate/);
+  await expect(page.locator("#exact-1 [data-decision-action=keep_all]")).toHaveText(/Keep both/);
+  await page.locator("#exact-1 [data-remove-smaller]").click();
+  await expect(page.locator("#exact-1")).toHaveAttribute("data-decision", "remove");
+  await expect(page.locator("#exact-1")).toHaveAttribute("data-reviewed", "true");
+  await expect(page.locator('#exact-1 [data-remove-pin="102"]')).toBeChecked();
+  await expect(page.locator('[data-group].is-active')).toHaveAttribute("id", "exact-2");
+  await page.keyboard.press("r");
+  await expect(page.locator("#exact-2")).toHaveAttribute("data-decision", "remove");
+  await expect(page.locator('[data-group].is-active')).toHaveAttribute("id", "visual-1");
+  await expect(page.locator("#visual-1 [data-remove-smaller]")).toHaveText(/Remove 2 smaller copies/);
+  await expect(page.locator("#review-progress")).toHaveText("2 / 3");
 });
 
 test("a completed queue explains completion and can be revisited", async ({ page }) => {
@@ -510,7 +560,7 @@ test("long content and three-pin groups fit narrow, tablet, desktop, and gallery
 test("reviewed gallery cards fit long match numbers on a narrow screen", async ({ page }) => {
   await page.setViewportSize({ width: 320, height: 844 });
   await openReport(page, { gallery: true });
-  const tile = page.locator('[data-target="visual-1"]');
+  const tile = page.locator('.match-link[data-target="visual-1"]');
   await tile.click();
   await decide(page, "visual-1", "keep_all");
   await page.locator("#gallery-toggle").click();
@@ -748,9 +798,9 @@ for (const width of [320, 1280]) {
     await page.setViewportSize({ width, height: 900 });
     await openReport(page);
     const match = page.locator('#exact-1');
-    const flag = match.getByRole('checkbox', { name: 'Flag for removal, pin 102', exact: true });
+    const flag = match.getByRole('checkbox', { name: 'Remove this copy, pin 102', exact: true });
     await expect(match.locator('.decision-help')).toBeVisible();
-    await expect(match.locator('.decision-help')).toHaveText('Flagged copies are listed under Remove, ready to delete on Pinterest.');
+    await expect(match.locator('.decision-help')).toHaveText('Both choices save and move to the next match. To pick copies yourself, tick Remove this copy and save.');
     await expect(page.locator('.report-tools')).not.toHaveAttribute('open', '');
     await flag.focus();
     await flag.press('Space');
@@ -784,7 +834,7 @@ test('pin controls have specific accessible names, including additional saves', 
   await openReport(page);
   const exact = page.locator('#exact-1');
   for (const id of ['101', '102']) {
-    await expect(exact.getByRole('checkbox', { name: `Flag for removal, pin ${id}`, exact: true })).toHaveCount(1);
+    await expect(exact.getByRole('checkbox', { name: `Remove this copy, pin ${id}`, exact: true })).toHaveCount(1);
     await expect(exact.getByRole('link', { name: `Open pin ${id}`, exact: true })).toHaveAttribute('href', `https://www.pinterest.com/pin/${id}/`);
     await expect(exact.getByRole('link', { name: `Open image for pin ${id}`, exact: true })).toHaveCount(1);
   }
@@ -792,7 +842,7 @@ test('pin controls have specific accessible names, including additional saves', 
   const visual = page.locator('#visual-1');
   await expect(page.locator('.match-link[data-target="visual-1"]')).toContainText('98%');
   await visual.getByText('1 additional save', { exact: true }).click();
-  const extra = visual.getByRole('checkbox', { name: 'Flag for removal, pin 303', exact: true });
+  const extra = visual.getByRole('checkbox', { name: 'Remove this copy, pin 303', exact: true });
   await extra.check();
   await expect(visual.locator('[data-decision-notice]')).toHaveText('Draft: 1 copy flagged');
   await page.reload();
@@ -877,7 +927,7 @@ test("flagged copies form a removal list whose marks survive reloads", async ({ 
 
   await openMatch(page, "exact-1");
   const match = page.locator("#exact-1");
-  await match.getByRole("checkbox", { name: "Flag for removal, pin 102", exact: true }).check();
+  await match.getByRole("checkbox", { name: "Remove this copy, pin 102", exact: true }).check();
   await match.locator("[data-review-button]").click();
   await expect(page.locator("#cleanup-count")).toHaveText("1");
   await page.locator("#cleanup-toggle").click();
